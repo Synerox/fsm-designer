@@ -1,0 +1,114 @@
+# FSM Designer MCP server
+
+讓 AI agent（Claude Desktop、Claude Code 或任何 MCP client）透過 FSM Designer
+畫狀態轉移圖：從零建立或修改圖、從 **Verilog / SystemVerilog** 程式碼匯入、
+用和桌面版相同的自動排版模式整理，並匯出 **PNG、SVG、LaTeX/TikZ** 或 `.fsm.json`。
+它使用和桌面版編輯器同一套 `@fsm/core`（模型、排版、匯出），所以 agent 畫出來的圖
+和你手動畫的一模一樣，存成的 `.fsm.json` 也可以直接用桌面版開啟繼續編輯。
+
+## 建置
+
+需要 Node 22 以上與 pnpm（`npm install -g pnpm`）。
+
+```powershell
+cd D:\FSMDesigner
+pnpm install
+pnpm -r build        # 會產生 packages\core\dist 與 apps\mcp-server\dist
+```
+
+伺服器入口是 `D:\FSMDesigner\apps\mcp-server\dist\index.js`，以 stdio 溝通：
+
+```
+node dist\index.js [--dir <工作資料夾>] [--app <FSM Designer.exe 路徑>]
+```
+
+- `--dir`（或環境變數 `FSM_WORKSPACE`）：圖存成 `<工作資料夾>\<名稱>.fsm.json`。
+  沒指定時是啟動時所在目錄下的 `fsm-workspace`，建議一定要指定。
+- `--app`（或環境變數 `FSM_DESIGNER_APP`）：`open_in_app` 要啟動的桌面版程式。
+  沒指定時會在 `%LOCALAPPDATA%\FSM Designer`、`%ProgramFiles%\FSM Designer`
+  找 `FSM Designer.exe` / `fsm-designer.exe`（安裝檔的預設位置）。
+
+## 在 Windows 上連接 Claude
+
+以下假設程式在 `D:\FSMDesigner`，圖存在 `D:\FSMDiagrams`（不存在會自動建立）。
+
+### Claude Code
+
+在 PowerShell 或命令提示字元執行（`--scope user` 讓每個專案都能用）：
+
+```powershell
+claude mcp add fsm-designer --scope user -- node D:\FSMDesigner\apps\mcp-server\dist\index.js --dir D:\FSMDiagrams
+claude mcp list      # 應該看到 fsm-designer: ... ✓ Connected
+```
+
+### Claude Desktop
+
+1. 開啟 Claude Desktop ▸ 設定 ▸ 開發者（Developer）▸ 編輯設定（Edit Config），
+   或直接編輯 `%APPDATA%\Claude\claude_desktop_config.json`。
+2. 加入以下內容（JSON 裡的反斜線要寫兩次）：
+
+```json
+{
+  "mcpServers": {
+    "fsm-designer": {
+      "command": "node",
+      "args": [
+        "D:\\FSMDesigner\\apps\\mcp-server\\dist\\index.js",
+        "--dir", "D:\\FSMDiagrams"
+      ]
+    }
+  }
+}
+```
+
+3. 完全結束 Claude Desktop（系統匣圖示 ▸ 結束）再重開，輸入框的工具圖示裡會出現 fsm-designer。
+
+若出現「找不到 node」，把 `"command"` 改成 node 的完整路徑，例如
+`"C:\\Program Files\\nodejs\\node.exe"`。桌面版若裝在其他位置，在 `args` 加上
+`"--app", "D:\\路徑\\FSM Designer.exe"`。
+
+### 試試看
+
+- 「畫一個偵測序列 1011 的 Moore FSM，輸入 x、輸出 z，匯出 PNG 給我看。」
+- 「把 D:\rtl\uart_rx.v 裡的狀態機畫成狀態圖，用圓形排版，匯出 LaTeX。」
+- 「S0 和 S1 之間的線改成平行直線，間距 24，隱藏線上文字後匯出 SVG 到 out\seq.svg。」
+- 「在 FSM Designer 裡打開這張圖。」
+
+## 工具
+
+| 工具 | 功能 |
+| --- | --- |
+| `create_fsm` | 一次建立（或用 `overwrite` 取代）整張圖：狀態、轉移、輸入輸出、clock/reset。會驗證、自動排版並存檔。建議優先使用。 |
+| `list_fsms`、`get_fsm`、`delete_fsm` | 列出、讀取（摘要 + 驗證結果，可附原始 JSON）、刪除圖。 |
+| `set_signals` | Moore/Mealy、輸入輸出埠（寬度、預設值）、clock 與 reset。 |
+| `add_state`、`update_state`、`remove_state` | 狀態：名稱、顯示文字 `label`（如 `S₀`）、起始/接受、Moore 輸出、顏色、半徑 `radius`、字體大小、起始箭頭方向 `initialFrom`、位置。可用名稱或 id 指定。 |
+| `add_transition`、`update_transition`、`remove_transition` | 轉移：條件、Mealy 輸出、優先順序、彎曲 `curve`、平行線間距 `gap`、自迴圈方向 `loopSide`、字體大小。 |
+| `set_line_style` | 兩個狀態之間的線：`straight`（直線，來回兩條會平行錯開，`gap` 調間距）、`curved`（曲線）、`auto`（回到自動）。 |
+| `auto_layout` | 自動排版，和桌面版按鈕相同（單一規則、沒有選項）：比較方格、分層流程、蛇形與環形（主迴圈繞成長方形，短迴圈貼在旁邊）挑最好的，避免太長的箭頭，互指的三角形調成正三角形，互不相連的子圖分開排再並排；回傳選中的排法與修不掉的問題。`labels: "none"` 依隱藏文字的畫法排得更緊湊。 |
+| `import_verilog` | 分析 Verilog/SystemVerilog（`code` 或檔案 `path`）：找出狀態暫存器、reset 狀態、每條轉移的條件、Moore/Mealy 輸出，排版後存檔並回傳 PNG 與報告。支援寫法見 `packages/core/src/import/README.md`。 |
+| `validate_fsm` | 錯誤（沒有狀態、沒有 reset 狀態、多條無條件轉移）與警告（到不了的狀態、重複條件、未宣告的輸入）。 |
+| `export_fsm` | `png`（同時以圖片回傳，agent 可以檢查自己的成果）、`svg`、`latex`（TikZ，可用 pdflatex 編譯）、`json`。`path` 另存檔案（相對路徑放在工作資料夾）；`labels` = `all` / `noLoops` / `none` 對應桌面版的「全部／隱藏」線上文字。 |
+| `open_in_app` | 用 FSM Designer 桌面版開啟這張圖，讓你接手手動編輯。桌面版不會自動重新讀檔，agent 之後再修改時需要重新開啟。 |
+
+每張圖也可以用 MCP resource `fsm://<名稱>` 讀取。
+
+### 慣例
+
+- 狀態、訊號、FSM 名稱都是 Verilog 識別字（`IDLE`、`got_1`）；想顯示其他文字用 `label`。
+- 條件是對輸入的 Verilog 布林運算式：`x`、`!x`、`req[1] && !req[0]`、`cnt == 2'd3`。空字串代表「一定 / 其他情況」，匯出時若同一狀態還有其他轉移會標成 `else`（`elseLabels: false` 可關掉）。
+- Moore 輸出放在狀態，Mealy 輸出放在轉移：`{"z": 1}`、`{"state_out": "2'b10"}`。
+- 同一狀態的轉移依 `priority`（小的先）再依清單順序判斷。
+- 預設 clock `clk`、reset `rst_n`（低電位有效、非同步）。
+
+## 架構
+
+`src/tools.ts` 的工具只透過 `src/store.ts` 的 `DiagramStore` 介面讀寫圖，目前是
+`FileStore`（工作資料夾裡的 `.fsm.json`），桌面版可以直接開啟。日後若桌面版提供
+本機連線（例如 WebSocket），只要另外實作一個 `DiagramStore` 就能讓 agent 直接編輯
+桌面版正在開啟的圖，工具本身不用改。`src/app.ts` 負責啟動桌面版。
+
+## 測試
+
+```powershell
+pnpm --filter @fsm/mcp-server test   # 透過 stdio 啟動真正的伺服器，逐一呼叫每個工具
+```

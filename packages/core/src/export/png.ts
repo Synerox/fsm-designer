@@ -1,0 +1,26 @@
+// PNG export: rasterises the SVG with resvg (a native module, loaded lazily so
+// browser builds of @fsm/core never pull it in).
+
+import { renderSvg } from "./svg.ts";
+import type { SvgOptions } from "./svg.ts";
+import type { FsmDiagram } from "../model.ts";
+
+export interface PngOptions extends SvgOptions {
+  scale?: number; // pixel density multiplier, default 2
+}
+
+export async function renderPng(d: FsmDiagram, opts: PngOptions = {}): Promise<Buffer> {
+  const svg = renderSvg(d, opts);
+  let Resvg: typeof import("@resvg/resvg-js").Resvg;
+  try {
+    ({ Resvg } = await import("@resvg/resvg-js"));
+  } catch {
+    throw new Error("PNG export needs the optional dependency @resvg/resvg-js (pnpm add @resvg/resvg-js)");
+  }
+  const r = new Resvg(svg, {
+    fitTo: { mode: "zoom", value: opts.scale ?? 2 },
+    font: { loadSystemFonts: true, defaultFontFamily: "Inter" },
+    background: opts.background === "none" ? undefined : opts.background ?? "#ffffff",
+  });
+  return r.render().asPng();
+}

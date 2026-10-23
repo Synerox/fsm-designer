@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "name": "arbiter",
+  "type": "mealy",
+  "clock": { "name": "clk" },
+  "reset": { "name": "rst_n", "activeLow": true, "async": true },
+  "inputs": [{ "name": "req", "width": 2 }],
+  "outputs": [
+    { "name": "grant", "width": 2, "default": 0 },
+    { "name": "ack", "width": 1, "default": 0 }
+  ],
+  "states": [
+    { "id": "idle", "name": "IDLE", "isInitial": true, "isAccepting": false, "outputs": {} },
+    { "id": "g0", "name": "GRANT0", "isInitial": false, "isAccepting": false, "outputs": { "grant": "2'b01" } },
+    { "id": "g1", "name": "GRANT1", "isInitial": false, "isAccepting": false, "outputs": { "grant": "2'b10" } }
+  ],
+  "transitions": [
+    { "id": "t0", "from": "idle", "to": "idle", "condition": "", "outputs": {}, "priority": 10 },
+    { "id": "t1", "from": "idle", "to": "g1", "condition": "req[1]", "outputs": { "ack": 1 }, "priority": 2 },
+    { "id": "t2", "from": "idle", "to": "g0", "condition": "req[0]", "outputs": { "ack": 1 }, "priority": 1 },
+    { "id": "t3", "from": "g0", "to": "g1", "condition": "!req[0] && req[1]", "outputs": {} },
+    { "id": "t4", "from": "g0", "to": "idle", "condition": "!req[0]", "outputs": {} },
+    { "id": "t5", "from": "g1", "to": "g0", "condition": "!req[1] && req[0]", "outputs": {} },
+    { "id": "t6", "from": "g1", "to": "idle", "condition": "!req[1]", "outputs": {} }
+  ]
+}

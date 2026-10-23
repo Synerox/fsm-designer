@@ -1,0 +1,15 @@
+{
+  "description": "Two-requester arbiter: req[0] wins from IDLE (priority field), grant held until released, ack is a Mealy pulse on leaving IDLE.",
+  "vectors": [
+    { "in": { "req": 0 }, "state": "idle", "out": { "grant": 0, "ack": 0 } },
+    { "in": { "req": 3 }, "state": "idle", "out": { "grant": 0, "ack": 1 } },
+    { "in": { "req": 3 }, "state": "g0", "out": { "grant": 1, "ack": 0 } },
+    { "in": { "req": 2 }, "state": "g0", "out": { "grant": 1, "ack": 0 } },
+    { "in": { "req": 2 }, "state": "g1", "out": { "grant": 2, "ack": 0 } },
+    { "in": { "req": 0 }, "state": "g1", "out": { "grant": 2, "ack": 0 } },
+    { "in": { "req": 2 }, "state": "idle", "out": { "grant": 0, "ack": 1 } },
+    { "in": { "req": 1 }, "state": "g1", "out": { "grant": 2, "ack": 0 } },
+    { "in": { "req": 0 }, "state": "g0", "out": { "grant": 1, "ack": 0 } },
+    { "in": { "req": 0 }, "state": "idle", "out": { "grant": 0, "ack": 0 } }
+  ]
+}

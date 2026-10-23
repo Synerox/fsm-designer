@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "name": "traffic_light",
+  "type": "moore",
+  "clock": { "name": "clk" },
+  "reset": { "name": "rst", "activeLow": false, "async": false },
+  "inputs": [
+    { "name": "car", "width": 1 },
+    { "name": "timer_done", "width": 1 }
+  ],
+  "outputs": [
+    { "name": "main_light", "width": 2, "default": 0 },
+    { "name": "side_light", "width": 2, "default": 0 },
+    { "name": "timer_start", "width": 1, "default": 0 }
+  ],
+  "states": [
+    { "id": "mg", "name": "MAIN_GREEN", "isInitial": true, "isAccepting": false, "outputs": { "main_light": 2, "side_light": 0 } },
+    { "id": "my", "name": "MAIN_YELLOW", "isInitial": false, "isAccepting": false, "outputs": { "main_light": 1, "side_light": 0, "timer_start": 1 } },
+    { "id": "sg", "name": "SIDE_GREEN", "isInitial": false, "isAccepting": false, "outputs": { "main_light": 0, "side_light": "2'b10" } },
+    { "id": "sy", "name": "SIDE_YELLOW", "isInitial": false, "isAccepting": false, "outputs": { "main_light": 0, "side_light": 1, "timer_start": 1 } }
+  ],
+  "transitions": [
+    { "id": "t0", "from": "mg", "to": "my", "condition": "car && timer_done", "outputs": {} },
+    { "id": "t1", "from": "my", "to": "sg", "condition": "timer_done", "outputs": {} },
+    { "id": "t2", "from": "sg", "to": "sy", "condition": "timer_done || !car", "outputs": {} },
+    { "id": "t3", "from": "sy", "to": "mg", "condition": "timer_done", "outputs": {} }
+  ]
+}

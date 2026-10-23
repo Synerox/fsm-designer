@@ -1,0 +1,374 @@
+import { useEffect, useState } from "react";
+import { expandShortcut, planDiagram } from "@fsm/core";
+import { Canvas, MAX_ZOOM, zoomAround } from "./Canvas.tsx";
+import type { GridOptions, GridStyle, View } from "./Canvas.tsx";
+import { Hints } from "./Hints.tsx";
+import { Inspector } from "./Inspector.tsx";
+import { Menu } from "./Menu.tsx";
+import { ImportReport, VerilogImportDialog } from "./VerilogImport.tsx";
+import { discardMessage, exportLatex, exportPng, exportSvg, latexText, newFile, openFile, restoreSession, saveDoc, startAutosave, tidyUp } from "./actions.ts";
+import { baseName, copyText, guardWindowClose, isDesktop, setWindowTitle } from "./platform.ts";
+import { drawOptions, selectionParts, copySelection, deleteSelection, edgeTransitions, getStateText, hasClipboard, pasteClipboard, selectAll, setEdgeText, setStateText, useEditor } from "./store.ts";
+import type { Selection } from "./store.ts";
+import type { FsmDiagram, ImportResult, LayoutIssue } from "@fsm/core";
+import type { LabelMode } from "./store.ts";
+import { tr, useLang } from "./i18n.ts";
+import type { Lang } from "./i18n.ts";
+
+const LABEL_MODES = (): Array<[LabelMode, string, string]> => [
+  ["all", tr("All", "全部"), tr("Show every transition condition and state output", "顯示所有轉移條件與狀態輸出")],
+  ["none", tr("Hidden", "隱藏"), tr("Hide transition conditions and state outputs (a selected line or state still shows its own)", "隱藏轉移條件與狀態輸出（選取的線或狀態仍會顯示）")],
+];
+/** What the auto layout could not fix, in the current language. */
+const issueText = (issues: LayoutIssue[]) => issues.map(({ kind, count: n }) => ({
+  crossings: tr(`${n} crossing${n > 1 ? "s" : ""}`, `${n} 處線條交叉`, `交差 ${n} か所`),
+  throughStates: tr(`${n} line${n > 1 ? "s" : ""} through a state`, `${n} 條線穿過狀態`, `状態を通る線 ${n} 本`),
+  labelOverlaps: tr(`${n} overlapping label${n > 1 ? "s" : ""}`, `${n} 個標籤重疊`, `重なるラベル ${n} 個`),
+  tooClose: tr(`${n} pair${n > 1 ? "s" : ""} of states too close`, `${n} 對狀態太近`, `近すぎる状態 ${n} 組`),
+})[kind]).join(tr(", ", "、", "、"));
+
+const LANGS: Array<[Lang, string]> = [["en", "English"], ["zh", "中文"], ["ja", "日本語"]];
+
+export function App() {
+  const lang = useLang((s) => s.lang);
+  const setLang = useLang((s) => s.setLang);
+  useEffect(() => { document.documentElement.lang = lang === "zh" ? "zh-Hant" : lang; }, [lang]);
+  const [view, setView] = useState<View>({ x: 0, y: 0, k: 1 });
+  const [grid, setGrid] = useState<GridOptions>(loadGridOptions);
+  useEffect(() => { try { localStorage.setItem(GRID_KEY, JSON.stringify(grid)); } catch { /* storage off */ } }, [grid]);
+  const [hints, setHints] = useState(() => { try { return localStorage.getItem(HINTS_KEY) === "1"; } catch { return false; } });
+  useEffect(() => { try { localStorage.setItem(HINTS_KEY, hints ? "1" : "0"); } catch { /* storage off */ } }, [hints]);
+  const doc = useEditor((s) => s.doc);
+  const selection = useEditor((s) => s.selection);
+  const [latex, setLatex] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [report, setReport] = useState<{ result: ImportResult; seq: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 2500);
+    return () => clearTimeout(t);
+  }, [notice]);
+  const filePath = useEditor((s) => s.filePath);
+  const dirty = useEditor((s) => s.dirty);
+  const canUndo = useEditor((s) => s.past.length > 0);
+  const canRedo = useEditor((s) => s.future.length > 0);
+  const loadSeq = useEditor((s) => s.loadSeq);
+  const hasStates = useEditor((s) => s.doc.states.length > 0);
+  const labels = useEditor((s) => s.labels);
+  const setLabels = useEditor((s) => s.setLabels);
+  const { undo, redo } = useEditor.getState();
+
+  // Fit the drawing in the window (zooming in at most to 200%).
+  const fit = () => {
+    const el = document.querySelector<SVGSVGElement>("[data-testid=canvas]");
+    const { doc } = useEditor.getState();
+    if (!el || !doc.states.length) return setView({ x: 0, y: 0, k: 1 });
+    const { minX, minY, maxX, maxY } = planDiagram(doc, drawOptions()).bounds;
+    const pad = 40, w = el.clientWidth, h = el.clientHeight;
+    const k = Math.min(2, MAX_ZOOM, (w - 2 * pad) / (maxX - minX), (h - 2 * pad) / (maxY - minY));
+    setView({ k, x: (w - (maxX - minX) * k) / 2 - minX * k, y: (h - (maxY - minY) * k) / 2 - minY * k });
+  };
+  useEffect(() => { if (loadSeq) fit(); }, [loadSeq]);
+  // The import report belongs to the diagram it describes.
+  useEffect(() => { if (report && loadSeq !== report.seq) setReport(null); }, [loadSeq]);
+  // Toolbar zoom buttons: 10% steps around the middle of the canvas.
+  const zoomBy = (factor: number) => {
+    const el = document.querySelector<SVGSVGElement>("[data-testid=canvas]");
+    setView((v) => zoomAround(v, factor, (el?.clientWidth ?? 0) / 2, (el?.clientHeight ?? 0) / 2));
+  };
+
+  const run = (fn: () => Promise<void> | void) => () => {
+    Promise.resolve().then(fn).catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
+  };
+
+  useEffect(() => {
+    restoreSession().catch(() => {});
+    const stopAutosave = startAutosave();
+    const unguard = guardWindowClose(() => useEditor.getState().dirty, discardMessage);
+    return () => { stopAutosave(); void unguard.then((f) => f()); };
+  }, []);
+
+  useEffect(() => {
+    void setWindowTitle(`${dirty ? "● " : ""}${filePath ? baseName(filePath) : tr("Untitled", "未命名")} — FSM Designer`);
+  }, [filePath, dirty, lang]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey;
+      const inField = (e.target as Element).closest("input, textarea, select");
+      const k = e.key.toLowerCase();
+      if (mod && k === "s") { e.preventDefault(); run(() => saveDoc(e.shiftKey))(); return; }
+      if (inField) return;
+      if (mod && k === "o") { e.preventDefault(); run(openFile)(); return; }
+      if (mod && k === "n") { e.preventDefault(); run(newFile)(); return; }
+      if (mod && k === "i") { e.preventDefault(); setImporting(true); return; }
+      if (mod && (k === "y" || (k === "z" && e.shiftKey))) { e.preventDefault(); redo(); return; }
+      if (mod && k === "z") { e.preventDefault(); undo(); return; }
+      if (mod && (k === "c" || k === "x")) {
+        e.preventDefault();
+        const st = useEditor.getState();
+        const n = copySelection(st.doc, st.selection);
+        if (!n) {
+          if (st.selection) setNotice(tr("Select a line together with the states at both ends to copy it", "線條要連同兩端的狀態一起選取才能複製"));
+          return;
+        }
+        if (k === "x") {
+          st.edit((d) => deleteSelection(d, st.selection));
+          st.select(null);
+        }
+        setNotice(k === "x" ? tr(`Cut ${n} item${n === 1 ? "" : "s"}`, `已剪下 ${n} 個物件`, `${n} 個を切り取りました`) : tr(`Copied ${n} item${n === 1 ? "" : "s"}`, `已複製 ${n} 個物件`, `${n} 個をコピーしました`));
+        return;
+      }
+      if (mod && k === "v") {
+        e.preventDefault();
+        if (!hasClipboard()) return;
+        const st = useEditor.getState();
+        let pasted: Selection = null;
+        st.edit((d) => { pasted = pasteClipboard(d); });
+        st.select(pasted);
+        return;
+      }
+      if (mod && k === "a") {
+        e.preventDefault();
+        const st = useEditor.getState();
+        st.select(selectAll(st.doc));
+        return;
+      }
+      if (mod || e.altKey) return;
+
+      const { selection, doc, edit, select } = useEditor.getState();
+      if (e.key === "Escape") { select(null); return; }
+      // F fits the window, unless a state or line is selected (then it is typed).
+      if (k === "f" && selection?.kind !== "state" && selection?.kind !== "edge") { e.preventDefault(); fit(); return; }
+      if (!selection) return;
+      if (e.key === "Delete") {
+        e.preventDefault();
+        edit((d) => deleteSelection(d, selection));
+        select(null);
+        return;
+      }
+      // Typing edits the selected state's or transition's text at the caret.
+      if (selection.kind === "initial" || selection.kind === "multi") return;
+      let cur: string, apply: (text: string) => void;
+      if (selection.kind === "state") {
+        const s = doc.states.find((v) => v.id === selection.id);
+        if (!s) return;
+        cur = getStateText(s);
+        apply = (text) => edit((d) => setStateText(d, s.id, text), `text:${s.id}`);
+      } else {
+        const [t] = edgeTransitions(doc, selection.from, selection.to);
+        if (!t) return;
+        cur = t.condition;
+        apply = (text) => edit((d) => setEdgeText(d, selection.from, selection.to, text), `text:${t.id}`);
+      }
+      const { caret: stored, setCaret } = useEditor.getState();
+      const caret = Math.min(stored ?? cur.length, cur.length);
+      const put = (text: string, at: number) => { apply(text); setCaret(at); };
+      switch (e.key) {
+        case "ArrowLeft": e.preventDefault(); setCaret(Math.max(0, caret - 1)); return;
+        case "ArrowRight": e.preventDefault(); setCaret(Math.min(cur.length, caret + 1)); return;
+        case "ArrowUp": case "Home": e.preventDefault(); setCaret(0); return;
+        case "ArrowDown": case "End": e.preventDefault(); setCaret(cur.length); return;
+        case "Backspace":
+          e.preventDefault();
+          if (caret > 0) put(cur.slice(0, caret - 1) + cur.slice(caret), caret - 1);
+          return;
+        case " ": {
+          e.preventDefault();
+          // "_0" + space -> ₀ and "\beta" + space -> β. Transitions only expand
+          // greek, since Verilog conditions use names like data_0.
+          const x = expandShortcut(cur, caret, { subscripts: selection.kind === "state" });
+          if (x) put(x.text, x.caret);
+          else put(cur.slice(0, caret) + " " + cur.slice(caret), caret + 1);
+          return;
+        }
+      }
+      if (e.key.length !== 1) return;
+      e.preventDefault();
+      put(cur.slice(0, caret) + e.key + cur.slice(caret), caret + 1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [undo, redo]);
+
+  return (
+    <div className="app">
+      <header className="menubar">
+        <span className="brand"><span className="logo" aria-hidden="true" />FSM Designer</span>
+        <Menu
+          label={tr("File", "檔案")}
+          items={[
+            { label: tr("New Project", "新專案"), shortcut: `${MOD}+N`, onSelect: run(newFile) },
+            { label: tr("Open Project", "開啟專案"), shortcut: `${MOD}+O`, onSelect: run(openFile) },
+            { label: tr("Save", "儲存"), shortcut: `${MOD}+S`, onSelect: run(() => saveDoc()) },
+            { label: tr("Save As", "另存新檔"), shortcut: `${MOD}+Shift+S`, onSelect: run(() => saveDoc(true)) },
+            { label: tr("Import Verilog…", "匯入 Verilog…"), shortcut: `${MOD}+I`, onSelect: () => setImporting(true) },
+            {
+              label: tr("Export", "匯出"),
+              submenu: [
+                { label: "PNG", onSelect: run(() => exportPng()) },
+                { label: "SVG", onSelect: run(exportSvg) },
+                { label: "LaTeX", onSelect: run(() => setLatex(latexText())) },
+              ],
+            },
+          ]}
+        />
+        <div className="menu">
+          <button
+            className="menu-trigger"
+            disabled={!hasStates}
+            data-testid="tidy"
+            onClick={run(async () => {
+              const { moved, issues } = await tidyUp();
+              if (issues.length) setNotice(tr(`Laid out; could not fix: ${issueText(issues)}`, `已排版，仍無法解決：${issueText(issues)}`, `レイアウト済み。解決できなかった問題：${issueText(issues)}`));
+              else if (!moved) setNotice(tr("Already laid out", "目前已經是自動排版的結果"));
+              fit();
+            })}
+          >
+            {tr("Auto Layout", "自動排版")}
+          </button>
+        </div>
+        <span className="sep" />
+        <nav className="group" aria-label={tr("Edit", "編輯")}>
+          <button className="ghost with-icon" onClick={undo} disabled={!canUndo} title="Ctrl+Z">{tr("Undo", "復原")}<Icon d={UNDO} /></button>
+          <button className="ghost with-icon" onClick={redo} disabled={!canRedo} title="Ctrl+Shift+Z">{tr("Redo", "重做")}<Icon d={REDO} /></button>
+        </nav>
+        <span className="file" title={filePath ?? undefined}>{dirty && <span className="dot" title={tr("Unsaved changes", "尚未儲存")} />}{filePath ? baseName(filePath) : tr("Untitled", "未命名")}</span>
+        <Menu
+          icon
+          label={<Globe />}
+          title="Language / 語言"
+          testId="lang"
+          items={LANGS.map(([l, name]) => ({ label: name, checked: lang === l, onSelect: () => setLang(l) }))}
+        />
+      </header>
+      <main className="main">
+        <div className="canvas-wrap">
+          <Canvas view={view} setView={setView} grid={grid} />
+          {hints && <Hints onClose={() => setHints(false)} />}
+          {report && <ImportReport result={report.result} onClose={() => setReport(null)} />}
+        </div>
+        <Inspector snap={grid.snap} />
+      </main>
+      <footer className="statusbar">
+        <p className="status" data-testid="status">{statusText(doc, selection)}{!isDesktop && <span className="muted"> · {tr("Saving and exporting download the file", "存檔與匯出會以下載方式儲存")}</span>}</p>
+        <div className="view-controls">
+          <span className="seg" role="group" aria-label={tr("Grid style", "格線樣式")} title={tr("Grid style", "格線樣式")}>
+            {GRID_STYLES().map(([style, name]) => (
+              <button key={style} className={grid.style === style ? "on" : ""} aria-pressed={grid.style === style} onClick={() => setGrid((g) => ({ ...g, style }))}>{name}</button>
+            ))}
+          </span>
+          <span className="seg" role="group" aria-label={tr("Text on lines", "線上文字")} title={tr("Text on lines (conditions / outputs); exports follow this too", "線上文字（條件 / 輸出）；匯出也會照這個設定")}>
+            {LABEL_MODES().map(([mode, name, tip]) => (
+              <button key={mode} className={labels === mode ? "on" : ""} aria-pressed={labels === mode} title={tip} onClick={() => setLabels(mode)} data-testid={`labels-${mode}`}>{name}</button>
+            ))}
+          </span>
+          <button className="chip" aria-pressed={grid.snap} onClick={() => setGrid((g) => ({ ...g, snap: !g.snap }))} title={tr("Snap to the grid while dragging (hold Alt to turn off for a moment)", "拖曳時吸附到格線（按住 Alt 暫時不吸附）")}>{tr("Snap", "吸附")}</button>
+          <button className="chip" aria-pressed={hints} data-testid="hints-toggle" onClick={() => setHints((h) => !h)} title={hints ? tr("Hide shortcut hints", "隱藏快捷鍵提示") : tr("Show shortcut hints", "顯示快捷鍵提示")}>{tr("Hints", "提示")}</button>
+          <span className="zoom-controls" role="group" aria-label={tr("Zoom", "縮放")}>
+            <button className="icon" onClick={() => zoomBy(1 / 1.1)} title={tr("Zoom out (Ctrl+wheel)", "縮小（Ctrl+滾輪）")} aria-label={tr("Zoom out", "縮小")}><Icon d={ZOOM_OUT} /></button>
+            <button className="zoom" data-testid="zoom" onClick={() => zoomBy(1 / view.k)} title={tr("Zoom level; click for 100%", "縮放比例；點一下回到 100%")}>{Math.round(view.k * 100)}%</button>
+            <button className="icon" onClick={() => zoomBy(1.1)} title={tr("Zoom in (Ctrl+wheel)", "放大（Ctrl+滾輪）")} aria-label={tr("Zoom in", "放大")}><Icon d={ZOOM_IN} /></button>
+            <button className="icon" data-testid="fit" onClick={fit} title={tr("Fit to window (F)", "符合視窗（F）")} aria-label={tr("Fit to window", "符合視窗")}><Icon d={FIT} /></button>
+          </span>
+        </div>
+      </footer>
+      {latex !== null && (
+        <div className="modal-backdrop" onClick={() => setLatex(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>LaTeX (TikZ)</h3>
+            <textarea readOnly value={latex} spellCheck={false} />
+            <div className="row">
+              <button
+                onClick={(e) => {
+                  const area = (e.currentTarget.closest(".modal") as HTMLElement).querySelector("textarea")!;
+                  copyText(latex).then(
+                    () => setNotice(tr("LaTeX copied", "已複製 LaTeX")),
+                    () => { area.focus(); area.select(); setNotice(tr("All text selected; press Ctrl+C to copy", "已選取全部文字，請按 Ctrl+C 複製")); },
+                  );
+                }}
+              >
+                {tr("Copy", "複製")}
+              </button>
+              <button onClick={run(exportLatex)}>{tr("Save as .tex", "存成 .tex")}</button>
+              <button onClick={() => setLatex(null)}>{tr("Close", "關閉")}</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {importing && (
+        <VerilogImportDialog
+          onClose={() => setImporting(false)}
+          onImported={(result) => {
+            setImporting(false);
+            setReport({ result, seq: useEditor.getState().loadSeq });
+            const ns = result.diagram.states.length, nt = result.diagram.transitions.length;
+            setNotice(tr(`Drew ${ns} states and ${nt} transitions from Verilog`, `已從 Verilog 畫出 ${ns} 個狀態、${nt} 條轉移`, `Verilog から ${ns} 個の状態と ${nt} 本の遷移を描きました`));
+          }}
+        />
+      )}
+      {error && (
+        <div className="toast" onClick={() => setError(null)}>{error}</div>
+      )}
+      {notice && (
+        <div className="toast ok" onClick={() => setNotice(null)}>{notice}</div>
+      )}
+    </div>
+  );
+}
+
+const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "Cmd" : "Ctrl";
+const GRID_KEY = "fsm-designer.grid.v2";
+const HINTS_KEY = "fsm-designer.hints.v1";
+
+/** Status bar text: what is selected, else the size of the diagram. */
+function statusText(d: FsmDiagram, sel: Selection): string {
+  const { states, edges, initial } = selectionParts(sel);
+  const kind = d.type === "mealy" ? "Mealy" : "Moore";
+  const ns = d.states.length, nt = d.transitions.length;
+  if (!sel) return tr(`${d.outputs.length ? `${kind} machine · ` : ""}${ns} state${ns === 1 ? "" : "s"} · ${nt} transition${nt === 1 ? "" : "s"}`, `${d.outputs.length ? `${kind} 機 · ` : ""}${ns} 個狀態 · ${nt} 條轉移`, `${d.outputs.length ? `${kind} マシン · ` : ""}状態 ${ns} 個 · 遷移 ${nt} 本`);
+  if (sel.kind === "state") return tr("1 state selected · type to edit its text", "已選取 1 個狀態 · 直接打字編輯文字");
+  if (sel.kind === "edge") return sel.from === sel.to ? tr("1 self loop selected · type to edit its text", "已選取 1 條自迴圈 · 直接打字編輯文字") : tr("1 transition selected · type to edit its text", "已選取 1 條轉移 · 直接打字編輯文字");
+  if (sel.kind === "initial") return tr("Start arrow selected", "已選取起始箭頭");
+  const nl = edges.length + (initial ? 1 : 0);
+  return tr(`${states.length} states and ${nl} lines selected`, `已選取 ${states.length} 個狀態、${nl} 條線`, `状態 ${states.length} 個、線 ${nl} 本を選択中`);
+}
+const GRID_STYLE_IDS: GridStyle[] = ["line", "dot", "none"];
+const GRID_STYLES = (): Array<[GridStyle, string]> => [["line", tr("Line", "線")], ["dot", tr("Dot", "點")], ["none", tr("None", "無")]];
+
+function loadGridOptions(): GridOptions {
+  try {
+    const v = JSON.parse(localStorage.getItem(GRID_KEY) ?? "null") as Partial<GridOptions> | null;
+    const style = GRID_STYLE_IDS.some((s) => s === v?.style) ? v!.style! : "line";
+    return { style, snap: v?.snap ?? true };
+  } catch {
+    return { style: "line", snap: true };
+  }
+}
+
+// 16px stroke icons for the zoom controls.
+const ZOOM_OUT = "M7 2.5a4.5 4.5 0 1 0 0 9a4.5 4.5 0 1 0 0-9ZM10.3 10.3L14 14M5 7h4";
+const ZOOM_IN = ZOOM_OUT + "M7 5v4";
+const UNDO = "M6 3L3 6l3 3M3 6h6.5a3.5 3.5 0 0 1 0 7H8";
+const REDO = "M10 3l3 3-3 3M13 6H6.5a3.5 3.5 0 0 0 0 7H8";
+const FIT = "M2 5.5V2h3.5M10.5 2H14v3.5M14 10.5V14h-3.5M5.5 14H2v-3.5M5.5 5.5h5v5h-5Z";
+
+function Globe() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" strokeWidth="2" aria-hidden="true">
+      <ellipse cx="12" cy="12" rx="4.5" ry="10" stroke="var(--accent)" />
+      <path d="M2.8 8h18.4M2.8 16h18.4" stroke="var(--accent)" />
+      <circle cx="12" cy="12" r="10" stroke="currentColor" />
+    </svg>
+  );
+}
+
+function Icon({ d }: { d: string }) {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d={d} />
+    </svg>
+  );
+}

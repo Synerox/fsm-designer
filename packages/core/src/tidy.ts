@@ -1,0 +1,1034 @@
+// Automatic layout: one rule for every diagram, chosen by the graph's shape,
+// never by how many states it has.
+//
+// 1. Analysis. Islands (states not linked to the rest) are laid out on
+//    their own and packed side by side, the reset state's island first.
+//    Within an island: the reset state, loops (a depth-first walk from the
+//    reset state; a line back to a state still on the walk closes a loop),
+//    and triangles of states all linked to each other.
+// 2. Candidates, all scored the same way:
+//    - grid: a grid about as tall as it is wide, the reset state in the left
+//      column, states moved between cells to reduce crossings, lines through
+//      states, diagonal and long lines;
+//    - layers, left to right and top to bottom (Sugiyama style): loops set
+//      aside, each state one layer past its furthest predecessor, the reset
+//      state in the first layer, each layer ordered to reduce crossings and
+//      centred on one axis.
+//    - snake: the same layers in rows, every other row right to left, so a
+//      long flow folds into a square;
+//    - ring: the largest piece that stays linked when any one state is taken
+//      away drawn as a loop round a rectangle, the flow clockwise from the
+//      top left; each piece hanging off it (a short side loop, a lone line)
+//      as its own small shape, an equilateral triangle, square or rectangle,
+//      pointing away from the state it hangs off.
+//    Each at two line lengths: room for the spacing, and room for the
+//    widest label.
+// 3. Local shapes. A triangle of linked states (each candidate also tried
+//    with only those where two states link both ways) becomes equilateral
+//    (the state at the right angle moves to the apex over the level side);
+//    two sharing a side become a level diamond. In a ring, rows stay level:
+//    the triangle's states slide sideways instead.
+// 4. Finishing. Centres on a 20 px grid; a line that would cross a state
+//    becomes an arc (back edges bow below a row, forward jumps above),
+//    opposite edges become two parallel straight lines, each self loop points
+//    to its state's emptiest side, the start arrow comes in from a free side.
+// 5. Scoring (see layout-score.ts): crossings weigh most, then lines through states
+//    and overlapping labels, then triangles that are not equilateral,
+//    states lined up with nothing, lines much longer than the shortest,
+//    states left of the reset state, lines against the main flow, symmetry,
+//    slanted lines, total line length, shape (aiming a little wider than
+//    tall, like a screen) and area. The weights were tuned against the
+//    user's own picks between pairs of layouts (test/layout/fixtures/
+//    preferences.json).
+// 6. Repair. If the winner still has crossings, overlaps or lines through
+//    states, it is tried spread out a little; whatever cannot be fixed is
+//    reported in TidyResult.issues.
+// 7. Polish. In the best few, a state with a long line tries free grid spots
+//    nearer its neighbours and moves wherever the score improves.
+
+import type { FsmDiagram } from "./model.ts";
+import { labelLines, planDiagram, transitionLabel } from "./export/svg.ts";
+import type { PlanOptions } from "./export/svg.ts";
+import { LABEL_SIZE, stateRadius, textWidth } from "./metrics.ts";
+
+import { GRID, crossCount, emptyScore, intersect, score, segDist } from "./layout-score.ts";
+import type { LayoutScore, Pt } from "./layout-score.ts";
+
+export { GRID, score };
+export type { LayoutScore };
+
+type Pos = Map<string, Pt>;
+
+interface Graph {
+  ids: string[]; // initial state first, then file order
+  init: string;
+  out: Map<string, string[]>; // successors, without self loops
+  nb: Map<string, Set<string>>; // neighbours either way
+}
+
+export interface TidyOptions {
+  spacing?: number; // px between state edges, default 90
+  margin?: number; // px around the drawing, default 60
+  /** How the diagram will be drawn (e.g. labels hidden), so spacing and scoring match. */
+  plan?: PlanOptions;
+}
+
+/** A problem the layout could not fix: how many line crossings, lines through states, overlapping labels, states too close. */
+export interface LayoutIssue {
+  kind: "crossings" | "throughStates" | "labelOverlaps" | "tooClose";
+  count: number;
+}
+
+export interface TidyResult {
+  score: LayoutScore;
+  /** The winning arrangement: grid, layers-right, layers-down, snake-k, ring-cxr, or islands (several packed side by side). */
+  arrangement: string;
+  /** Triangles made equilateral, as their state ids. */
+  triangles: string[][];
+  /** Every candidate's score, best first (for tests and tuning). */
+  candidates: LayoutScore[];
+  /** What is still wrong after repair; empty when the drawing is clean. */
+  issues: LayoutIssue[];
+}
+
+/** One finished arrangement: the laid-out copy, its score, and the grid step its distances are measured in. */
+interface Tried { score: LayoutScore; arrangement: string; d: FsmDiagram; sx: number; sy: number }
+interface Laid { score: LayoutScore; arrangement: string; triangles: string[][]; candidates: LayoutScore[]; d: FsmDiagram; tried: Tried[] }
+
+/** A ranked candidate layout, as returned by layoutCandidates(). */
+export interface LayoutCandidate {
+  arrangement: string;
+  score: LayoutScore;
+  /** A laid-out copy of the diagram. */
+  diagram: FsmDiagram;
+  /** The grid step (px) the score's distances were measured in; pass it to score() to score the copy again. */
+  step: number;
+}
+
+/** Lay out d in place: positions, arcs (Transition.curve), self-loop sides (Transition.loopAngle) and, if blocked, the start arrow's side. */
+export function tidyLayout(d: FsmDiagram, opts: TidyOptions = {}): TidyResult {
+  const margin = opts.margin ?? 60;
+  for (const t of d.transitions) { delete t.curve; delete t.loopAngle; }
+  if (d.states.length === 0) return { score: emptyScore(), arrangement: "empty", triangles: [], candidates: [], issues: [] };
+
+  const islands = islandsOf(d);
+  const laid = islands.length > 1 ? packIslands(d, islands, opts) : layoutIsland(d, opts);
+  const best = laid.d;
+  // Move the drawing to the top-left corner, keeping it on the grid.
+  const b = planDiagram(best, opts.plan ?? {}).bounds;
+  const pad = Math.max(GRID, margin - 20);
+  const dx = Math.round((pad - b.minX) / GRID) * GRID, dy = Math.round((pad - b.minY) / GRID) * GRID;
+  copyLayout(best, d, dx, dy);
+  const { score: sc, arrangement, triangles, candidates } = laid;
+  const issues: LayoutIssue[] = (["crossings", "throughStates", "labelOverlaps", "tooClose"] as const).filter((k) => sc[k] > 0).map((kind) => ({ kind, count: sc[kind] }));
+  return { score: sc, arrangement, triangles, candidates, issues };
+}
+
+/**
+ * Every arrangement tidyLayout() tried, best first, each as a laid-out copy
+ * (d itself is not changed). For tuning the score: show people pairs of
+ * these and check the score prefers the ones they pick (docs/auto-layout.md).
+ * A diagram made of several islands gives just the packed result.
+ */
+export function layoutCandidates(d: FsmDiagram, opts: TidyOptions = {}): LayoutCandidate[] {
+  const c = structuredClone(d);
+  for (const t of c.transitions) { delete t.curve; delete t.loopAngle; }
+  if (c.states.length === 0) return [];
+  const islands = islandsOf(c);
+  const laid = islands.length > 1 ? packIslands(c, islands, opts) : layoutIsland(c, opts);
+  return laid.tried.map((t) => ({ arrangement: t.arrangement, score: t.score, diagram: t.d, step: t.sx }));
+}
+
+/** Positions, arcs, loop sides and start-arrow side from `from` onto `to`, shifted by (dx, dy). */
+function copyLayout(from: FsmDiagram, to: FsmDiagram, dx = 0, dy = 0) {
+  const byId = new Map(from.states.map((s) => [s.id, s]));
+  for (const s of to.states) {
+    const t = byId.get(s.id);
+    if (!t) continue;
+    s.x = t.x! + dx; s.y = t.y! + dy;
+    if (t.initialAngle !== undefined) s.initialAngle = t.initialAngle;
+  }
+  const tr = new Map(from.transitions.map((t) => [t.id, t]));
+  for (const t of to.transitions) {
+    const u = tr.get(t.id);
+    if (!u) continue;
+    if (u.curve !== undefined) t.curve = u.curve;
+    if (u.loopAngle !== undefined) t.loopAngle = u.loopAngle;
+  }
+}
+
+/** One connected diagram: every candidate arrangement, scored, the best repaired. */
+function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
+  const spacing = opts.spacing ?? 90;
+  const g = graphOf(d);
+  const R = Math.max(...d.states.map((s) => stateRadius(d, s)));
+  // Room for the widest label on a line between two states.
+  const popts = opts.plan ?? {};
+  const labelW = popts.labels === "none" ? 0 : Math.max(0, ...groupsOf(d).filter((ts) => ts[0].from !== ts[0].to).map((ts) => Math.max(...ts.flatMap((t) => labelLines(transitionLabel(d, t, popts))).map((l) => textWidth(l, LABEL_SIZE))) + 30));
+  const up40 = (v: number) => Math.ceil(v / 40) * 40; // half steps stay on the grid
+  const scales = new Map<string, [number, number]>();
+  scales.set(`${up40(2 * R + spacing)}`, [up40(2 * R + spacing), up40(2 * R + spacing)]);
+  const wide = up40(2 * R + Math.min(Math.max(spacing, labelW), 320));
+  scales.set(`${wide}`, [wide, up40(2 * R + spacing)]);
+  // Big machines: one spacing only, to keep within the time budget (each candidate costs more to draw and score).
+  if (d.states.length > 16 && scales.size > 1) scales.delete([...scales.keys()][0]);
+
+  const triangles = trianglesOf(g);
+  const tried: Tried[] = [];
+  const finish = (c: FsmDiagram, sx: number) => {
+    clearStartArrow(c, sx);
+    routeEdges(c);
+    placeLoops(c);
+    return score(c, planDiagram(c, popts), sx);
+  };
+  // Triangles with two states linked both ways must come out equilateral;
+  // the others, and any three in a row, may also stay as placed if that scores better.
+  const mutual = triangles.filter((t) => [[0, 1], [1, 2], [0, 2]].some(([i, j]) => {
+    const a = g.ids[t[i]], b = g.ids[t[j]];
+    return g.out.get(a)!.includes(b) && g.out.get(b)!.includes(a);
+  }));
+  const consider = (arrangement: string, given: Pos, sx: number, sy: number, keepRows = false) => {
+    const seen = new Set<string>();
+    for (const tris of [triangles, mutual]) {
+      const pos = equilateral(g, given, tris, 2 * R + 60, Math.min(sx, sy), keepRows, keepRows || tris === mutual);
+      const key = g.ids.map((id) => { const p = pos.get(id)!; return `${Math.round(p.x / GRID)},${Math.round(p.y / GRID)}`; }).join(" ");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const c = structuredClone(d);
+      for (const s of c.states) {
+        const p = pos.get(s.id)!;
+        s.x = Math.round(p.x / GRID) * GRID;
+        s.y = Math.round(p.y / GRID) * GRID;
+      }
+      tried.push({ score: finish(c, sx), arrangement, d: c, sx, sy });
+    }
+  };
+  const layers = flowLayers(g);
+  for (const [sx, sy] of scales.values()) {
+    for (const grid of grids(g, sx, sy, R)) consider("grid", grid, sx, sy);
+    if (g.ids.length > 1) {
+      consider("layers-right", centred(layers, sx, sy, false), sx, sy);
+      consider("layers-down", centred(layers, sx, sy, true), sx, sy);
+      // A long flow folded like a snake, so it reads in order and keeps a screen's shape.
+      for (const k of wrapWidths(layers, sx, sy)) consider(`snake-${k}`, snake(layers, k, sx, sy), sx, sy);
+      // The main loop round a rectangle, side loops as small shapes beside the state they leave from.
+      for (const [name, pos] of rings(g, sx, sy)) consider(name, pos, sx, sy, true);
+    }
+  }
+  tried.sort((a, b) => a.score.total - b.score.total);
+
+  // Repair: spread the leading candidates out a little where that clears crossings, overlaps or lines through states.
+  const bad = (sc: LayoutScore) => sc.crossings + sc.throughStates + sc.labelOverlaps + sc.tooClose;
+  const step = Math.min(...[...scales.values()].map(([sx]) => sx));
+  for (const cand of tried.slice(0, 5)) {
+    let cur = cand;
+    for (const k of [1.25, 1.5]) {
+      if (!bad(cur.score)) break;
+      const c = structuredClone(cand.d);
+      for (const t of c.transitions) { delete t.curve; delete t.loopAngle; }
+      for (const s of c.states) { s.x = Math.round((s.x! * k) / GRID) * GRID; s.y = Math.round((s.y! * k) / GRID) * GRID; }
+      const sc = finish(c, step * k);
+      if (bad(sc) < bad(cur.score)) cur = { score: sc, arrangement: `${cand.arrangement} (spread)`, d: c, sx: cand.sx * k, sy: cand.sy * k };
+    }
+    if (cur !== cand) tried.push(cur);
+  }
+  tried.sort((a, b) => a.score.total - b.score.total);
+
+  // Polish: a state with a long line moves to a free spot on the grid nearer
+  // its neighbours, wherever that improves the score (a fixed number of
+  // tries, so big machines stay quick).
+  let budget = Math.min(48, Math.round(4e4 / Math.max(1, edgePairs(g).length) ** 2));
+  for (const cand of tried.slice(0, 2)) {
+    let cur = cand;
+    const gap = 2 * R + 40;
+    for (let round = 0; round < 3 && budget > 0; round++) {
+      let improved = false;
+      const at = new Map(cur.d.states.map((s) => [s.id, { x: s.x!, y: s.y! }]));
+      const reach = (id: string, p: Pt) => [...g.nb.get(id)!].reduce((sum, v) => sum + Math.hypot((p.x - at.get(v)!.x) / cur.sx, (p.y - at.get(v)!.y) / cur.sy), 0);
+      const longest = (id: string) => Math.max(0, ...[...g.nb.get(id)!].map((v) => Math.hypot((at.get(id)!.x - at.get(v)!.x) / cur.sx, (at.get(id)!.y - at.get(v)!.y) / cur.sy)));
+      const movers = g.ids.filter((id) => longest(id) > 1.5).sort((a, b) => longest(b) - longest(a));
+      const o = at.get(g.init)!;
+      for (const id of movers) {
+        if (budget <= 0) break;
+        const here = at.get(id)!;
+        const ns = [...g.nb.get(id)!].map((v) => at.get(v)!);
+        const mx = ns.reduce((s, p) => s + p.x, 0) / ns.length, my = ns.reduce((s, p) => s + p.y, 0) / ns.length;
+        const spots: Pt[] = [];
+        for (let i = -2; i <= 2; i++) for (let j = -2; j <= 2; j++) {
+          const p = { x: o.x + (Math.round((mx - o.x) / cur.sx) + i) * cur.sx, y: o.y + (Math.round((my - o.y) / cur.sy) + j) * cur.sy };
+          if ([...at].every(([v, q]) => v === id || Math.hypot(p.x - q.x, p.y - q.y) >= gap)) spots.push(p);
+        }
+        const now = reach(id, here);
+        for (const p of spots.filter((p) => reach(id, p) < now - 0.3).sort((a, b) => reach(id, a) - reach(id, b)).slice(0, 2)) {
+          if (budget-- <= 0) break;
+          const c = structuredClone(cur.d);
+          for (const t of c.transitions) { delete t.curve; delete t.loopAngle; }
+          for (const s of c.states) delete s.initialAngle;
+          const s = c.states.find((x) => x.id === id)!;
+          s.x = Math.round(p.x / GRID) * GRID; s.y = Math.round(p.y / GRID) * GRID;
+          const sc = finish(c, cur.sx);
+          if (sc.total < cur.score.total - 1e-6) {
+            cur = { ...cur, score: sc, d: c, arrangement: cand.arrangement.endsWith("(polished)") ? cand.arrangement : `${cand.arrangement} (polished)` };
+            improved = true;
+            break;
+          }
+        }
+        if (improved) break;
+      }
+      if (!improved) break;
+    }
+    if (cur !== cand) tried.push(cur);
+  }
+  tried.sort((a, b) => a.score.total - b.score.total);
+  const best = tried[0];
+  return { score: best.score, arrangement: best.arrangement, triangles: triangles.map((c) => c.map((i) => g.ids[i])), candidates: tried.map((t) => t.score), d: best.d, tried };
+}
+
+// ---- islands --------------------------------------------------------------------
+
+/** States linked to each other (either way), the reset state's island first, then in file order. */
+function islandsOf(d: FsmDiagram): string[][] {
+  const nb = new Map(d.states.map((s) => [s.id, new Set<string>()]));
+  for (const t of d.transitions) { nb.get(t.from)?.add(t.to); nb.get(t.to)?.add(t.from); }
+  const init = d.states.find((s) => s.isInitial);
+  const seen = new Set<string>();
+  const out: string[][] = [];
+  for (const s of init ? [init, ...d.states] : d.states) {
+    if (seen.has(s.id)) continue;
+    const island = [s.id];
+    seen.add(s.id);
+    for (let i = 0; i < island.length; i++) for (const v of nb.get(island[i])!) if (!seen.has(v)) { seen.add(v); island.push(v); }
+    out.push(island);
+  }
+  return out;
+}
+
+/** Lay out each island on its own, then pack them in rows about as wide as the whole is tall. */
+function packIslands(d: FsmDiagram, islands: string[][], opts: TidyOptions): Laid {
+  const popts = opts.plan ?? {};
+  const parts = islands.map((ids) => {
+    const keep = new Set(ids);
+    const sub = structuredClone(d);
+    sub.states = sub.states.filter((s) => keep.has(s.id));
+    sub.transitions = sub.transitions.filter((t) => keep.has(t.from) && keep.has(t.to));
+    const laid = layoutIsland(sub, opts);
+    return { laid, b: planDiagram(laid.d, popts).bounds };
+  });
+  const gap = 6 * GRID;
+  const area = parts.reduce((s, { b }) => s + (b.maxX - b.minX + gap) * (b.maxY - b.minY + gap), 0);
+  const rowWidth = Math.max(...parts.map(({ b }) => b.maxX - b.minX), Math.sqrt(area) * 1.2);
+  const out = structuredClone(d);
+  let x = 0, y = 0, rowH = 0;
+  for (const { laid, b } of parts) {
+    const w = b.maxX - b.minX, h = b.maxY - b.minY;
+    if (x > 0 && x + w > rowWidth) { x = 0; y += rowH + gap; rowH = 0; }
+    copyLayout(laid.d, out, Math.round((x - b.minX) / GRID) * GRID, Math.round((y - b.minY) / GRID) * GRID);
+    x += w + gap;
+    rowH = Math.max(rowH, h);
+  }
+  const sc = score(out, planDiagram(out, popts));
+  const step = Math.min(...parts.map((p) => p.laid.tried[0]?.sx ?? 200));
+  return { score: sc, arrangement: "islands", triangles: parts.flatMap((p) => p.laid.triangles), candidates: [sc], d: out, tried: [{ score: sc, arrangement: "islands", d: out, sx: step, sy: step }] };
+}
+
+// ---- graph ----------------------------------------------------------------------
+
+function graphOf(d: FsmDiagram): Graph {
+  const init = (d.states.find((s) => s.isInitial) ?? d.states[0]).id;
+  const ids = [init, ...d.states.map((s) => s.id).filter((id) => id !== init)];
+  const out = new Map(ids.map((id) => [id, [] as string[]]));
+  const nb = new Map(ids.map((id) => [id, new Set<string>()]));
+  for (const t of d.transitions) {
+    if (t.from === t.to) continue;
+    if (!out.get(t.from)!.includes(t.to)) out.get(t.from)!.push(t.to);
+    nb.get(t.from)!.add(t.to);
+    nb.get(t.to)!.add(t.from);
+  }
+  return { ids, init, out, nb };
+}
+
+function groupsOf(d: FsmDiagram) {
+  const groups = new Map<string, FsmDiagram["transitions"]>();
+  for (const t of d.transitions) {
+    const k = `${t.from}\u0000${t.to}`;
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k)!.push(t);
+  }
+  return [...groups.values()];
+}
+
+/** Longest simple path from start, or the longest cycle back to start (depth-first, with a work limit). */
+function longest(g: Graph, start: string, cycle: boolean): string[] {
+  let best: string[] = cycle ? [] : [start];
+  let budget = 40000;
+  const path = [start];
+  const seen = new Set(path);
+  const dfs = (u: string) => {
+    if (--budget < 0) return;
+    for (const v of g.out.get(u)!) {
+      if (cycle && v === start && path.length >= 3 && path.length > best.length) best = [...path];
+      if (seen.has(v)) continue;
+      seen.add(v); path.push(v);
+      if (!cycle && path.length > best.length) best = [...path];
+      dfs(v);
+      path.pop(); seen.delete(v);
+    }
+  };
+  dfs(start);
+  return best;
+}
+
+/** Three states all linked to each other, by index into g.ids. */
+function trianglesOf(g: Graph): number[][] {
+  const at = new Map(g.ids.map((id, i) => [id, i]));
+  const adj = g.ids.map((id) => new Set([...g.nb.get(id)!].map((v) => at.get(v)!)));
+  const out: number[][] = [];
+  for (let a = 0; a < adj.length; a++)
+    for (const b of adj[a]) if (b > a)
+      for (const c of adj[b]) if (c > b && adj[a].has(c)) out.push([a, b, c]);
+  return out;
+}
+
+// ---- grid -----------------------------------------------------------------------
+
+/**
+ * States in a grid about as tall as it is wide, the reset state in the left
+ * column, arranged by moving states between cells to reduce crossings, lines
+ * through states, diagonal and long lines. Tries a couple of grid widths and
+ * starting orders and keeps the best.
+ */
+function* grids(g: Graph, sx: number, sy: number, R: number): Generator<Pos> {
+  const n = g.ids.length;
+  const base = Math.max(1, Math.round(Math.sqrt((n * sy) / sx)));
+  const starts: Array<[string[], boolean]> = [[bfsLayers(g).flat(), false], [snakeOrder(g), false]];
+  // A long loop through the reset state: walk it around the grid and back.
+  const ring = longest(g, g.init, true);
+  if (ring.length >= Math.max(4, n / 2)) starts.push([[...ring, ...bfsLayers(g).flat().filter((id) => !ring.includes(id))], true]);
+  for (const cols of new Set([base, base + 1])) {
+    let best: Pos | undefined, bestCost = Infinity;
+    for (const [start, loop] of starts) {
+      const [pos, cost] = improveGrid(g, start, cols, sx, sy, R, loop);
+      if (cost < bestCost) { bestCost = cost; best = pos; }
+    }
+    yield best!;
+  }
+}
+
+/** Longest path from the reset state, then the others in breadth-first order. */
+function snakeOrder(g: Graph): string[] {
+  const path = longest(g, g.init, false);
+  return [...path, ...bfsLayers(g).flat().filter((id) => !path.includes(id))];
+}
+
+/** Layers by distance from the reset state, ordered to reduce crossings (barycentre sweeps). */
+function bfsLayers(g: Graph): string[][] {
+  const depth = new Map<string, number>([[g.init, 0]]);
+  const queue = [g.init];
+  while (queue.length) {
+    const u = queue.shift()!;
+    for (const v of g.out.get(u)!) if (!depth.has(v)) { depth.set(v, depth.get(u)! + 1); queue.push(v); }
+  }
+  // Unreachable states: next to a neighbour if they have one, else after everything.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const id of g.ids) {
+      if (depth.has(id)) continue;
+      const ds = [...g.nb.get(id)!].filter((v) => depth.has(v)).map((v) => depth.get(v)!);
+      if (ds.length) { depth.set(id, Math.min(...ds) + 1); changed = true; }
+    }
+  }
+  const last = Math.max(...depth.values()) + 1;
+  for (const id of g.ids) if (!depth.has(id)) depth.set(id, last);
+  const layers: string[][] = [];
+  for (const id of g.ids) (layers[depth.get(id)!] ??= []).push(id);
+  return order(g, layers.filter(Boolean));
+}
+
+function order(g: Graph, layers: string[][]): string[][] {
+  const idx = () => new Map(layers.flatMap((l) => l.map((id, i) => [id, i - (l.length - 1) / 2] as const)));
+  for (let sweep = 0; sweep < 6; sweep++) {
+    const down = sweep % 2 === 0;
+    const range = down ? layers.map((_, i) => i).slice(1) : layers.map((_, i) => i).reverse().slice(1);
+    for (const li of range) {
+      const ref = new Set(layers[down ? li - 1 : li + 1]);
+      const at = idx();
+      const key = new Map(layers[li].map((id) => {
+        const ns = [...g.nb.get(id)!].filter((v) => ref.has(v));
+        return [id, ns.length ? ns.reduce((s, v) => s + at.get(v)!, 0) / ns.length : at.get(id)!] as const;
+      }));
+      layers[li] = [...layers[li]].sort((a, b) => key.get(a)! - key.get(b)!);
+    }
+  }
+  return layers;
+}
+
+/**
+ * Layers for a left-to-right (or top-to-bottom) flow: a depth-first walk
+ * from the reset state sets aside lines back to a state still on the walk
+ * (they close loops) and lines into the reset state; every other line goes
+ * forward, each state one layer past its furthest predecessor. Each layer is
+ * then ordered to reduce crossings.
+ */
+function flowLayers(g: Graph): string[][] {
+  const mark = new Map<string, 1 | 2>(); // 1 on the walk, 2 done
+  const post: string[] = [];
+  const ahead = new Map(g.ids.map((id) => [id, [] as string[]]));
+  const visit = (u: string) => {
+    mark.set(u, 1);
+    for (const v of g.out.get(u)!) {
+      if (mark.get(v) === 1 || v === g.init) continue;
+      ahead.get(u)!.push(v);
+      if (!mark.has(v)) visit(v);
+    }
+    mark.set(u, 2);
+    post.push(u);
+  };
+  for (const id of g.ids) if (!mark.has(id)) visit(id);
+  const layer = new Map(g.ids.map((id) => [id, 0]));
+  for (const u of post.reverse()) for (const v of ahead.get(u)!) layer.set(v, Math.max(layer.get(v)!, layer.get(u)! + 1));
+  const layers: string[][] = [];
+  for (const id of g.ids) (layers[layer.get(id)!] ??= []).push(id);
+  return order(g, layers.filter(Boolean));
+}
+
+/** Each layer centred on one axis, evenly spaced. */
+function centred(layers: string[][], sx: number, sy: number, down: boolean): Pos {
+  const pos: Pos = new Map();
+  layers.forEach((l, li) => l.forEach((id, j) => {
+    const off = j - (l.length - 1) / 2;
+    pos.set(id, down ? { x: off * sx, y: li * sy } : { x: li * sx, y: off * sy });
+  }));
+  return pos;
+}
+
+/** Layers per row worth trying for a snake: those near a square drawing. */
+function wrapWidths(layers: string[][], sx: number, sy: number): number[] {
+  const L = layers.length;
+  if (L < 4) return [];
+  const tall = Math.max(...layers.map((l) => l.length));
+  const out = new Set<number>();
+  // Rows of k layers, each row as tall as its tallest layer: aim for width close to height.
+  for (let k = 2; k < L; k++) {
+    const rows = Math.ceil(L / k);
+    const h = rows * (tall * sy + sy * 0.5), w = k * sx;
+    if (w / h > 0.6 && w / h < 1.8) out.add(k);
+  }
+  return [...out].slice(0, 3);
+}
+
+/**
+ * The layers in rows of k, every other row right to left, so the flow snakes
+ * down the page and each step from one row to the next is a short drop.
+ * A layer's states are stacked within its row.
+ */
+function snake(layers: string[][], k: number, sx: number, sy: number): Pos {
+  const pos: Pos = new Map();
+  let top = 0;
+  for (let r = 0; r * k < layers.length; r++) {
+    const row = layers.slice(r * k, r * k + k);
+    const tall = Math.max(...row.map((l) => l.length));
+    row.forEach((l, c) => {
+      const col = r % 2 ? k - 1 - c : c;
+      l.forEach((id, j) => pos.set(id, { x: col * sx, y: top + (j + (tall - l.length) / 2) * sy }));
+    });
+    top += tall * sy;
+  }
+  return pos;
+}
+
+// ---- rings and satellites -----------------------------------------------------
+
+/**
+ * Pieces of the diagram that stay linked when any one state is taken away
+ * (biconnected components; a single line is a piece of two). A state shared
+ * by two pieces is where one hangs off the other.
+ */
+function blocksOf(g: Graph): string[][] {
+  const disc = new Map<string, number>(), low = new Map<string, number>();
+  const stack: Array<[string, string]> = [];
+  const out: string[][] = [];
+  const visit = (u: string, parent?: string) => {
+    disc.set(u, disc.size); low.set(u, disc.get(u)!);
+    for (const v of g.nb.get(u)!) {
+      if (!disc.has(v)) {
+        stack.push([u, v]);
+        visit(v, u);
+        low.set(u, Math.min(low.get(u)!, low.get(v)!));
+        if (low.get(v)! >= disc.get(u)!) {
+          const set = new Set<string>();
+          let e: [string, string];
+          do { e = stack.pop()!; set.add(e[0]); set.add(e[1]); } while (e[0] !== u || e[1] !== v);
+          out.push(g.ids.filter((id) => set.has(id)));
+        }
+      } else if (v !== parent && disc.get(v)! < disc.get(u)!) {
+        stack.push([u, v]);
+        low.set(u, Math.min(low.get(u)!, disc.get(v)!));
+      }
+    }
+  };
+  for (const id of g.ids) if (!disc.has(id)) visit(id);
+  return out;
+}
+
+/** A loop through every state of the piece, starting at `start`: along the lines' directions if possible, else either way. */
+function ringOf(g: Graph, block: string[], start: string): string[] | undefined {
+  if (block.length <= 2) return start === block[0] ? block : [...block].reverse();
+  const inside = new Set(block);
+  for (const next of [(u: string) => g.out.get(u)!, (u: string) => [...g.nb.get(u)!]]) {
+    const path = [start], seen = new Set(path);
+    let found: string[] | undefined, budget = 20000;
+    const dfs = (u: string) => {
+      for (const v of next(u)) {
+        if (found || --budget < 0) return;
+        if (!inside.has(v)) continue;
+        if (v === start && path.length === block.length) { found = [...path]; return; }
+        if (seen.has(v)) continue;
+        seen.add(v); path.push(v); dfs(v); path.pop(); seen.delete(v);
+      }
+    };
+    dfs(start);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** Cells (in steps) for a loop of m states, clockwise from the first: a line, an apex-down triangle, a square, or the edge of a c × r rectangle. */
+function ringShape(m: number, c: number, r: number): Pt[] {
+  if (m === 2) return [{ x: 0, y: 0 }, { x: 1, y: 0 }];
+  if (m === 3) return [{ x: 0, y: 0 }, { x: 0.5, y: 1 }, { x: -0.5, y: 1 }];
+  const cells: Pt[] = [];
+  for (let x = 0; x < c; x++) cells.push({ x, y: 0 });
+  for (let y = 1; y < r; y++) cells.push({ x: c - 1, y });
+  for (let x = c - 2; x >= 0; x--) cells.push({ x, y: r - 1 });
+  for (let y = r - 2; y >= 1; y--) cells.push({ x: 0, y });
+  // One cell more than states: leave out the bottom-left corner.
+  if (cells.length > m) cells.splice(cells.length - r + 1, 1);
+  return cells;
+}
+
+/** Rectangles whose edge holds a loop of m states, squarest first. */
+function ringSizes(m: number): Array<[number, number]> {
+  if (m <= 4) return [[2, 2]];
+  const half = Math.ceil((m + 4) / 2);
+  const out: Array<[number, number]> = [];
+  for (let r = 2; r <= half - 2; r++) out.push([half - r, r]);
+  return out.sort((a, b) => Math.abs(a[0] - a[1]) - Math.abs(b[0] - b[1]));
+}
+
+/**
+ * The largest piece drawn as a loop round the edge of a rectangle (the reset
+ * state's way in at the top left, the flow clockwise), and every piece
+ * hanging off it as its own small shape, a triangle, square or rectangle,
+ * turned to point away from the piece it hangs off, so short side loops sit
+ * next to the state they leave from. Only for diagrams whose every piece has
+ * such a loop. Triangles come out equilateral. One result per rectangle size tried.
+ */
+function rings(g: Graph, sx: number, sy: number): Array<[string, Pos]> {
+  const blocks = blocksOf(g);
+  if (!blocks.length) return [];
+  const rootIdx = blocks.reduce((best, b, i) => (b.length > blocks[best].length ? i : best), 0);
+  const holders = new Map(g.ids.map((id) => [id, [] as number[]]));
+  blocks.forEach((b, i) => b.forEach((id) => holders.get(id)!.push(i)));
+  // Tree of pieces from the root: each piece's parent and the state they share.
+  const via = new Map<number, string>(), parent = new Map<number, number>();
+  const queue = [rootIdx];
+  const seenB = new Set(queue);
+  while (queue.length) {
+    const b = queue.shift()!;
+    for (const id of blocks[b]) for (const c of holders.get(id)!) if (!seenB.has(c)) { seenB.add(c); parent.set(c, b); via.set(c, id); queue.push(c); }
+  }
+  // The root's loop starts where the way to the reset state leaves it.
+  let start = g.init, bi = holders.get(g.init)![0];
+  if (!blocks[rootIdx].includes(g.init)) {
+    while (parent.get(bi) !== rootIdx) bi = parent.get(bi)!;
+    start = via.get(bi)!;
+  }
+  const loops = new Map<number, string[]>();
+  for (const [i, b] of blocks.entries()) {
+    const loop = ringOf(g, b, i === rootIdx ? start : via.get(i)!);
+    if (!loop) return [];
+    loops.set(i, loop);
+  }
+  const turns = [0, 1, 2, 3].flatMap((k) => [false, true].map((flip) => (p: Pt) => {
+    let { x, y } = flip ? { x: -p.x, y: p.y } : p;
+    for (let i = 0; i < k; i++) [x, y] = [-y, x];
+    return { x, y };
+  }));
+  const centroid = (ps: Pt[]) => ({ x: ps.reduce((s, p) => s + p.x, 0) / ps.length, y: ps.reduce((s, p) => s + p.y, 0) / ps.length });
+  const out: Array<[string, Pos]> = [];
+  for (const [c, r] of ringSizes(blocks[rootIdx].length).slice(0, 3)) {
+    const pos: Pos = new Map();
+    const rootLoop = loops.get(rootIdx)!;
+    const side = Math.min(sx, sy);
+    const px = (p: Pt, tri: boolean) => (tri ? { x: p.x * side, y: p.y * side * 0.866 } : { x: p.x * sx, y: p.y * sy });
+    ringShape(rootLoop.length, c, r).forEach((p, i) => pos.set(rootLoop[i], px(p, rootLoop.length === 3)));
+    const centre = new Map([[rootIdx, centroid(rootLoop.map((id) => pos.get(id)!))]]);
+    const todo = [rootIdx];
+    while (todo.length) {
+      const b = todo.shift()!;
+      for (const id of loops.get(b)!) for (const k of holders.get(id)!) {
+        if (parent.get(k) !== b || via.get(k) !== id || centre.has(k)) continue;
+        const loop = loops.get(k)!;
+        const [kc, kr] = ringSizes(loop.length)[0];
+        const shape = ringShape(loop.length, kc, kr);
+        const at = pos.get(id)!, from = centre.get(b)!;
+        let u = { x: at.x - from.x, y: at.y - from.y };
+        const l = Math.hypot(u.x, u.y);
+        u = l > 1e-9 ? { x: u.x / l, y: u.y / l } : { x: 0, y: -1 };
+        let best: Pt[] = [], bestCost = Infinity;
+        for (const turn of turns) {
+          // Rectangles turn on the grid; a triangle turns as drawn, so it stays equilateral.
+          const ps = shape.map((p) => { const q = loop.length === 3 ? turn(px(p, true)) : px(turn(p), false); return { x: at.x + q.x, y: at.y + q.y }; });
+          const m = centroid(ps);
+          let cost = (-2 * ((m.x - at.x) * u.x + (m.y - at.y) * u.y)) / side;
+          for (const p of ps.slice(1)) for (const q of pos.values()) if (Math.hypot(p.x - q.x, p.y - q.y) < 0.9 * side) cost += 10;
+          const home = loop.indexOf(g.init);
+          if (home > 0) cost += (0.3 * (ps[home].x - at.x)) / side; // the reset state towards the left
+          if (cost < bestCost - 1e-9) { bestCost = cost; best = ps; }
+        }
+        loop.forEach((s, i) => { if (i > 0) pos.set(s, best[i]); });
+        centre.set(k, centroid(best));
+        todo.push(k);
+      }
+    }
+    out.push([`ring-${c}x${r}`, pos]);
+  }
+  return out;
+}
+
+/** Undirected edges between different states, each once. */
+function edgePairs(g: Graph): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  for (const a of g.ids) for (const b of g.nb.get(a)!) if (a < b) out.push([a, b]);
+  return out;
+}
+
+function improveGrid(g: Graph, start: string[], cols: number, sx: number, sy: number, R: number, loop = false): [Pos, number] {
+  const n = g.ids.length;
+  const rows = Math.ceil(n / cols);
+  const cells: Pt[] = [];
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) cells.push({ x: c * sx, y: r * sy });
+  // Fill row by row, every other row right to left, so a path snakes through the grid.
+  let snake = cells.map((_, i) => { const r = Math.floor(i / cols), c = i % cols; return r * cols + (r % 2 ? cols - 1 - c : c); });
+  if (loop && rows >= 2 && cols >= 2) {
+    // A loop: along the top row, snaking down through the other columns, then
+    // back up the left column, so the last state comes home in a straight line.
+    const at = (r: number, c: number) => r * cols + c;
+    snake = Array.from({ length: cols }, (_, c) => at(0, c));
+    for (let r = 1; r < rows; r++) for (let k = 0; k < cols - 1; k++) snake.push(at(r, r % 2 ? cols - 1 - k : k + 1));
+    for (let r = rows - 1; r >= 1; r--) snake.push(at(r, 0));
+  }
+  const slot = new Map(start.map((id, i) => [id, snake[i]]));
+  const edges = edgePairs(g);
+  const cost = () => {
+    let c = 0;
+    const segs = edges.map(([a, b]) => [cells[slot.get(a)!], cells[slot.get(b)!], a, b] as const);
+    for (let i = 0; i < segs.length; i++) {
+      const [p, q, a, b] = segs[i];
+      const dx = Math.abs(p.x - q.x) / sx, dy = Math.abs(p.y - q.y) / sy;
+      c += Math.hypot(dx, dy) + (dx && dy ? 0.4 : 0) + 4 * Math.max(0, Math.hypot(dx, dy) - 1.5);
+      for (const [id, k] of slot) if (id !== a && id !== b && segDist(cells[k], p, q) < R + 10) c += 15;
+      for (let j = i + 1; j < segs.length; j++) {
+        const [r, s2, e, f] = segs[j];
+        if (e === a || e === b || f === a || f === b) continue;
+        if (intersect(p, q, r, s2)) c += 10;
+      }
+    }
+    const home = cells[slot.get(g.init)!];
+    if (home.x !== 0) c += 50; // reset state on the left
+    c += (0.2 * home.y) / sy; // and near the top
+    return c;
+  };
+  // Simulated annealing with a fixed seed and a work limit (not a clock), so
+  // the result is the same on every machine.
+  const iters = Math.min(4000, Math.max(300, 4e6 / (edges.length * (edges.length + n) + 1)));
+  let seed = 7;
+  const rnd = () => { seed ^= seed << 13; seed >>>= 0; seed ^= seed >>> 17; seed ^= seed << 5; seed >>>= 0; return seed / 4294967296; };
+  let cur = cost();
+  let best = new Map(slot), bestCost = cur;
+  const owner = (k: number) => { for (const [id, v] of slot) if (v === k) return id; return undefined; };
+  for (let it = 0; it < iters; it++) {
+    const temp = 3 * Math.pow(0.02 / 3, it / iters);
+    const a = g.ids[Math.floor(rnd() * n)];
+    const k = Math.floor(rnd() * cells.length);
+    const from = slot.get(a)!;
+    if (k === from) continue;
+    const other = owner(k);
+    slot.set(a, k);
+    if (other) slot.set(other, from);
+    const c = cost();
+    if (c <= cur || rnd() < Math.exp((cur - c) / temp)) {
+      cur = c;
+      if (c < bestCost - 1e-9) { bestCost = c; best = new Map(slot); }
+    } else { slot.set(a, from); if (other) slot.set(other, k); }
+  }
+  for (const [id, v] of best) slot.set(id, v);
+  cur = bestCost;
+  return [new Map(g.ids.map((id) => [id, cells[slot.get(id)!]])), cur];
+}
+
+// ---- local shapes ---------------------------------------------------------------
+
+/**
+ * Make each triangle of mutually linked states equilateral: keep its
+ * shortest level (or upright) side where the grid put it and move the third
+ * state to the apex on the side it was on. A state already moved for another
+ * triangle stays put, and an apex that would land on another state is skipped.
+ */
+function equilateral(g: Graph, grid: Pos, triangles: number[][], gap: number, step: number, keepRows = false, keepLines = keepRows): Pos {
+  const pos: Pos = new Map(grid);
+  const moved = new Set<string>();
+  // Three in a row can stay: the line skipping the middle one becomes an arc instead.
+  if (keepLines) triangles = triangles.filter((tri) => {
+    const [P, Q, T] = tri.map((i) => pos.get(g.ids[i])!);
+    return Math.abs((Q.x - P.x) * (T.y - P.y) - (Q.y - P.y) * (T.x - P.x)) >= 1;
+  });
+  if (keepRows) triangles = triangles.filter((tri) => {
+    // Two on one row, the third on the next row up or down: make it
+    // equilateral at the same height, so every row stays level. A state with
+    // a line straight up or down to a state outside the triangle keeps its
+    // place: the other two slide sideways around it. If that cannot be done
+    // the triangle is left as it is.
+    const ids = tri.map((i) => g.ids[i]);
+    const k = [0, 1, 2].find((i) => { const [p, q] = ids.filter((_, j) => j !== i).map((id) => pos.get(id)!); return Math.abs(p.y - q.y) < 1; });
+    if (k === undefined || ids.some((id) => moved.has(id))) return true;
+    const apex = pos.get(ids[k])!;
+    const base = ids.filter((_, j) => j !== k).sort((p, q) => pos.get(p)!.x - pos.get(q)!.x);
+    const by = pos.get(base[0])!.y, h = Math.abs(by - apex.y);
+    if (h < 1 || h > 1.5 * step) return true;
+    const half = h / Math.sqrt(3);
+    const pinned = ids.filter((id) => [...g.nb.get(id)!].some((v) => !ids.includes(v) && Math.abs(pos.get(v)!.x - pos.get(id)!.x) < 1));
+    const next: Pos = new Map(pos);
+    if (pinned.length > 1) return false;
+    if (pinned.length === 0 || pinned[0] === ids[k]) {
+      next.set(base[0], { x: apex.x - half, y: by });
+      next.set(base[1], { x: apex.x + half, y: by });
+    } else {
+      const keep = pos.get(pinned[0])!, side = pinned[0] === base[0] ? 1 : -1;
+      next.set(ids[k], { x: keep.x + side * half, y: apex.y });
+      next.set(base.find((id) => id !== pinned[0])!, { x: keep.x + side * 2 * half, y: by });
+    }
+    const ok = [...next].every(([a, p]) => [...next].every(([b, q]) => a === b || Math.hypot(p.x - q.x, p.y - q.y) >= gap));
+    if (!ok) return false;
+    for (const [id, p] of next) pos.set(id, p);
+    ids.forEach((id) => moved.add(id));
+    return false;
+  });
+  for (const tri of triangles) {
+    const ids = tri.map((i) => g.ids[i]);
+    // Candidate bases: level or upright sides first, then shorter ones.
+    const sides = [[0, 1, 2], [1, 2, 0], [0, 2, 1]].map(([i, j, k]) => {
+      const a = pos.get(ids[i])!, b = pos.get(ids[j])!;
+      const aligned = Math.abs(a.x - b.x) < 1 || Math.abs(a.y - b.y) < 1;
+      return { a: ids[i], b: ids[j], apex: ids[k], len: Math.hypot(a.x - b.x, a.y - b.y), aligned };
+    }).filter((e) => !moved.has(e.apex)).sort((p, q) => Number(q.aligned) - Number(p.aligned) || p.len - q.len);
+    for (const { a, b, apex, len } of sides) {
+      const A = pos.get(a)!, B = pos.get(b)!, C = pos.get(apex)!;
+      const mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2;
+      const nx = -(B.y - A.y) / len, ny = (B.x - A.x) / len;
+      const side = (C.x - mx) * nx + (C.y - my) * ny;
+      const h = (Math.sqrt(3) / 2) * len;
+      const tries = side > 1e-6 ? [1] : side < -1e-6 ? [-1] : [-1, 1];
+      const spot = tries.map((k) => ({ x: mx + k * nx * h, y: my + k * ny * h }))
+        .find((p) => [...pos].every(([id, q]) => id === apex || Math.hypot(p.x - q.x, p.y - q.y) >= gap));
+      if (!spot) continue;
+      pos.set(apex, spot);
+      moved.add(apex); moved.add(a); moved.add(b);
+      break;
+    }
+  }
+  levelClusters(g, pos, triangles, gap, step);
+  return pos;
+}
+
+/**
+ * Triangles that share states form a cluster (two make a diamond). When the
+ * apex moves left a cluster tilted or stretched, turn it about its centre so
+ * its sides lie level or upright (a side two triangles share counts most, so
+ * a diamond stands symmetric) and bring its sides back to one grid step, as
+ * far as that keeps it clear of the other states.
+ */
+function levelClusters(g: Graph, pos: Pos, triangles: number[][], gap: number, step: number) {
+  const parent = g.ids.map((_, i) => i);
+  const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  for (const [a, b, c] of triangles) { parent[find(b)] = find(a); parent[find(c)] = find(a); }
+  const clusters = new Map<number, number[][]>();
+  for (const tri of triangles) { const k = find(tri[0]); if (!clusters.has(k)) clusters.set(k, []); clusters.get(k)!.push(tri); }
+  for (const tris of clusters.values()) {
+    const ids = [...new Set(tris.flat())].map((i) => g.ids[i]);
+    const shared = new Map<string, number>();
+    for (const [a, b, c] of tris) for (const [i, j] of [[a, b], [b, c], [a, c]]) { const k = `${g.ids[i]}\u0000${g.ids[j]}`; shared.set(k, (shared.get(k) ?? 0) + 1); }
+    const sides = [...shared.keys()].map((k) => k.split("\u0000"));
+    const pts = ids.map((id) => pos.get(id)!);
+    const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length, cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+    const mean = sides.reduce((sum, [a, b]) => sum + Math.hypot(pos.get(a)!.x - pos.get(b)!.x, pos.get(a)!.y - pos.get(b)!.y), 0) / sides.length;
+    const turn = (a: number) => new Map(ids.map((id) => {
+      const p = pos.get(id)!, c = Math.cos(a), s = Math.sin(a);
+      return [id, { x: cx + (p.x - cx) * c - (p.y - cy) * s, y: cy + (p.x - cx) * s + (p.y - cy) * c }];
+    }));
+    const level = (m: Map<string, Pt>) => sides.reduce((n, [a, b]) => {
+      const p = m.get(a)!, q = m.get(b)!;
+      return n + (Math.abs(p.x - q.x) < 2 || Math.abs(p.y - q.y) < 2 ? 3 ** (shared.get(`${a}\u0000${b}`)! - 1) : 0);
+    }, 0);
+    const clear = (m: Map<string, Pt>) => [...m.values()].every((p) => [...pos].every(([id, q]) => m.has(id) || Math.hypot(p.x - q.x, p.y - q.y) >= gap));
+    let best = new Map(ids.map((id) => [id, pos.get(id)!])), bestLevel = level(best), bestTurn = 0;
+    for (const [a, b] of sides) {
+      const p = pos.get(a)!, q = pos.get(b)!;
+      const phi = Math.atan2(q.y - p.y, q.x - p.x);
+      for (const k of [0, 1, 2, 3]) {
+        let ang = (k * Math.PI) / 2 - phi;
+        ang = Math.atan2(Math.sin(ang), Math.cos(ang));
+        const m = turn(ang);
+        const n = level(m);
+        if ((n > bestLevel || (n === bestLevel && n > 0 && Math.abs(ang) < Math.abs(bestTurn) - 1e-9)) && clear(m)) { best = m; bestLevel = n; bestTurn = ang; }
+      }
+    }
+    // Shrink back towards one grid step per side, as far as it stays clear.
+    for (const k of [step / mean, (1 + step / mean) / 2]) {
+      if (k >= 1) break;
+      const m = new Map([...best].map(([id, p]) => [id, { x: cx + (p.x - cx) * k, y: cy + (p.y - cy) * k }]));
+      if (clear(m)) { best = m; break; }
+    }
+    for (const [id, p] of best) pos.set(id, p);
+  }
+}
+
+/** If a state sits where the start arrow comes in, bring it in from a free side instead: left, top, bottom, right, then the corners. */
+function clearStartArrow(d: FsmDiagram, L: number) {
+  const init = d.states.find((s) => s.isInitial);
+  if (!init) return;
+  const r = stateRadius(d, init);
+  const room = (a: number) => {
+    const ux = Math.cos(a), uy = Math.sin(a);
+    let near = Infinity;
+    for (const s of d.states) {
+      if (s === init) continue;
+      const dx = s.x! - init.x!, dy = s.y! - init.y!;
+      const along = dx * ux + dy * uy, across = Math.abs(dx * uy - dy * ux);
+      if (along > 0 && across < r + stateRadius(d, s) + 10) near = Math.min(near, along);
+    }
+    return near;
+  };
+  const current = init.initialAngle ?? Math.PI;
+  if (room(current) > 2 * L) return;
+  let best = current, bestRoom = room(current);
+  for (const a of [Math.PI, -Math.PI / 2, Math.PI / 2, 0, (-3 * Math.PI) / 4, (3 * Math.PI) / 4, -Math.PI / 4, Math.PI / 4]) {
+    if (bestRoom > 2 * L) break;
+    if (room(a) > bestRoom + 1e-9) { best = a; bestRoom = room(a); }
+  }
+  if (best !== current) init.initialAngle = best;
+}
+
+// ---- finishing ------------------------------------------------------------------
+
+const unit = (v: Pt) => { const l = Math.hypot(v.x, v.y) || 1e-9; return { x: v.x / l, y: v.y / l }; };
+
+/** Same curve as planDiagram: control point 2*curve to the left of travel. */
+function arc(a: Pt, b: Pt, curve: number): Pt[] {
+  const dir = unit({ x: b.x - a.x, y: b.y - a.y });
+  const n = { x: dir.y, y: -dir.x };
+  const c = { x: (a.x + b.x) / 2 + n.x * curve * 2, y: (a.y + b.y) / 2 + n.y * curve * 2 };
+  return Array.from({ length: 21 }, (_, i) => {
+    const t = i / 20, u = 1 - t;
+    return { x: u * u * a.x + 2 * u * t * c.x + t * t * b.x, y: u * u * a.y + 2 * u * t * c.y + t * t * b.y };
+  });
+}
+
+/**
+ * Lines that would cross a state become arcs, the smallest that clear every
+ * state; "left of travel" first (a back edge along a row bows below it, a
+ * forward jump above), the other side when that crosses fewer lines. Shorter
+ * jumps go first so longer ones nest around them. Opposite edges that both
+ * stay straight are drawn as two parallel lines.
+ */
+function routeEdges(d: FsmDiagram) {
+  const at = new Map(d.states.map((s) => [s.id, { x: s.x!, y: s.y!, r: stateRadius(d, s), id: s.id }]));
+  const groups = groupsOf(d).filter((ts) => ts[0].from !== ts[0].to);
+  const key = (a: string, b: string) => `${a}\u0000${b}`;
+  const has = new Set(groups.map((ts) => key(ts[0].from, ts[0].to)));
+  const clear = (pts: Pt[], a: string, b: string) => [...at.values()].every((s) => s.id === a || s.id === b || pts.every((p) => Math.hypot(p.x - s.x, p.y - s.y) > s.r + 12));
+  const lines = new Map<string, Pt[]>();
+  const blocked: typeof groups = [];
+  for (const ts of groups) {
+    const { from, to } = ts[0];
+    const pts = arc(at.get(from)!, at.get(to)!, 0);
+    if (clear(pts, from, to)) lines.set(key(from, to), pts);
+    else blocked.push(ts);
+  }
+  for (const ts of groups) {
+    const { from, to } = ts[0];
+    if (lines.has(key(from, to)) && has.has(key(to, from))) for (const t of ts) t.curve = 0;
+  }
+  const len = (ts: (typeof groups)[0]) => Math.hypot(at.get(ts[0].to)!.x - at.get(ts[0].from)!.x, at.get(ts[0].to)!.y - at.get(ts[0].from)!.y);
+  blocked.sort((a, b) => len(a) - len(b));
+  for (const ts of blocked) {
+    const { from, to } = ts[0];
+    const a = at.get(from)!, b = at.get(to)!;
+    // Opposite edges both bending: same sign puts them on opposite sides.
+    const sides = has.has(key(to, from)) && !lines.has(key(to, from)) ? [1] : [1, -1];
+    let best: { curve: number; pts: Pt[]; cost: number } | undefined;
+    for (const side of sides) {
+      for (const m of [30, 45, 60, 80, 100, 130, 160, 200, 250, 300, 360, 440]) {
+        const pts = arc(a, b, side * m);
+        if (!clear(pts, from, to)) continue;
+        const crossings = [...lines.values()].reduce((s, o) => s + crossCount(pts, o, at), 0);
+        const cost = crossings * 10 + m / 100 + (side < 0 ? 0.5 : 0);
+        if (!best || cost < best.cost) best = { curve: side * m, pts, cost };
+        break;
+      }
+    }
+    if (!best) continue; // leave it to planDiagram
+    for (const t of ts) t.curve = best.curve;
+    lines.set(key(from, to), best.pts);
+  }
+}
+
+/** Each self loop points to its state's widest free side, preferring outward and straight up/down/left/right. */
+function placeLoops(d: FsmDiagram) {
+  const at = new Map(d.states.map((s) => [s.id, { x: s.x!, y: s.y!, r: stateRadius(d, s) }]));
+  const cx = d.states.reduce((s, p) => s + p.x!, 0) / d.states.length;
+  const cy = d.states.reduce((s, p) => s + p.y!, 0) / d.states.length;
+  const groups = groupsOf(d);
+  const lines: Pt[][] = [];
+  const busy = new Map(d.states.map((s) => [s.id, [] as number[]]));
+  const init = d.states.find((s) => s.isInitial);
+  if (init) busy.get(init.id)!.push(init.initialAngle ?? Math.PI);
+  for (const ts of groups) {
+    const { from, to } = ts[0];
+    if (from === to) continue;
+    const a = at.get(from)!, b = at.get(to)!;
+    const pts = arc(a, b, ts[0].curve ?? 0);
+    lines.push(pts);
+    // Direction the line leaves each end.
+    busy.get(from)!.push(Math.atan2(pts[2].y - a.y, pts[2].x - a.x));
+    busy.get(to)!.push(Math.atan2(pts[18].y - b.y, pts[18].x - b.x));
+  }
+  const loops: Pt[] = [];
+  for (const ts of groups) {
+    const id = ts[0].from;
+    if (id !== ts[0].to) continue;
+    const s = at.get(id)!;
+    const out = Math.hypot(s.x - cx, s.y - cy) > 20 ? Math.atan2(s.y - cy, s.x - cx) : undefined;
+    let best = -Math.PI / 2, bestScore = -Infinity;
+    for (let k = 0; k < 8; k++) {
+      const ang = -Math.PI / 2 + (k * Math.PI) / 4;
+      const c = { x: s.x + 1.5 * s.r * Math.cos(ang), y: s.y + 1.5 * s.r * Math.sin(ang) };
+      const rl = 0.75 * s.r;
+      const used = busy.get(id)!;
+      // A right angle to the nearest line is room enough; past that, direction matters more.
+      let sc = Math.min(Math.PI / 2, ...used.map((u) => Math.abs(Math.atan2(Math.sin(ang - u), Math.cos(ang - u)))));
+      if (out !== undefined) sc += 0.5 * Math.cos(ang - out);
+      if (k % 2 === 0) sc += 0.6; // straight up, down, left or right
+      // Ties: up in the top half, down in the bottom half, so a row's loops match.
+      if (k === 0) sc += s.y < cy - 20 ? 0.15 : 0.05;
+      if (k === 4 && s.y > cy + 20) sc += 0.15;
+      for (const [oid, o] of at) if (oid !== id && Math.hypot(c.x - o.x, c.y - o.y) < rl + o.r + 16) sc -= 5;
+      for (const l of loops) if (Math.hypot(c.x - l.x, c.y - l.y) < 2 * rl + 30) sc -= 5;
+      for (const pts of lines) if (pts.some((p) => Math.hypot(p.x - c.x, p.y - c.y) < rl + 8)) sc -= 1.5;
+      if (sc > bestScore + 1e-9) { bestScore = sc; best = ang; }
+    }
+    loops.push({ x: s.x + 1.5 * s.r * Math.cos(best), y: s.y + 1.5 * s.r * Math.sin(best) });
+    for (const t of ts) t.loopAngle = best;
+  }
+}

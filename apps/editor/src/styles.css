@@ -1,0 +1,183 @@
+/* Editor chrome, styled after Analog Canvas: warm neutral chrome around a
+   white canvas, quiet ghost buttons, one blue accent. Exports don't use these. */
+:root {
+  --chrome-bg: #f7f6f3;
+  --surface: #ffffff;
+  --surface-muted: #f1f1ef;
+  --surface-hover: #ebebea;
+  --border: #e9e9e7;
+  --border-strong: #dfdfde;
+  --text: #37352f;
+  --muted: #787774;
+  --disabled: #b4b4b0;
+  --accent: #2383e2;
+  --accent-soft: rgb(35 131 226 / 10%);
+  --accent-tint: #e7f3fc;
+  --danger: #eb5757;
+  --radius: 6px;
+  --control-h: 28px;
+  --shadow-md: 0 8px 24px rgb(15 15 15 / 8%);
+  --shadow-lg: 0 18px 48px rgb(15 15 15 / 12%);
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--text);
+}
+* { box-sizing: border-box; }
+html, body, #root { margin: 0; height: 100%; background: var(--chrome-bg); }
+.app { display: flex; flex-direction: column; height: 100%; }
+
+/* ---- Buttons ---- */
+button {
+  font: inherit; height: var(--control-h); padding: 0 10px; border: 1px solid var(--border-strong); border-radius: var(--radius);
+  background: var(--surface); color: var(--text); cursor: pointer; white-space: nowrap;
+}
+button:hover:not(:disabled) { background: var(--surface-hover); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button:disabled { color: var(--disabled); cursor: default; }
+button.ghost { border-color: transparent; background: transparent; }
+button.ghost:hover:not(:disabled) { background: var(--surface-hover); }
+button.icon { width: var(--control-h); padding: 0; font-size: 15px; }
+button.small { height: 22px; padding: 0 8px; font-size: 11px; color: var(--muted); }
+button.danger { color: var(--danger); }
+button.danger:hover:not(:disabled) { background: #fdecec; border-color: #f5c2c2; }
+/* One-click toggles: pressed means the layer or mode is on. */
+button.chip { height: 26px; border-radius: 999px; border-color: var(--border); background: var(--surface-muted); color: var(--muted); font-size: 12px; }
+button.chip[aria-pressed="true"] { border-color: transparent; background: var(--accent-tint); color: var(--accent); }
+.seg { display: inline-flex; padding: 2px; gap: 2px; border-radius: 999px; background: var(--surface-muted); border: 1px solid var(--border); }
+.seg button { height: 22px; padding: 0 9px; border: 0; border-radius: 999px; background: transparent; color: var(--muted); font-size: 12px; }
+.seg button.on { background: var(--surface); color: var(--accent); box-shadow: 0 1px 2px rgb(15 15 15 / 10%); }
+.sep { width: 1px; height: 18px; background: var(--border-strong); margin: 0 4px; flex: none; }
+
+/* ---- Menu bar ---- */
+.menubar { display: flex; align-items: center; gap: 4px; min-height: 44px; padding: 0 12px; background: var(--surface); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.menubar .brand { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 650; margin-right: 12px; }
+.menubar .logo { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--text); box-shadow: inset 0 0 0 2px var(--surface), inset 0 0 0 4px var(--accent); }
+.menubar .group { display: inline-flex; align-items: center; gap: 2px; }
+.kicker { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: 0.06em; margin: 0 4px 0 2px; }
+.menubar .file { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; color: var(--muted); max-width: 40ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menubar .file .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
+.menubar .icon-menu { margin-left: 8px; flex: none; }
+.icon-menu .menu-trigger { width: 30px; height: 30px; padding: 0; justify-content: center; border-color: transparent; background: transparent; color: var(--text); }
+.icon-menu .menu-list { left: auto; right: 0; min-width: 140px; }
+.menu-list .check { width: 12px; color: var(--accent); margin-right: -8px; }
+
+/* ---- Workspace ---- */
+.main { flex: 1; display: flex; min-height: 0; }
+.canvas-wrap { position: relative; flex: 1; display: flex; min-width: 0; }
+.canvas { flex: 1; display: block; background: var(--surface); touch-action: none; user-select: none; cursor: default; }
+.canvas .state, .canvas .edge { cursor: pointer; }
+.canvas .resize-handle { cursor: nwse-resize; }
+.caret, .caret-line { animation: blink 1s steps(1) infinite; fill: var(--accent); font-weight: 400; }
+@keyframes blink { 50% { opacity: 0; } }
+
+/* ---- Inspector (right panel) ---- */
+.inspector { width: 260px; padding: 14px; border-left: 1px solid var(--border); background: var(--chrome-bg); display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+.inspector h3 { margin: 0; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+.inspector label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
+.inspector label.check { flex-direction: row; align-items: center; gap: 6px; color: var(--text); font-size: 13px; }
+.inspector input:not([type]), .inspector input[type="text"], .inspector input[type="number"] {
+  font: inherit; height: var(--control-h); padding: 0 8px; border: 1px solid var(--border-strong); border-radius: var(--radius); color: var(--text); background: var(--surface);
+}
+.inspector input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.inspector input[type="checkbox"] { accent-color: var(--accent); }
+.inspector .align { display: flex; flex-direction: column; gap: 6px; }
+.inspector .align .row { display: flex; gap: 6px; }
+.inspector .align .row button { flex: 1; }
+.hint { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+
+/* ---- Status bar ---- */
+.statusbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 36px; padding: 0 12px; border-top: 1px solid var(--border); background: var(--surface); }
+.statusbar .status { margin: 0; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.statusbar .muted { color: var(--disabled); }
+.statusbar .view-controls { display: flex; align-items: center; gap: 6px; flex: none; }
+.zoom-controls { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border-radius: 999px; background: var(--surface-muted); border: 1px solid var(--border); }
+.zoom-controls button { height: 26px; border: 0; border-radius: 999px; background: transparent; color: var(--text); }
+.zoom-controls button:hover:not(:disabled) { background: var(--surface-hover); }
+.zoom-controls button.icon { width: 30px; display: inline-grid; place-items: center; }
+.zoom-controls .zoom { min-width: 4.2em; padding: 0 4px; font-variant-numeric: tabular-nums; font-size: 12px; color: var(--muted); }
+
+/* ---- Shortcut sheet (Hints) ---- */
+.hints {
+  position: absolute; z-index: 3; top: 12px; right: 12px; width: min(780px, calc(100% - 24px)); max-height: calc(100% - 24px); overflow-y: auto;
+  display: grid; gap: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px;
+  background: rgb(255 255 255 / 94%); backdrop-filter: blur(6px); box-shadow: var(--shadow-md); color: var(--muted);
+}
+.hints header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.hints h4 { margin: 0; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; }
+.hints ul { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); column-gap: 16px; row-gap: 4px; margin: 0; padding: 0; list-style: none; }
+.hints li { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 8px; font-size: 12px; line-height: 1.2; min-height: 26px; }
+.hints .keys { display: flex; align-items: center; gap: 3px; }
+.hints .what { color: var(--text); }
+kbd {
+  display: inline-grid; place-items: center; min-width: 24px; height: 22px; padding: 0 6px; border: 1px solid var(--border-strong); border-radius: 5px;
+  background: var(--surface-muted); box-shadow: 0 1px 0 var(--border-strong); color: var(--text); font: inherit; font-size: 11px; font-weight: 600; white-space: nowrap;
+}
+
+/* ---- Dialogs and toasts ---- */
+.modal-backdrop { position: fixed; inset: 0; z-index: 10; background: rgb(15 15 15 / 30%); display: flex; align-items: center; justify-content: center; }
+.modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; width: min(760px, 92vw); display: flex; flex-direction: column; gap: 10px; box-shadow: var(--shadow-lg); }
+.modal h3 { margin: 0; font-size: 14px; }
+.modal textarea { height: 50vh; font: 12px/1.45 ui-monospace, "SF Mono", Menlo, Consolas, monospace; padding: 8px; border: 1px solid var(--border-strong); border-radius: var(--radius); resize: vertical; background: var(--chrome-bg); color: var(--text); }
+.modal .row { display: flex; gap: 6px; justify-content: flex-end; }
+.modal.confirm { width: min(380px, 92vw); }
+.modal.confirm p { margin: 0; line-height: 1.6; }
+
+.toast { position: fixed; z-index: 11; bottom: 48px; left: 50%; transform: translateX(-50%); background: #fdecec; color: #8a1f1f; border: 1px solid #f5c2c2; padding: 8px 14px; border-radius: 8px; cursor: pointer; max-width: 80vw; box-shadow: var(--shadow-md); }
+.toast.ok { background: var(--text); color: #fff; border-color: transparent; }
+
+/* Narrow windows (phones, small embeds): panel goes under the canvas. */
+@media (max-width: 760px) {
+  .main { flex-direction: column; }
+  .inspector { width: auto; max-height: 38%; border-left: 0; border-top: 1px solid var(--border); }
+  .statusbar { flex-wrap: wrap; padding: 4px 8px; }
+  .statusbar .status { display: none; }
+  .statusbar .view-controls { flex: 1; min-width: 0; flex-wrap: wrap; row-gap: 4px; }
+}
+
+/* ---- Menu bar drop-downs ---- */
+.menu { position: relative; }
+.menu-trigger { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px 0 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-muted); color: var(--text); font-size: 12px; font-weight: 500; }
+.menu-trigger .caret-down { color: var(--muted); }
+.menu-trigger:hover:not(:disabled), .menu-trigger.active { background: var(--surface-hover); border-color: var(--border-strong); }
+.menu-list { position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; min-width: 220px; margin: 0; padding: 4px; list-style: none; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-md); }
+.menu-list li { position: relative; }
+.menu-list button { display: flex; align-items: center; gap: 16px; width: 100%; border: 0; background: transparent; text-align: left; border-radius: 4px; }
+.menu-list button:hover, .menu-list button[aria-expanded="true"] { background: var(--surface-hover); }
+.menu-list .shortcut { margin-left: auto; color: var(--muted); font-size: 12px; }
+.menu-list .chevron { margin-left: auto; color: var(--muted); font-size: 15px; }
+.menu-list.submenu { top: -5px; left: calc(100% + 4px); min-width: 140px; }
+
+/* Number boxes with our own step arrows (transparent, step from the default when empty). */
+.stepper { position: relative; display: flex; }
+.stepper input { flex: 1; min-width: 0; padding-right: 26px !important; -moz-appearance: textfield; }
+.stepper input::-webkit-inner-spin-button, .stepper input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.stepper .arrows { position: absolute; top: 3px; bottom: 3px; right: 4px; display: flex; flex-direction: column; width: 18px; }
+.stepper .arrows button { flex: 1; height: auto; padding: 0; border: 0; border-radius: 3px; background: transparent; color: var(--muted); display: grid; place-items: center; }
+.stepper .arrows button:hover { background: transparent; color: var(--accent); }
+.inspector .field { display: flex; flex-direction: column; gap: 4px; }
+.inspector .field-label { color: var(--muted); font-size: 12px; }
+.seg.wide { display: flex; }
+.seg.wide button { flex: 1; height: 24px; font-size: 13px; }
+button.with-icon { display: inline-flex; align-items: center; gap: 4px; }
+button.with-icon svg { width: 14px; height: 14px; }
+
+/* ---- Import Verilog ---- */
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover:not(:disabled) { background: #1f74c9; }
+button.primary:disabled { background: var(--surface-muted); border-color: var(--border-strong); color: var(--disabled); }
+.modal.verilog-import textarea { height: 46vh; }
+.modal .row .spacer { flex: 1; }
+.check-inline { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.check-inline input { accent-color: var(--accent); }
+.import-error { margin: 0; padding: 8px 10px; border-radius: var(--radius); background: #fdecec; color: #8a1f1f; font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
+.import-report { position: absolute; left: 12px; bottom: 12px; z-index: 5; width: min(360px, calc(100% - 24px)); max-height: 60%; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-md); padding: 10px 12px; font-size: 12px; }
+.import-report .head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.import-report .head button { height: 22px; width: 22px; }
+.import-report dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 0; }
+.import-report dt { color: var(--muted); }
+.import-report dd { margin: 0; overflow-wrap: anywhere; }
+.import-report code { font: 11px ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+.import-report .warnings { margin: 8px 0 0; padding-left: 16px; color: #8a5a00; line-height: 1.5; }
+.verilog-import .machine-pick { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); margin: 8px 0 0; }
+.verilog-import .machine-pick select { font: inherit; color: var(--text); padding: 0 6px; border-radius: var(--radius); border: 1px solid var(--border-strong); background: var(--surface); height: var(--control-h); }

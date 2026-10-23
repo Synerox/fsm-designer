@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "seq_detector_1011",
+  "type": "mealy",
+  "clock": { "name": "clk" },
+  "reset": { "name": "rst_n", "activeLow": true, "async": true },
+  "inputs": [{ "name": "x", "width": 1 }],
+  "outputs": [{ "name": "z", "width": 1, "default": 0 }],
+  "states": [
+    { "id": "s0", "name": "IDLE", "isInitial": true, "isAccepting": false, "outputs": {}, "x": 100, "y": 200 },
+    { "id": "s1", "name": "GOT_1", "isInitial": false, "isAccepting": false, "outputs": {}, "x": 250, "y": 200 },
+    { "id": "s2", "name": "GOT_10", "isInitial": false, "isAccepting": false, "outputs": {}, "x": 400, "y": 200 },
+    { "id": "s3", "name": "GOT_101", "isInitial": false, "isAccepting": false, "outputs": {}, "x": 550, "y": 200 }
+  ],
+  "transitions": [
+    { "id": "t0", "from": "s0", "to": "s1", "condition": "x", "outputs": {} },
+    { "id": "t1", "from": "s0", "to": "s0", "condition": "!x", "outputs": {} },
+    { "id": "t2", "from": "s1", "to": "s2", "condition": "!x", "outputs": {} },
+    { "id": "t3", "from": "s1", "to": "s1", "condition": "x", "outputs": {} },
+    { "id": "t4", "from": "s2", "to": "s3", "condition": "x", "outputs": {} },
+    { "id": "t5", "from": "s2", "to": "s0", "condition": "!x", "outputs": {} },
+    { "id": "t6", "from": "s3", "to": "s1", "condition": "x", "outputs": { "z": 1 } },
+    { "id": "t7", "from": "s3", "to": "s2", "condition": "!x", "outputs": {} }
+  ]
+}

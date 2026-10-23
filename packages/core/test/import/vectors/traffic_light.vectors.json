@@ -1,0 +1,15 @@
+{
+  "description": "Traffic light controller (Moore). Lights: 0 red, 1 yellow, 2 green.",
+  "vectors": [
+    { "in": { "car": 0, "timer_done": 1 }, "state": "mg", "out": { "main_light": 2, "side_light": 0, "timer_start": 0 } },
+    { "in": { "car": 1, "timer_done": 0 }, "state": "mg", "out": { "main_light": 2, "side_light": 0, "timer_start": 0 } },
+    { "in": { "car": 1, "timer_done": 1 }, "state": "mg", "out": { "main_light": 2, "side_light": 0, "timer_start": 0 } },
+    { "in": { "car": 1, "timer_done": 0 }, "state": "my", "out": { "main_light": 1, "side_light": 0, "timer_start": 1 } },
+    { "in": { "car": 1, "timer_done": 1 }, "state": "my", "out": { "main_light": 1, "side_light": 0, "timer_start": 1 } },
+    { "in": { "car": 1, "timer_done": 0 }, "state": "sg", "out": { "main_light": 0, "side_light": 2, "timer_start": 0 } },
+    { "in": { "car": 0, "timer_done": 0 }, "state": "sg", "out": { "main_light": 0, "side_light": 2, "timer_start": 0 } },
+    { "in": { "car": 0, "timer_done": 0 }, "state": "sy", "out": { "main_light": 0, "side_light": 1, "timer_start": 1 } },
+    { "in": { "car": 0, "timer_done": 1 }, "state": "sy", "out": { "main_light": 0, "side_light": 1, "timer_start": 1 } },
+    { "in": { "car": 0, "timer_done": 0 }, "state": "mg", "out": { "main_light": 2, "side_light": 0, "timer_start": 0 } }
+  ]
+}
