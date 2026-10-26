@@ -982,6 +982,65 @@ function routeEdges(d: FsmDiagram) {
     for (const t of ts) t.curve = best.curve;
     lines.set(key(from, to), best.pts);
   }
+  uncross(groups, at, lines, has, clear);
+}
+
+/**
+ * Lines that cross other lines bow around them when an arc that clears every
+ * state crosses fewer: the edge closing a loop drawn round a rectangle swings
+ * round the outside instead of cutting across, and a diagonal of a square
+ * bends round its corner. Greedy, a few passes, the line with most crossings
+ * first; a line is only bent while that lowers its crossings, so a drawing
+ * that cannot be untangled keeps its straight lines.
+ */
+function uncross(
+  groups: FsmDiagram["transitions"][],
+  at: Map<string, { x: number; y: number; r: number; id: string }>,
+  lines: Map<string, Pt[]>,
+  has: Set<string>,
+  clear: (pts: Pt[], a: string, b: string) => boolean,
+) {
+  const key = (a: string, b: string) => `${a}\u0000${b}`;
+  const routed = groups.filter((ts) => lines.has(key(ts[0].from, ts[0].to)));
+  const curveOf = (ts: (typeof groups)[0]) => ts[0].curve ?? 0;
+  const crossings = (ts: (typeof groups)[0], pts: Pt[]) =>
+    routed.reduce((n, o) => (o === ts ? n : n + crossCount(pts, lines.get(key(o[0].from, o[0].to))!, at)), 0);
+  const cost = (c: number, curve: number) => c * 10 + Math.abs(curve) / 100 + (curve < 0 ? 0.5 : 0);
+  for (let pass = 0; pass < 4; pass++) {
+    const tangled = routed
+      .map((ts) => ({ ts, n: crossings(ts, lines.get(key(ts[0].from, ts[0].to))!) }))
+      .filter((e) => e.n > 0)
+      .sort((p, q) => q.n - p.n);
+    if (!tangled.length) return;
+    let changed = false;
+    for (const { ts } of tangled) {
+      const { from, to } = ts[0];
+      const a = at.get(from)!, b = at.get(to)!;
+      const cur = lines.get(key(from, to))!;
+      const now = cost(crossings(ts, cur), curveOf(ts));
+      if (now < 10) continue; // untangled by an earlier bend this pass
+      // Opposite edges stay on opposite sides: same sign as the other, or left of travel while the other is straight.
+      const back = groups.find((o) => o[0].from === to && o[0].to === from);
+      const sides = !back ? [1, -1] : (back[0].curve ?? 0) < 0 ? [-1] : [1];
+      const chord = Math.hypot(b.x - a.x, b.y - a.y);
+      let best: { curve: number; pts: Pt[]; cost: number } | undefined;
+      for (const side of sides) {
+        for (const m of [30, 45, 60, 80, 100, 130, 160, 200, 250, 300, 360, 440]) {
+          if (m > Math.max(220, chord * 0.6)) break;
+          const pts = arc(a, b, side * m);
+          if (!clear(pts, from, to)) continue;
+          const c = cost(crossings(ts, pts), side * m);
+          if (!best || c < best.cost) best = { curve: side * m, pts, cost: c };
+          if (c < 10) break; // no crossings left on this side; a bigger bow only costs more
+        }
+      }
+      if (!best || best.cost >= now - 1e-9) continue;
+      for (const t of ts) t.curve = best.curve;
+      lines.set(key(from, to), best.pts);
+      changed = true;
+    }
+    if (!changed) return;
+  }
 }
 
 /** Each self loop points to its state's widest free side, preferring outward and straight up/down/left/right. */
