@@ -2,14 +2,15 @@
 // it with @fsm/core, and saves it back, so the store decides where the
 // document actually lives.
 
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { launchApp } from "./app.ts";
 import type { AppOptions } from "./app.ts";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as core from "@fsm/core";
-import type { FsmDiagram } from "@fsm/core";
+import type { FsmDiagram, Transition } from "@fsm/core";
+import { checkName } from "./store.ts";
 import type { DiagramStore } from "./store.ts";
 
 type Content =
@@ -29,7 +30,8 @@ function guard<A>(fn: (args: A) => Promise<Result>) {
     try {
       return await fn(args);
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
+      const msg = e instanceof Error ? e.message : String(e);
+      return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
     }
   };
 }
@@ -103,24 +105,65 @@ function summary(d: FsmDiagram): string {
   return `${core.describe(d)}\n\n${issues}`;
 }
 
+/** Why a condition is not a Verilog expression, or undefined when it parses. The editor accepts any text, so this is only a warning. */
+function conditionProblem(condition: string): string | undefined {
+  if (!condition.trim()) return undefined;
+  try {
+    core.parseExpression(condition);
+    return undefined;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
+function conditionWarnings(d: FsmDiagram, ts: Transition[] = d.transitions): string[] {
+  const nm = (id: string) => d.states.find((s) => s.id === id)?.name ?? id;
+  return ts.flatMap((t) => {
+    const why = conditionProblem(t.condition);
+    return why ? [`Transition ${t.id} (${nm(t.from)} -> ${nm(t.to)}): condition "${t.condition}" is not a valid Verilog expression (${why}); it will be drawn as written`] : [];
+  });
+}
+
 function checks(d: FsmDiagram): string {
   const issues = core.validate(d);
   const lines = [
     ...issues.filter((i) => i.level === "error").map((i) => `ERROR ${i.message}`),
     ...issues.filter((i) => i.level === "warning").map((i) => `warning ${i.message}`),
+    ...conditionWarnings(d).map((w) => `warning ${w}`),
   ];
   return lines.length ? `Validation:\n${lines.map((l) => `  ${l}`).join("\n")}` : "Validation: OK";
 }
 
+/** Load, change and save one diagram; the store's lock keeps concurrent calls from losing each other's edits. */
 async function mutate(store: DiagramStore, name: string, fn: (d: FsmDiagram) => Promise<string> | string): Promise<Result> {
-  const d = await store.load(name);
-  const msg = await fn(d);
-  await store.save(d);
-  return text(msg);
+  return store.lock(name, async () => {
+    const d = await store.load(name);
+    const msg = await fn(d);
+    await store.save(d);
+    return text(msg);
+  });
 }
 
 const hasLayout = (d: FsmDiagram) => d.states.every((s) => s.x !== undefined && s.y !== undefined);
-const LAYOUT_HINT = "Positions are not updated automatically; call auto_layout when you have finished adding states.";
+const LAYOUT_HINT = "It has no position yet: export_fsm places unplaced states automatically, or call auto_layout to re-arrange the whole diagram once you have finished adding states.";
+
+/** A condition note for the reply of add_transition/update_transition, or "". */
+function conditionNote(d: FsmDiagram, t: Transition): string {
+  const w = conditionWarnings(d, [t]);
+  return w.length ? ` Note: ${w[0]}.` : "";
+}
+
+/** Read a Verilog file with an error an agent can act on. */
+async function readSource(file: string): Promise<string> {
+  try {
+    if ((await stat(file)).isDirectory()) throw new Error(`${file} is a folder, not a Verilog file`);
+    return await readFile(file, "utf8");
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") throw new Error(`File not found: ${file} (relative paths are resolved inside the workspace folder; give an absolute path or pass the source as code)`);
+    throw e;
+  }
+}
 
 // ---- registration -----------------------------------------------------------
 
@@ -131,29 +174,31 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
       title: "Create FSM",
       description:
         "Create (or replace) a whole FSM state diagram in one call. This is the preferred way to build a diagram: " +
-        "give the states and transitions, and the server validates it, lays it out automatically (states without x/y), and saves it. " +
-        "Moore machines put outputs on states; Mealy machines put outputs on transitions. " +
+        "give the states and transitions, and the server validates it, lays it out automatically (states without x/y), and saves it as <name>.fsm.json in the workspace. " +
+        "Declare every signal in inputs/outputs first: conditions may only use inputs, and outputs may only be set for declared outputs. " +
+        "Moore machines put outputs on states; Mealy machines put outputs on transitions. Exactly one state is the initial (reset) state. " +
         "Then use export_fsm to get PNG/SVG/LaTeX. To draw an FSM that already exists as Verilog code, use import_verilog instead.",
       inputSchema: {
         name: fsmName,
-        type: z.enum(["moore", "mealy"]).default("moore"),
+        type: z.enum(["moore", "mealy"]).default("moore").describe("moore: outputs depend on the state only (set them on states); mealy: outputs depend on state and inputs (set them on transitions)"),
         inputs: z.array(signal).default([]).describe("input ports, e.g. [\"x\", {\"name\":\"cnt\",\"width\":2}]"),
-        outputs: z.array(signal).default([]).describe("output ports"),
-        states: z.array(stateSpec).min(1),
-        transitions: z.array(transitionSpec).default([]),
+        outputs: z.array(signal).default([]).describe("output ports, e.g. [\"z\", {\"name\":\"led\",\"width\":3,\"default\":0}]"),
+        states: z.array(stateSpec).min(1).describe("at least one state; the first one is the initial state unless another has isInitial: true"),
+        transitions: z.array(transitionSpec).default([]).describe("from/to are state names from `states`"),
         clock: z.object({ name: z.string() }).optional().describe("default {\"name\":\"clk\"}"),
         reset: z.object({ name: z.string(), activeLow: z.boolean(), async: z.boolean() }).partial().optional()
           .describe("default {\"name\":\"rst_n\",\"activeLow\":true,\"async\":true}"),
-        layout: z.boolean().optional().describe("true: auto layout every state; default: only place states given without positions"),
-        overwrite: z.boolean().default(false).describe("replace an existing FSM with the same name"),
+        layout: z.boolean().optional().describe("true: auto layout every state, ignoring given x/y; default: only place states given without positions"),
+        overwrite: z.boolean().default(false).describe("replace an existing FSM with the same name (otherwise an existing name is an error)"),
       },
       annotations: { destructiveHint: true, idempotentHint: true },
     },
     guard(async (a) => {
-      if (!a.overwrite && (await store.exists(a.name)))
-        throw new Error(`An FSM named "${a.name}" already exists. Pass overwrite: true to replace it, or edit it with add_state/add_transition.`);
+      checkName(a.name);
       const states = a.states.map(stateInput);
-      if (!states.some((s) => s.isInitial)) states[0].isInitial = true;
+      const initial = states.filter((s) => s.isInitial);
+      if (initial.length > 1) throw new Error(`Only one state can be the initial state; isInitial is set on ${initial.map((s) => s.name).join(", ")}`);
+      if (!initial.length) states[0].isInitial = true;
       const d = core.parseDiagram({
         name: a.name, type: a.type, inputs: a.inputs, outputs: a.outputs, clock: a.clock, reset: a.reset,
         states, transitions: a.transitions.map(transitionInput),
@@ -167,8 +212,14 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
         if (asked[i].curve !== undefined) t.curve = asked[i].curve;
         if (asked[i].loopAngle !== undefined) t.loopAngle = asked[i].loopAngle;
       });
-      await store.save(d);
-      return text(`Created "${d.name}" at ${store.location}.\n\n${summary(d)}`);
+      const verb = await store.lock(a.name, async () => {
+        const existed = await store.exists(a.name);
+        if (existed && !a.overwrite)
+          throw new Error(`An FSM named "${a.name}" already exists. Pass overwrite: true to replace it, or edit it with add_state/add_transition.`);
+        await store.save(d);
+        return existed ? "Replaced" : "Created";
+      });
+      return text(`${verb} "${d.name}" (${store.fileOf?.(d.name) ?? store.location}).\n\n${summary(d)}`);
     }),
   );
 
@@ -206,12 +257,15 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
 
   server.registerTool(
     "delete_fsm",
-    { title: "Delete FSM", description: "Delete an FSM diagram file from the workspace.", inputSchema: { name: fsmName }, annotations: { destructiveHint: true } },
-    guard(async ({ name }) => {
-      await store.load(name);
-      await store.remove(name);
-      return text(`Deleted "${name}".`);
-    }),
+    { title: "Delete FSM", description: "Delete an FSM diagram file from the workspace. This cannot be undone.", inputSchema: { name: fsmName }, annotations: { destructiveHint: true, idempotentHint: false } },
+    guard(async ({ name }) =>
+      store.lock(name, async () => {
+        // exists(), not load(): a corrupt file must still be deletable.
+        if (!(await store.exists(name))) throw new Error(`No FSM named "${name}". Existing: ${(await store.list()).join(", ") || "(none)"}.`);
+        await store.remove(name);
+        return text(`Deleted "${name}".`);
+      }),
+    ),
   );
 
   server.registerTool(
@@ -219,16 +273,18 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
     {
       title: "Set machine signals and type",
       description:
-        "Change machine-level settings: Moore/Mealy type, input and output ports, clock and reset. " +
-        "Lists given here replace the existing lists; outputs removed here are also removed from states and transitions.",
+        "Change machine-level settings: Moore/Mealy type, input and output ports, clock and reset. Fields left out are kept. " +
+        "An inputs/outputs list given here replaces the whole existing list (so include the signals you want to keep); " +
+        "outputs removed here are also removed from every state and transition.",
       inputSchema: {
         name: fsmName,
         type: z.enum(["moore", "mealy"]).optional(),
-        inputs: z.array(signal).optional(),
-        outputs: z.array(signal).optional(),
+        inputs: z.array(signal).optional().describe("the complete new list of input ports"),
+        outputs: z.array(signal).optional().describe("the complete new list of output ports"),
         clock: z.object({ name: z.string() }).optional(),
         reset: z.object({ name: z.string(), activeLow: z.boolean(), async: z.boolean() }).partial().optional(),
       },
+      annotations: { idempotentHint: true },
     },
     guard(async (a) =>
       mutate(store, a.name, (d) => {
@@ -252,13 +308,15 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
     "add_state",
     {
       title: "Add state",
-      description: `Add one state to an FSM. ${LAYOUT_HINT}`,
+      description: `Add one state to an existing FSM (to build a whole machine, create_fsm is simpler). ${LAYOUT_HINT}`,
       inputSchema: { fsm: fsmName, ...stateSpec.omit({ id: true }).shape },
+      annotations: { idempotentHint: true },
     },
     guard(async ({ fsm, ...s }) =>
       mutate(store, fsm, (d) => {
         const st = core.addState(d, stateInput(s));
-        return `Added state ${st.name} (id ${st.id})${st.isInitial ? " as the initial state" : ""}. ${d.states.length} states now. ${LAYOUT_HINT}`;
+        const placed = st.x !== undefined && st.y !== undefined;
+        return `Added state ${st.name} (id ${st.id})${st.isInitial ? " as the initial state" : ""}. ${d.states.length} states now.${placed ? "" : ` ${LAYOUT_HINT}`}`;
       }),
     ),
   );
@@ -267,14 +325,16 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
     "update_state",
     {
       title: "Update state",
-      description: "Rename a state or change its label, outputs, flags, colour, size, font size, start-arrow side or position. " +
-        "Output values are merged into the existing ones. Pass label \"\" to draw the name again.",
+      description: "Rename a state or change its label, outputs, flags, colour, size, font size, start-arrow side or position. Fields left out are kept. " +
+        "Output values are merged into the existing ones (remove an output with set_signals). Pass label \"\" to draw the name again, color \"\" for the default fill. " +
+        "isInitial: true moves the start arrow to this state.",
       inputSchema: {
         fsm: fsmName,
         state: z.string().describe("state name or id"),
-        newName: z.string().optional(),
+        newName: z.string().optional().describe("new state name, a Verilog identifier"),
         ...stateSpec.omit({ id: true, name: true }).shape,
       },
+      annotations: { idempotentHint: true },
     },
     guard(async ({ fsm, state, newName, ...patch }) =>
       mutate(store, fsm, (d) => {
@@ -307,14 +367,15 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
       title: "Add transition",
       description:
         "Add a transition between two states (a self loop if from == to). The condition is a Verilog boolean expression over the inputs. " +
-        "Transitions out of a state are checked in priority order, then list order; an empty condition means 'otherwise' and should come last.",
+        "Transitions out of a state are checked in priority order, then list order; an empty condition means 'otherwise' and should come last. " +
+        "Adding the same from/to/condition twice creates a duplicate; use update_transition to change an existing one.",
       inputSchema: { fsm: fsmName, ...transitionSpec.omit({ id: true }).shape },
     },
     guard(async ({ fsm, ...t }) =>
       mutate(store, fsm, (d) => {
         const tr = core.addTransition(d, transitionInput(t));
         const nm = (id: string) => d.states.find((s) => s.id === id)!.name;
-        return `Added transition ${tr.id}: ${nm(tr.from)} -> ${nm(tr.to)} when ${tr.condition || "(always)"}.`;
+        return `Added transition ${tr.id}: ${nm(tr.from)} -> ${nm(tr.to)} when ${tr.condition || "(always)"}.${conditionNote(d, tr)}`;
       }),
     ),
   );
@@ -325,12 +386,14 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
       title: "Update transition",
       description: "Change a transition's endpoints, condition, outputs (merged), priority, curve, parallel-line gap, loop side or font size. " +
         "Find ids with get_fsm. To make the lines between two states straight or curved, set_line_style is simpler.",
-      inputSchema: { fsm: fsmName, id: z.string().describe("transition id, e.g. t3"), ...transitionSpec.omit({ id: true }).partial().shape },
+      inputSchema: { fsm: fsmName, id: z.string().describe("transition id, e.g. t3 (get_fsm lists them)"), ...transitionSpec.omit({ id: true }).partial().shape },
+      annotations: { idempotentHint: true },
     },
     guard(async ({ fsm, id, ...patch }) =>
       mutate(store, fsm, (d) => {
         const tr = core.updateTransition(d, id, transitionInput(patch));
-        return `Updated transition ${tr.id}.`;
+        const nm = (sid: string) => d.states.find((s) => s.id === sid)!.name;
+        return `Updated transition ${tr.id}: ${nm(tr.from)} -> ${nm(tr.to)} when ${tr.condition || "(always)"}.${conditionNote(d, tr)}`;
       }),
     ),
   );
@@ -377,6 +440,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
         spacing: z.number().min(20).max(400).optional().describe("px between states, default 90"),
         labels: labelMode.optional().describe("lay out for labels drawn this way (match what you will export); default all"),
       },
+      annotations: { idempotentHint: true },
     },
     guard(async ({ name, spacing, labels }) =>
       mutate(store, name, async (d) => {
@@ -404,6 +468,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
         gap: z.number().min(0).max(200).optional().describe("straight only: px between the two parallel lines"),
         curve: z.number().min(5).max(400).optional().describe("curved only: px the arcs bow out; default automatic"),
       },
+      annotations: { idempotentHint: true },
     },
     guard(async ({ fsm, from, to, style, gap, curve }) =>
       mutate(store, fsm, (d) => {
@@ -443,23 +508,32 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
         "reset state, every transition with its condition, and the outputs are extracted by executing the logic symbolically for each state. " +
         "Outputs that depend on the state only are drawn in the states (Moore); outputs that also depend on inputs go on the transitions " +
         "(Mealy). Handles one, two or three always blocks, parameter/localparam/`define/enum state codes, case/casez/if-else, one-hot and " +
-        "SystemVerilog always_ff/always_comb. The diagram is laid out, saved under `name` (default: the module name) and returned as PNG.",
+        "SystemVerilog always_ff/always_comb. The diagram is laid out, saved under `name` (default: the module name) and returned as PNG. " +
+        "Saving over an existing FSM of that name needs overwrite: true.",
       inputSchema: {
         code: z.string().optional().describe("the Verilog source; give this or path"),
-        path: z.string().optional().describe("a .v/.sv file to read (relative paths are inside the workspace folder)"),
-        name: z.string().optional().describe("FSM name to save as; default the module name"),
+        path: z.string().optional().describe("a .v/.sv file to read (relative paths are inside the workspace folder; absolute paths are read as given)"),
+        name: z.string().optional().describe("FSM name to save as (letters, digits and _); default the module name"),
         module: z.string().optional().describe("module to import when the file has several"),
         stateVar: z.string().optional().describe("state register name, if detection picks the wrong one"),
         selfLoops: z.boolean().default(true).describe("draw transitions that stay in the same state"),
+        overwrite: z.boolean().default(false).describe("replace an existing FSM with the same name"),
       },
+      annotations: { destructiveHint: true, idempotentHint: true },
     },
     guard(async (a) => {
       if (!a.code && !a.path) throw new Error("Give the Verilog source as code, or a file path");
-      const src = a.code ?? (await readFile(store.resolvePath(a.path!), "utf8"));
+      if (a.name) checkName(a.name);
+      const src = a.code ?? (await readSource(store.resolvePath(a.path!)));
       const r = await core.importVerilogLaidOut(src, { module: a.module, stateVar: a.stateVar, selfLoops: a.selfLoops });
       const d = r.diagram;
       if (a.name) d.name = a.name;
-      await store.save(d);
+      checkName(d.name);
+      await store.lock(d.name, async () => {
+        if (!a.overwrite && (await store.exists(d.name)))
+          throw new Error(`An FSM named "${d.name}" already exists. Pass overwrite: true to replace it, or name: "<other name>" to keep both.`);
+        await store.save(d);
+      });
       const png = await core.renderPng(d, { scale: 2 });
       const report = [
         `Imported module ${r.module} as "${d.name}": ${r.machine === "mealy" ? "Mealy" : "Moore"} machine (${r.style}).`,
@@ -478,25 +552,31 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
       description:
         "Export a diagram. Formats: png (also returned as an image so you can look at it), svg, latex (TikZ, compiles with pdflatex), " +
         "json (.fsm.json, opens in the FSM Designer app). Text formats are returned inline; give `path` to also write a file " +
-        "(relative paths are inside the workspace folder). `labels: \"none\"` hides the text on the lines, like the editor's label switch.",
+        "(relative paths are inside the workspace folder, absolute paths are written as given). " +
+        "`labels: \"none\"` hides the text on the lines, like the editor's label switch. States without a position are placed first and that layout is saved.",
       inputSchema: {
         name: fsmName,
         format: z.enum(["png", "svg", "latex", "json"]),
-        path: z.string().optional().describe("file to write, e.g. out/seq.png"),
-        scale: z.number().min(0.5).max(8).default(2).describe("png only: pixel density"),
+        path: z.string().optional().describe("file to write, e.g. out/seq.png (folders are created)"),
+        scale: z.number().min(0.5).max(8).default(2).describe("png only: pixel density (2 = 2 px per diagram px)"),
         background: z.string().optional().describe("svg/png: CSS colour or \"none\" for transparent; default white"),
         standalone: z.boolean().default(true).describe("latex only: full document (true) or just the tikzpicture (false)"),
         labels: labelMode.optional(),
         elseLabels: z.boolean().default(true).describe("write 'else' on an unconditional transition that has siblings (false draws it blank)"),
       },
-      annotations: { readOnlyHint: false },
+      annotations: { readOnlyHint: false, idempotentHint: true },
     },
     guard(async (a) => {
-      const d = await store.load(a.name);
-      if (!hasLayout(d) && a.format !== "json") {
-        await core.ensureLayout(d);
-        await store.save(d);
-      }
+      let placed = "";
+      const d = await store.lock(a.name, async () => {
+        const d = await store.load(a.name);
+        if (!hasLayout(d) && a.format !== "json") {
+          await core.ensureLayout(d);
+          await store.save(d);
+          placed = "Placed the states that had no position and saved the layout. ";
+        }
+        return d;
+      });
       let body: string | Buffer;
       const extra: Content[] = [];
       const draw = { labels: a.labels, elseLabels: a.elseLabels };
@@ -521,11 +601,11 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
         const target = store.resolvePath(a.path);
         await mkdir(dirname(target), { recursive: true });
         await writeFile(target, body);
-        saved = `Wrote ${target}`;
+        saved = `Wrote ${target} (${body.length} bytes)`;
       }
       if (a.format === "png")
-        return { content: [{ type: "text", text: saved || `PNG rendered (${(body as Buffer).length} bytes). Pass path to save it.` }, ...extra] };
-      return text(saved ? `${saved}\n\n${body}` : (body as string));
+        return { content: [{ type: "text", text: placed + (saved || `PNG rendered (${(body as Buffer).length} bytes). Pass path to save it.`) }, ...extra] };
+      return text(placed + (saved ? `${saved}\n\n${body}` : (body as string)));
     }),
   );
 

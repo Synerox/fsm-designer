@@ -1,7 +1,7 @@
 // End-to-end: start the real server over stdio and drive it like an agent would.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -222,6 +222,95 @@ test("export can hide line labels", async () => {
   assert.doesNotMatch(tex, /ttfamily/);
   const png = await call("export_fsm", { name: "styled", format: "png", labels: "none" });
   assert.ok(!png.isError, textOf(png));
+});
+
+test("create_fsm rejects more than one initial state", async () => {
+  const r = await call("create_fsm", { name: "twoinit", states: [{ name: "P", isInitial: true }, { name: "Q", isInitial: true }] });
+  assert.ok(r.isError);
+  assert.match(textOf(r), /Only one state can be the initial state.*P, Q/);
+});
+
+test("conditions that are not Verilog expressions are flagged, not rejected", async () => {
+  const t = await call("add_transition", { fsm: "styled", from: "S0", to: "S1", condition: "a &&" });
+  assert.ok(!t.isError, textOf(t));
+  assert.match(textOf(t), /not a valid Verilog expression/);
+  assert.match(textOf(await call("validate_fsm", { name: "styled" })), /warning Transition t\d+ \(S0 -> S1\): condition "a &&"/);
+  const id = /Added transition (t\d+)/.exec(textOf(t))![1];
+  const u = await call("update_transition", { fsm: "styled", id, condition: "a && !a" });
+  assert.doesNotMatch(textOf(u), /not a valid/);
+  assert.ok(!(await call("remove_transition", { fsm: "styled", id })).isError);
+});
+
+test("import_verilog needs overwrite to replace an FSM and explains missing files", async () => {
+  const code = `module det2(input clk, input rst_n, input x, output reg z);
+  localparam A = 1'd0, B = 1'd1;
+  reg state;
+  always @(posedge clk or negedge rst_n) if (!rst_n) state <= A; else case (state) A: if (x) state <= B; B: if (!x) state <= A; endcase
+  always @(*) z = state == B;
+endmodule`;
+  const first = await call("import_verilog", { code, name: "det_from_v" });
+  assert.ok(first.isError, textOf(first));
+  assert.match(textOf(first), /already exists.*overwrite: true/);
+  assert.ok(!(await call("import_verilog", { code, name: "det_from_v", overwrite: true })).isError);
+  const bad = await call("import_verilog", { code, name: "my fsm" });
+  assert.ok(bad.isError);
+  assert.match(textOf(bad), /Invalid FSM name/);
+  const missing = await call("import_verilog", { path: "missing.v" });
+  assert.ok(missing.isError);
+  assert.match(textOf(missing), /File not found: .*missing\.v/);
+  const folder = await call("import_verilog", { path: "." });
+  assert.ok(folder.isError);
+  assert.match(textOf(folder), /is a folder/);
+});
+
+test("concurrent edits from one and from two server processes are all kept", async () => {
+  assert.ok(!(await call("create_fsm", { name: "race", states: [{ name: "S" }] })).isError);
+  const other = new Client({ name: "e2e-2", version: "0" });
+  await other.connect(new StdioClientTransport({ command: process.execPath, args: [entry, "--dir", dir], stderr: "ignore" }));
+  try {
+    const results = await Promise.all([
+      ...Array.from({ length: 12 }, (_, i) => call("add_state", { fsm: "race", name: `A${i}` })),
+      ...Array.from({ length: 12 }, (_, i) => other.callTool({ name: "add_state", arguments: { fsm: "race", name: `B${i}` } }) as Promise<Out>),
+      ...Array.from({ length: 6 }, (_, i) => other.callTool({ name: "add_transition", arguments: { fsm: "race", from: "S", to: "S", condition: `c${i}` } }) as Promise<Out>),
+    ]);
+    for (const r of results) assert.ok(!r.isError, textOf(r));
+  } finally {
+    await other.close();
+  }
+  const saved = JSON.parse(await readFile(join(dir, "race.fsm.json"), "utf8"));
+  assert.equal(saved.states.length, 25);
+  assert.equal(saved.transitions.length, 6);
+  const leftovers = (await readdir(dir)).filter((f) => f.startsWith("race.fsm.json."));
+  assert.deepEqual(leftovers, [], "no temp or lock files left behind");
+});
+
+test("a corrupt diagram file is reported, not fatal", async () => {
+  await writeFile(join(dir, "broken.fsm.json"), "{ not json");
+  await writeFile(join(dir, "halfbroken.fsm.json"), JSON.stringify({ name: "halfbroken", states: [{ name: "A" }], transitions: [{ from: "A", to: "ZZ" }] }));
+  const list = textOf(await call("list_fsms", {}));
+  assert.match(list, /broken \(unreadable: .*not a valid FSM diagram/);
+  assert.match(list, /halfbroken \(unreadable: .*ZZ/);
+  const r = await call("get_fsm", { name: "broken" });
+  assert.ok(r.isError);
+  assert.match(textOf(r), /broken\.fsm\.json is not a valid FSM diagram/);
+  // A corrupt file can still be deleted by name.
+  assert.ok(!(await call("delete_fsm", { name: "broken" })).isError);
+  assert.ok(!(await call("delete_fsm", { name: "halfbroken" })).isError);
+  assert.doesNotMatch(textOf(await call("list_fsms", {})), /broken/);
+});
+
+test("command line: --help, --version and bad options", async () => {
+  const { execFile } = await import("node:child_process");
+  const run = (args: string[]) => new Promise<{ code: number | null; out: string; err: string }>((res) =>
+    execFile(process.execPath, [entry, ...args], (e, out, err) => res({ code: (e as { code?: number } | null)?.code ?? 0, out, err })));
+  assert.match((await run(["--help"])).out, /Usage: fsm-mcp-server/);
+  assert.match((await run(["--version"])).out, /^\d+\.\d+\.\d+/);
+  const noValue = await run(["--dir"]);
+  assert.equal(noValue.code, 2);
+  assert.match(noValue.err, /--dir needs a value/);
+  const unknown = await run(["--bogus"]);
+  assert.equal(unknown.code, 2);
+  assert.match(unknown.err, /unknown option --bogus/);
 });
 
 test("open_in_app starts the desktop app on the diagram file", { skip: process.platform === "win32" }, async () => {
