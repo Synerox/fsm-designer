@@ -78,7 +78,7 @@ export function score(d: FsmDiagram, plan: DiagramPlan = planDiagram(d), step = 
   const edges = plan.edges;
   const s = emptyScore();
   for (let i = 0; i < edges.length; i++)
-    for (let j = i + 1; j < edges.length; j++) s.crossings += crossCount(edges[i].points, edges[j].points, at);
+    for (let j = i + 1; j < edges.length; j++) s.crossings += crossCount(edges[i].points, edges[j].points, st);
   for (const e of edges) {
     const ends = new Set([e.transitions[0].from, e.transitions[0].to]);
     for (const [id, c] of at) if (!ends.has(id) && e.points.some((p) => Math.hypot(p.x - c.x, p.y - c.y) < c.r + 2)) s.throughStates++;
@@ -159,25 +159,39 @@ export function segDist(p: Pt, a: Pt, b: Pt): number {
   return Math.hypot(p.x - a.x - t * vx, p.y - a.y - t * vy);
 }
 
-/** Times two polylines cross, not counting where they meet at a state. */
-export function crossCount(p: Pt[], q: Pt[], states: Map<string, { x: number; y: number; r: number }>): number {
+export interface Circle { x: number; y: number; r: number }
+
+/**
+ * Times two polylines cross, not counting where they meet at a state.
+ * `states` is the circles to ignore crossings inside of (a map's values or an array).
+ * A sampled straight line is compared as its one segment, so two straight
+ * lines cost one intersection test instead of four hundred.
+ */
+export function crossCount(p: Pt[], q: Pt[], states: Iterable<Circle>): number {
   const bp = box(p), bq = box(q);
   if (bp.x1 < bq.x0 || bq.x1 < bp.x0 || bp.y1 < bq.y0 || bq.y1 < bp.y0) return 0;
+  const sp = bp.straight ? [p[0], p[p.length - 1]] : p, sq = bq.straight ? [q[0], q[q.length - 1]] : q;
   let n = 0;
-  for (let i = 1; i < p.length; i++)
-    for (let j = 1; j < q.length; j++) {
-      const x = intersect(p[i - 1], p[i], q[j - 1], q[j]);
-      if (x && [...states.values()].every((s) => Math.hypot(x.x - s.x, x.y - s.y) > s.r + 6)) n++;
+  let circles: Circle[] | undefined;
+  for (let i = 1; i < sp.length; i++)
+    for (let j = 1; j < sq.length; j++) {
+      const x = intersect(sp[i - 1], sp[i], sq[j - 1], sq[j]);
+      if (!x) continue;
+      circles ??= Array.isArray(states) ? states : [...states];
+      if (circles.every((s) => Math.hypot(x.x - s.x, x.y - s.y) > s.r + 6)) n++;
     }
   return n;
 }
 
-const boxes = new WeakMap<Pt[], { x0: number; y0: number; x1: number; y1: number }>();
+const boxes = new WeakMap<Pt[], { x0: number; y0: number; x1: number; y1: number; straight: boolean }>();
 function box(p: Pt[]) {
   let b = boxes.get(p);
   if (!b) {
-    b = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+    b = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity, straight: false };
     for (const q of p) { b.x0 = Math.min(b.x0, q.x); b.y0 = Math.min(b.y0, q.y); b.x1 = Math.max(b.x1, q.x); b.y1 = Math.max(b.y1, q.y); }
+    // Every sample on the chord between the ends: a straight line.
+    const a = p[0], z = p[p.length - 1];
+    b.straight = p.length > 2 && p.every((q) => Math.abs((q.x - a.x) * (z.y - a.y) - (q.y - a.y) * (z.x - a.x)) <= 1e-6 * Math.max(1, Math.abs(z.x - a.x) + Math.abs(z.y - a.y)));
     boxes.set(p, b);
   }
   return b;

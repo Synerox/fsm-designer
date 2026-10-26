@@ -947,7 +947,8 @@ function routeEdges(d: FsmDiagram) {
   const groups = groupsOf(d).filter((ts) => ts[0].from !== ts[0].to);
   const key = (a: string, b: string) => `${a}\u0000${b}`;
   const has = new Set(groups.map((ts) => key(ts[0].from, ts[0].to)));
-  const clear = (pts: Pt[], a: string, b: string) => [...at.values()].every((s) => s.id === a || s.id === b || pts.every((p) => Math.hypot(p.x - s.x, p.y - s.y) > s.r + 12));
+  const circles = [...at.values()];
+  const clear = (pts: Pt[], a: string, b: string) => circles.every((s) => s.id === a || s.id === b || pts.every((p) => Math.hypot(p.x - s.x, p.y - s.y) > s.r + 12));
   const lines = new Map<string, Pt[]>();
   const blocked: typeof groups = [];
   for (const ts of groups) {
@@ -972,7 +973,7 @@ function routeEdges(d: FsmDiagram) {
       for (const m of [30, 45, 60, 80, 100, 130, 160, 200, 250, 300, 360, 440]) {
         const pts = arc(a, b, side * m);
         if (!clear(pts, from, to)) continue;
-        const crossings = [...lines.values()].reduce((s, o) => s + crossCount(pts, o, at), 0);
+        const crossings = [...lines.values()].reduce((s, o) => s + crossCount(pts, o, circles), 0);
         const cost = crossings * 10 + m / 100 + (side < 0 ? 0.5 : 0);
         if (!best || cost < best.cost) best = { curve: side * m, pts, cost };
         break;
@@ -1002,9 +1003,10 @@ function uncross(
 ) {
   const key = (a: string, b: string) => `${a}\u0000${b}`;
   const routed = groups.filter((ts) => lines.has(key(ts[0].from, ts[0].to)));
+  const circles = [...at.values()];
   const curveOf = (ts: (typeof groups)[0]) => ts[0].curve ?? 0;
   const crossings = (ts: (typeof groups)[0], pts: Pt[]) =>
-    routed.reduce((n, o) => (o === ts ? n : n + crossCount(pts, lines.get(key(o[0].from, o[0].to))!, at)), 0);
+    routed.reduce((n, o) => (o === ts ? n : n + crossCount(pts, lines.get(key(o[0].from, o[0].to))!, circles)), 0);
   const cost = (c: number, curve: number) => c * 10 + Math.abs(curve) / 100 + (curve < 0 ? 0.5 : 0);
   for (let pass = 0; pass < 4; pass++) {
     const tangled = routed
@@ -1012,6 +1014,8 @@ function uncross(
       .filter((e) => e.n > 0)
       .sort((p, q) => q.n - p.n);
     if (!tangled.length) return;
+    // A dense tangle (more crossings than lines) will not come apart with a few bends: not worth the time.
+    if (tangled.reduce((s, e) => s + e.n, 0) > 2 * routed.length) return;
     let changed = false;
     for (const { ts } of tangled) {
       const { from, to } = ts[0];
