@@ -30,8 +30,11 @@
 //    the triangle's states slide sideways instead.
 // 4. Finishing. Centres on a 20 px grid; a line that would cross a state
 //    becomes an arc (back edges bow below a row, forward jumps above),
-//    opposite edges become two parallel straight lines, each self loop points
-//    to its state's emptiest side, the start arrow comes in from a free side.
+//    opposite edges become two parallel straight lines; a line that crosses
+//    another bows round it when some arc clears every state and crosses
+//    fewer lines (the most tangled lines first, a few passes); each self loop
+//    points to its state's emptiest side, the start arrow comes in from a
+//    free side.
 // 5. Scoring (see layout-score.ts): crossings weigh most, then lines through states
 //    and overlapping labels, then triangles that are not equilateral,
 //    states lined up with nothing, lines much longer than the shortest,
