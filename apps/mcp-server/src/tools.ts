@@ -145,6 +145,8 @@ async function mutate(store: DiagramStore, name: string, fn: (d: FsmDiagram) => 
 }
 
 const hasLayout = (d: FsmDiagram) => d.states.every((s) => s.x !== undefined && s.y !== undefined);
+/** Largest PNG returned as inline image content (base64 adds a third; hosts reject multi-megabyte messages). */
+const MAX_INLINE_PNG = 2_000_000;
 const LAYOUT_HINT = "It has no position yet: export_fsm places unplaced states automatically, or call auto_layout to re-arrange the whole diagram once you have finished adding states.";
 
 /** A condition note for the reply of add_transition/update_transition, or "". */
@@ -583,7 +585,8 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
       switch (a.format) {
         case "png": {
           body = await core.renderPng(d, { ...draw, scale: a.scale, background: a.background });
-          extra.push({ type: "image", data: body.toString("base64"), mimeType: "image/png" });
+          // Hosts cap message sizes; a huge render is still written to `path` but not sent back inline.
+          if (body.length <= MAX_INLINE_PNG) extra.push({ type: "image", data: body.toString("base64"), mimeType: "image/png" });
           break;
         }
         case "svg":
@@ -603,8 +606,11 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
         await writeFile(target, body);
         saved = `Wrote ${target} (${body.length} bytes)`;
       }
-      if (a.format === "png")
-        return { content: [{ type: "text", text: placed + (saved || `PNG rendered (${(body as Buffer).length} bytes). Pass path to save it.`) }, ...extra] };
+      if (a.format === "png") {
+        const size = (body as Buffer).length;
+        const tooBig = size > MAX_INLINE_PNG ? ` The PNG (${size} bytes) is too large to return inline; ${a.path ? "open the file" : "pass path to save it"} or use a smaller scale.` : "";
+        return { content: [{ type: "text", text: placed + (saved || `PNG rendered (${size} bytes). Pass path to save it.`) + tooBig }, ...extra] };
+      }
       return text(placed + (saved ? `${saved}\n\n${body}` : (body as string)));
     }),
   );
