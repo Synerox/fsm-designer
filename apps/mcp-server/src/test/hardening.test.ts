@@ -1,0 +1,242 @@
+// Agent mistakes and edge cases found by driving the server with real MCP
+// clients: typos, ids, exports that would clobber diagrams, odd inputs.
+import { test, before, after } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+
+const entry = join(dirname(fileURLToPath(import.meta.url)), "..", "index.js");
+let dir: string;
+let client: Client;
+
+type Out = { content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>; isError?: boolean };
+async function call(name: string, args: Record<string, unknown>): Promise<Out> {
+  return (await client.callTool({ name, arguments: args })) as Out;
+}
+const textOf = (r: Out) => r.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
+const load = async (n: string) => JSON.parse(await readFile(join(dir, `${n}.fsm.json`), "utf8"));
+async function ok(name: string, args: Record<string, unknown>) {
+  const r = await call(name, args);
+  assert.ok(!r.isError, `${name}: ${textOf(r)}`);
+  return textOf(r);
+}
+async function fails(name: string, args: Record<string, unknown>, re: RegExp) {
+  const r = await call(name, args);
+  assert.ok(r.isError, `${name} should fail: ${textOf(r)}`);
+  assert.match(textOf(r), re);
+}
+
+const TRI = {
+  inputs: ["x", "y"], outputs: ["z", "w"],
+  states: [{ name: "A", outputs: { z: 1 } }, { name: "B" }, { name: "C" }],
+  transitions: [{ from: "A", to: "B", condition: "x" }, { from: "B", to: "C", condition: "x" }, { from: "C", to: "A", condition: "!x" }],
+};
+
+before(async () => {
+  dir = await mkdtemp(join(tmpdir(), "fsm-mcp-h-"));
+  client = new Client({ name: "hardening", version: "0" });
+  await client.connect(new StdioClientTransport({ command: process.execPath, args: [entry, "--dir", dir], stderr: "ignore" }));
+});
+after(async () => {
+  await client.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test("schemas: no $ref, unknown keys are errors instead of being dropped", async () => {
+  const { tools } = await client.listTools();
+  assert.doesNotMatch(JSON.stringify(tools), /\$ref/);
+  for (const t of tools) assert.equal((t.inputSchema as { additionalProperties?: boolean }).additionalProperties, false, t.name);
+  for (const t of tools) assert.ok(t.annotations && Object.keys(t.annotations).length, `${t.name} has annotations`);
+  await fails("create_fsm", { name: "typo", states: [{ name: "A" }, { name: "B", isInital: true }], transitions: [{ from: "A", to: "B", cond: "x" }] },
+    /'isInital' at states\[1\][\s\S]*'cond' at transitions\[0\]/);
+  await fails("add_state", { fsm: "typo", name: "A", colour: "red" }, /'colour'/);
+});
+
+test("names: length, Windows device names and case-only clashes are refused up front", async () => {
+  await fails("create_fsm", { name: "n".repeat(65), states: [{ name: "A" }] }, /at most 64/);
+  await fails("create_fsm", { name: "CON", states: [{ name: "A" }] }, /reserved device name/);
+  await ok("create_fsm", { name: "seq", states: [{ name: "A" }] });
+  await fails("create_fsm", { name: "Seq", states: [{ name: "A" }] }, /only in case/);
+});
+
+test("create_fsm: initial state rules, start arrow kept through layout, empty label ignored, x and y together", async () => {
+  await fails("create_fsm", { name: "i0", states: [{ name: "A", isInitial: false }, { name: "B", isInitial: false }] }, /mark the reset state/);
+  assert.match(await ok("create_fsm", { name: "i1", states: [{ name: "A", isInitial: false }, { name: "B" }] }), /B is the initial state/);
+  assert.equal((await load("i1")).states[1].isInitial, true);
+  const t = await ok("create_fsm", { name: "tri", ...TRI, states: [{ ...TRI.states[0], initialFrom: "right" }, { name: "B", label: "  " }, { name: "C" }] });
+  assert.match(t, /Layout: /);
+  const saved = await load("tri");
+  assert.equal(saved.states[0].initialAngle, 0, "initialFrom right survives the layout");
+  assert.equal(saved.states[1].label, undefined, "blank label means no label");
+  await fails("create_fsm", { name: "xy", states: [{ name: "A", x: 5 }] }, /x and y together/);
+  await fails("create_fsm", { name: "col", states: [{ name: "A", color: "not a colour" }] }, /is not a colour/);
+});
+
+test("get_fsm JSON goes back into create_fsm unchanged, keeping angles", async () => {
+  await ok("create_fsm", {
+    name: "rt", inputs: ["go"],
+    states: [{ name: "IDLE", initialFrom: "above" }, { name: "RUN" }],
+    transitions: [{ from: "IDLE", to: "RUN", condition: "go" }, { from: "RUN", to: "RUN", condition: "go", loopSide: "below-right" }, { from: "RUN", to: "IDLE", condition: "!go" }],
+  });
+  const before = await load("rt");
+  await ok("create_fsm", { ...before, overwrite: true });
+  const after = await load("rt");
+  assert.deepEqual(after, before);
+});
+
+test("ids: a state named like another state's id is never edited by mistake", async () => {
+  await ok("create_fsm", { name: "ids", states: [{ name: "s1" }, { name: "s0" }], transitions: [{ from: "s0", to: "s1", condition: "go" }] });
+  const t = await ok("add_transition", { fsm: "ids", from: "s0", to: "s0", condition: "stay" });
+  assert.match(t, /s0 -> s0 when stay/);
+  await ok("create_fsm", { name: "m", states: [{ name: "A" }, { name: "B" }] });
+  const aId = (await load("m")).states[0].id;
+  assert.match(await ok("add_state", { fsm: "m", name: aId }), new RegExp(`State A had the id ${aId}; its id is now s\\d+`));
+  assert.match(await ok("remove_state", { fsm: "m", state: aId }), new RegExp(`Removed state ${aId} \\(id`));
+  assert.deepEqual((await load("m")).states.map((s: { name: string }) => s.name), ["A", "B"], "A is kept");
+  await fails("create_fsm", { name: "dup", states: [{ name: "A", id: "k" }, { name: "B", id: "k" }] }, /Duplicate state id "k"/);
+});
+
+test("set_signals: clock clash is refused before saving; a signal can move from outputs to inputs; type change explains stranded outputs", async () => {
+  await fails("set_signals", { name: "tri", clock: { name: "x" } }, /"x" is the clock/);
+  assert.equal((await load("tri")).clock.name, "clk", "file untouched and still loadable");
+  await ok("get_fsm", { name: "tri" });
+  await ok("set_signals", { name: "tri", inputs: ["x", "y", "z"], outputs: ["w"] });
+  const s = await load("tri");
+  assert.deepEqual(s.inputs.map((i: { name: string }) => i.name), ["x", "y", "z"]);
+  assert.deepEqual(s.states[0].outputs, {}, "z is no longer an output");
+  await ok("set_signals", { name: "tri", outputs: ["w"], type: "mealy" });
+  await ok("update_state", { fsm: "tri", state: "A", outputs: { w: 1 } });
+  assert.match(await ok("set_signals", { name: "tri", type: "moore" }), /^Updated "tri"\./);
+  assert.match(await ok("set_signals", { name: "tri", type: "mealy" }), /1 state still carry outputs/);
+  await ok("set_signals", { name: "tri", type: "moore" });
+});
+
+test("update_state / update_transition: null removes an output or goes back to the default", async () => {
+  await ok("update_state", { fsm: "tri", state: "A", outputs: { w: 1 }, radius: 50, fontSize: 20 });
+  await ok("update_state", { fsm: "tri", state: "A", outputs: { w: null }, radius: null, fontSize: null });
+  let a = (await load("tri")).states[0];
+  assert.deepEqual(a.outputs, {});
+  assert.equal(a.radius, undefined);
+  assert.equal(a.fontSize, undefined);
+  // A placed state may move along one axis; an unplaced one needs both.
+  const y = a.y;
+  await ok("update_state", { fsm: "tri", state: "A", x: 999 });
+  assert.deepEqual([(await load("tri")).states[0].x, (await load("tri")).states[0].y], [999, y]);
+  await ok("add_state", { fsm: "tri", name: "LOOSE" });
+  await fails("update_state", { fsm: "tri", state: "LOOSE", x: 5 }, /no position yet; give x and y together/);
+  await ok("remove_state", { fsm: "tri", state: "LOOSE" });
+  await ok("set_signals", { name: "tri", type: "mealy" });
+  await ok("update_transition", { fsm: "tri", id: "t0", outputs: { w: 1 }, curve: 40, priority: 2, gap: 10, fontSize: 18 });
+  await ok("update_transition", { fsm: "tri", id: "t0", outputs: { w: null }, curve: null, priority: null, gap: null, fontSize: null });
+  const t = (await load("tri")).transitions[0];
+  assert.deepEqual(t.outputs, {});
+  for (const k of ["curve", "priority", "gap", "fontSize"]) assert.equal(t[k], undefined, k);
+  assert.match(await ok("update_state", { fsm: "tri", state: "A", isInitial: false }), /no initial \(reset\) state now/);
+  await ok("update_state", { fsm: "tri", state: "A", isInitial: true });
+  a = (await load("tri")).states[0];
+  assert.equal(a.isInitial, true);
+});
+
+test("export_fsm never overwrites diagrams, handles folders, checks colours and caps huge PNGs", async () => {
+  await fails("export_fsm", { name: "tri", format: "svg", path: "seq.fsm.json" }, /Refusing to write svg/);
+  await fails("export_fsm", { name: "tri", format: "json", path: "seq.fsm.json" }, /Refusing to write/);
+  assert.equal((await load("seq")).name, "seq", "seq untouched");
+  assert.match(await ok("export_fsm", { name: "tri", format: "svg", path: "sub/" }), /Wrote .*sub[\\/]tri\.svg/);
+  assert.match(await ok("export_fsm", { name: "tri", format: "svg", path: "sub" }), /Overwrote .*sub[\\/]tri\.svg/);
+  assert.match(await ok("export_fsm", { name: "tri", format: "png", path: "wrong.svg" }), /does not end in \.png/);
+  await writeFile(join(dir, "afile"), "x");
+  await fails("export_fsm", { name: "tri", format: "svg", path: "afile/x.svg" }, /part of that path is a file/);
+  await fails("export_fsm", { name: "tri", format: "svg", background: "#zzz" }, /is not a colour/);
+  await fails("export_fsm", { name: "tri", format: "png", background: "red;" }, /is not a colour/);
+  const svg = await ok("export_fsm", { name: "tri", format: "svg", background: "rgb(10, 20, 30)" });
+  assert.match(svg, /fill="rgb\(10, 20, 30\)"/);
+  // 30 states far apart at scale 8 would be far above 40 megapixels.
+  const states = Array.from({ length: 30 }, (_, i) => ({ name: `Q${i}` }));
+  const transitions = states.map((s, i) => ({ from: s.name, to: states[(i + 1) % 30].name, condition: "x" }));
+  await ok("create_fsm", { name: "big", inputs: ["x"], states, transitions });
+  await ok("auto_layout", { name: "big", spacing: 400 });
+  const r = await call("export_fsm", { name: "big", format: "png", scale: 8, path: "big.png" });
+  assert.ok(!r.isError, textOf(r));
+  assert.match(textOf(r), /lowered from 8/);
+  const png = await readFile(join(dir, "big.png"));
+  const w = png.readUInt32BE(16), h = png.readUInt32BE(20);
+  assert.ok(w * h <= 40_000_000 && w <= 16384 && h <= 16384, `${w}x${h}`);
+});
+
+test("export_fsm says which states it placed", async () => {
+  await ok("create_fsm", { name: "part", inputs: ["go"], states: [{ name: "A", x: 100, y: 100 }, { name: "B", x: 300, y: 100 }], transitions: [{ from: "A", to: "B", condition: "go" }] });
+  await ok("add_state", { fsm: "part", name: "C" });
+  await ok("add_transition", { fsm: "part", from: "B", to: "C", condition: "go" });
+  assert.match(await ok("set_line_style", { fsm: "part", from: "A", to: "B", style: "straight" }), /now straight/);
+  await fails("set_line_style", { fsm: "part", from: "B", to: "C", style: "straight" }, /C has no position yet/);
+  assert.match(await ok("export_fsm", { name: "part", format: "latex" }), /^Placed C, which had no position/);
+  assert.ok((await load("part")).states[2].x !== undefined);
+});
+
+test("set_line_style: gap is cleared by auto and auto_layout, ignored options are named, the drawn gap limit is reported", async () => {
+  await ok("create_fsm", { name: "two", inputs: ["a"], states: [{ name: "P" }, { name: "Q" }], transitions: [{ from: "P", to: "Q", condition: "a" }, { from: "Q", to: "P", condition: "!a" }] });
+  assert.match(await ok("set_line_style", { fsm: "two", from: "P", to: "Q", style: "straight", gap: 150 }), /at most \d+ px apart/);
+  assert.match(await ok("set_line_style", { fsm: "two", from: "P", to: "Q", style: "curved", gap: 10 }), /gap applies to straight lines only/);
+  for (const t of (await load("two")).transitions) assert.equal(t.gap, undefined);
+  await ok("set_line_style", { fsm: "two", from: "P", to: "Q", style: "straight", gap: 30 });
+  assert.match(await ok("auto_layout", { name: "two" }), /Laid out 2 states/);
+  for (const t of (await load("two")).transitions) assert.equal(t.gap, undefined);
+  await ok("create_fsm", { name: "one", states: [{ name: "ONLY" }] });
+  assert.match(await ok("auto_layout", { name: "one" }), /Laid out 1 state \(/);
+});
+
+test("import_verilog: code or path, constants are reported and not flagged, PNG optional, UTF-16 files", async () => {
+  const src = `module det(input clk, input rst_n, input go, input [3:0] cnt, output reg hit);
+  localparam IDLE = 1'd0, RUN = 1'd1;
+  localparam MAX = 4'd9;
+  reg state, next;
+  always @(posedge clk or negedge rst_n) if (!rst_n) state <= IDLE; else state <= next;
+  always @(*) begin
+    next = state; hit = 0;
+    case (state)
+      IDLE: if (go) next = RUN;
+      RUN: if (cnt == MAX) begin next = IDLE; hit = 1; end
+    endcase
+  end
+endmodule`;
+  await writeFile(join(dir, "det.v"), src);
+  await fails("import_verilog", { code: "module a; endmodule", path: "det.v" }, /either code or path/);
+  const r = await call("import_verilog", { code: "", path: "det.v", png: false });
+  assert.ok(!r.isError, textOf(r));
+  assert.ok(!r.content.some((c) => c.type === "image"));
+  assert.match(textOf(r), /saved .*det\.fsm\.json/);
+  assert.match(textOf(r), /Constants in conditions\/outputs: MAX=4'd9/);
+  assert.doesNotMatch(textOf(r), /uses "MAX"/);
+  const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(src.replace("module det", "module det16"), "utf16le")]);
+  await writeFile(join(dir, "det16.v"), utf16);
+  const u = await call("import_verilog", { path: "det16.v", scale: 1 });
+  assert.ok(!u.isError, textOf(u));
+  assert.match(textOf(u), /Imported module det16/);
+  assert.ok(u.content.some((c) => c.type === "image"));
+  const bad = src.replace("IDLE: if (go) next = RUN;", "IDLE: if (go) next = RUN").replace("module det", "module det_bad");
+  await fails("import_verilog", { code: bad }, /did not parse.*line \d+/s);
+});
+
+test("validation: literals and hex-looking names, grouped Moore warnings", async () => {
+  await ok("create_fsm", {
+    name: "lits", inputs: [{ name: "cnt", width: 8 }], outputs: ["a", "b"],
+    states: [{ name: "S0" }, { name: "S1" }, { name: "S2" }],
+    transitions: [{ from: "S0", to: "S1", condition: "cnt == 8'h FF" }, { from: "S1", to: "S2", condition: "$signed(cnt) > 1_000" }, { from: "S2", to: "S0", condition: "bad" }],
+  });
+  const v = await ok("validate_fsm", { name: "lits" });
+  assert.doesNotMatch(v, /uses "(h|FF|signed|_000)"/);
+  assert.match(v, /uses "bad"/);
+  assert.match(v, /Moore output "a" is not set in states S0, S1, S2/);
+  assert.equal((v.match(/Moore output/g) ?? []).length, 2);
+});
+
+test("leftover files: a failed edit leaves no temp or lock files", async () => {
+  await fails("add_transition", { fsm: "tri", from: "A", to: "NOPE" }, /No state/);
+  const { readdir } = await import("node:fs/promises");
+  assert.deepEqual((await readdir(dir)).filter((f) => /\.(tmp-|lock)/.test(f)), []);
+  await stat(join(dir, "tri.fsm.json"));
+});

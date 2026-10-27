@@ -28,10 +28,15 @@ export interface DiagramStore {
 }
 
 const FILE_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+export const MAX_NAME = 64;
+/** Windows device names: CON.fsm.json opens the console, not a file. */
+const DEVICE = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i;
 
 /** Check an FSM name before it becomes part of a file name. */
 export function checkName(name: string): string {
   if (!FILE_RE.test(name)) throw new Error(`Invalid FSM name "${name}" (use letters, digits and _, starting with a letter or _)`);
+  if (name.length > MAX_NAME) throw new Error(`FSM name is ${name.length} characters long; use at most ${MAX_NAME}`);
+  if (DEVICE.test(name)) throw new Error(`"${name}" is a reserved device name on Windows and cannot be a file name; pick another FSM name`);
   return name;
 }
 
@@ -147,7 +152,8 @@ export class FileStore implements DiagramStore {
   }
   async lock<T>(name: string, fn: () => Promise<T>): Promise<T> {
     const file = this.file(name);
-    return this.queue.run(file, async () => {
+    // Lower-cased: on Windows and macOS "Seq" and "seq" are the same file.
+    return this.queue.run(file.toLowerCase(), async () => {
       await mkdir(this.dir, { recursive: true });
       return withFileLock(`${file}.lock`, fn);
     });
