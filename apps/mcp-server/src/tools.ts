@@ -7,10 +7,11 @@ import { dirname } from "node:path";
 import { launchApp } from "./app.ts";
 import type { AppOptions } from "./app.ts";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import * as core from "@fsm/core";
 import type { FsmDiagram, Transition } from "@fsm/core";
-import { checkName } from "./store.ts";
+import { checkName, MAX_NAME } from "./store.ts";
 import { checkColor, decodeSource, exportTarget, pngScale, svgSize } from "./check.ts";
 import type { DiagramStore } from "./store.ts";
 
@@ -37,6 +38,14 @@ function guard<A>(fn: (args: A) => Promise<Result>) {
   };
 }
 
+/** Tool annotations: every tool works on the local workspace only (closed world) unless it says otherwise. */
+const hints = (h: { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean; openWorldHint?: boolean }) => ({
+  readOnlyHint: false,
+  openWorldHint: false,
+  ...h,
+  ...(h.readOnlyHint ? {} : { destructiveHint: h.destructiveHint ?? false, idempotentHint: h.idempotentHint ?? false }),
+});
+
 // ---- shared schemas -------------------------------------------------------
 // Factories, not shared instances: the JSON Schema generator turns a reused
 // instance into a $ref, which then carries the first use's description.
@@ -54,7 +63,7 @@ const signal = () => z.union([
   }).strict(),
 ]);
 const NAME_RULE = "letters, digits and _, starting with a letter or _, at most 64 characters";
-const fsmName = () => z.string().describe(`FSM name (${NAME_RULE}); also the file name <name>.fsm.json`);
+const fsmName = () => z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, `use ${NAME_RULE}`).max(MAX_NAME).describe(`FSM name (${NAME_RULE}); also the file name <name>.fsm.json`);
 const labelMode = () => z.enum(["all", "noLoops", "none"])
   .describe("which text to draw on lines: all (default), all but self loops' (noLoops), or none, which also hides the Moore outputs written in states");
 const SIDES = ["left", "right", "above", "below", "above-left", "above-right", "below-left", "below-right"] as const;
@@ -293,7 +302,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
         overwrite: z.boolean().default(false).describe("replace an existing FSM with the same name (otherwise an existing name is an error)"),
         version: z.literal(1).optional().describe("ignored; accepted so .fsm.json content can be passed as is"),
       }).strict(),
-      annotations: { destructiveHint: true, idempotentHint: true },
+      annotations: hints({ destructiveHint: true, idempotentHint: true }),
     },
     guard(async (a) => {
       await checkNewName(store, a.name);
@@ -328,6 +337,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
         await store.save(d);
         return existed ? "Replaced" : "Created";
       });
+      if (verb === "Created") server.sendResourceListChanged();
       const layout = layoutNote(r);
       return text(`${verb} "${d.name}" (${store.fileOf?.(d.name) ?? store.location}).${layout ? ` ${layout}` : ""}${notes.length ? ` ${notes.join(" ")}` : ""}\n\n${summary(d)}`);
     }),
@@ -335,10 +345,14 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
 
   server.registerTool(
     "list_fsms",
-    { title: "List FSMs", description: "List the FSM diagrams in the workspace folder with their type and size.", inputSchema: z.object({}).strict(), annotations: { readOnlyHint: true } },
+    { title: "List FSMs", description: "List the FSM diagrams in the workspace folder with their type and size.", inputSchema: z.object({}).strict(), annotations: hints({ readOnlyHint: true }) },
     guard(async () => {
       const names = await store.list();
-      if (!names.length) return text(`No FSMs yet in ${store.location}. Create one with create_fsm.`);
+      const skipped = (await store.ignored?.()) ?? [];
+      const note = skipped.length
+        ? `\nIgnored (not usable as FSM files: folders, or names that are not ${NAME_RULE}): ${skipped.join(", ")}.`
+        : "";
+      if (!names.length) return text(`No FSMs yet in ${store.location}. Create one with create_fsm.${note}`);
       const rows = await Promise.all(names.map(async (n) => {
         try {
           const d = await store.load(n);
@@ -347,7 +361,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
           return `${n} (unreadable: ${(e as Error).message})`;
         }
       }));
-      return text(`FSMs in ${store.location}:\n${rows.map((r) => `  ${r}`).join("\n")}`);
+      return text(`FSMs in ${store.location}:\n${rows.map((r) => `  ${r}`).join("\n")}${note}`);
     }),
   );
 
@@ -358,7 +372,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
       description: "Read an FSM: a readable summary (state ids and names, transition ids, signals) with validation results, and optionally the full .fsm.json. " +
         "Use the ids it lists for update_transition/remove_transition.",
       inputSchema: z.object({ name: fsmName(), json: z.boolean().default(false).describe("also return the raw .fsm.json (can be passed back to create_fsm)") }).strict(),
-      annotations: { readOnlyHint: true },
+      annotations: hints({ readOnlyHint: true }),
     },
     guard(async ({ name, json }) => {
       const d = await store.load(name);
@@ -368,13 +382,16 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
 
   server.registerTool(
     "delete_fsm",
-    { title: "Delete FSM", description: "Delete an FSM diagram file from the workspace. This cannot be undone.", inputSchema: z.object({ name: fsmName() }).strict(), annotations: { destructiveHint: true, idempotentHint: false } },
+    { title: "Delete FSM", description: "Delete an FSM diagram file from the workspace. This cannot be undone.", inputSchema: z.object({ name: fsmName() }).strict(), annotations: hints({ destructiveHint: true, idempotentHint: false }) },
     guard(async ({ name }) =>
       store.lock(name, async () => {
         // exists(), not load(): a corrupt file must still be deletable.
         if (!(await store.exists(name))) throw new Error(`No FSM named "${name}". Existing: ${(await store.list()).join(", ") || "(none)"}.`);
         await store.remove(name);
         return text(`Deleted "${name}".`);
+      }).then((r) => {
+        server.sendResourceListChanged();
+        return r;
       }),
     ),
   );
@@ -395,7 +412,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
         clock: clockSpec().optional().describe("e.g. {\"name\":\"clk\"}"),
         reset: resetSpec().optional().describe("e.g. {\"name\":\"rst\",\"activeLow\":false,\"async\":false}; fields left out are kept"),
       }).strict(),
-      annotations: { idempotentHint: true },
+      annotations: hints({ destructiveHint: true, idempotentHint: true }),
     },
     guard(async (a) =>
       mutate(store, a.name, (d) => {
@@ -432,13 +449,15 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
       title: "Add state",
       description: `Add one state to an existing FSM (to build a whole machine, create_fsm is simpler). Without x/y the state has no position yet: export_fsm places it, or call auto_layout when you have finished adding states.`,
       inputSchema: z.object({ fsm: fsmName(), ...stateFields() }).strict(),
-      annotations: { idempotentHint: true },
+      annotations: hints({ idempotentHint: true }),
     },
     guard(async ({ fsm, ...s }) =>
       mutate(store, fsm, (d) => {
+        const before = d.states.find((x) => x.isInitial);
         const st = core.addState(d, stateInput(s));
         const moved = freeName(d, st.name);
-        return `Added state ${st.name} (id ${st.id})${st.isInitial ? " as the initial state" : ""}. ${plural(d.states.length, "state")} now.${moved}${placed(st) ? "" : ` ${LAYOUT_HINT}`}`;
+        const was = st.isInitial && before && before.id !== st.id ? ` (was ${before.name})` : "";
+        return `Added state ${st.name} (id ${st.id})${st.isInitial ? ` as the initial state${was}` : ""}. ${plural(d.states.length, "state")} now.${moved}${placed(st) ? "" : ` ${LAYOUT_HINT}`}`;
       }),
     ),
   );
@@ -461,7 +480,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
         fontSize: z.number().min(6).max(72).nullable().optional().describe("px for the name; null = default"),
         initialFrom: side("initial state only: side the start arrow comes from; null = default (left)").nullable().optional(),
       }).strict(),
-      annotations: { idempotentHint: true },
+      annotations: hints({ destructiveHint: true, idempotentHint: true }),
     },
     guard(async ({ fsm, state, newName, outputs, radius, fontSize, initialFrom, ...patch }) =>
       mutate(store, fsm, (d) => {
@@ -503,7 +522,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
       title: "Remove state",
       description: "Remove a state and every transition into or out of it.",
       inputSchema: z.object({ fsm: fsmName(), state: stateRef() }).strict(),
-      annotations: { destructiveHint: true },
+      annotations: hints({ destructiveHint: true }),
     },
     guard(async ({ fsm, state }) =>
       mutate(store, fsm, (d) => {
@@ -523,7 +542,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
         "Transitions out of a state are checked in priority order, then list order; an empty condition means 'otherwise' and should come last. " +
         "Adding the same from/to/condition twice creates a duplicate; use update_transition to change an existing one.",
       inputSchema: z.object({ fsm: fsmName(), ...transitionFields() }).strict(),
-      annotations: { destructiveHint: false, idempotentHint: false },
+      annotations: hints({ destructiveHint: false, idempotentHint: false }),
     },
     guard(async ({ fsm, ...t }) =>
       mutate(store, fsm, (d) => {
@@ -553,7 +572,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
         loopSide: side("self loops only: side the loop sits on; null = pick a free side").nullable().optional(),
         fontSize: z.number().min(6).max(72).nullable().optional().describe("px for the label; null = default"),
       }).strict(),
-      annotations: { idempotentHint: true },
+      annotations: hints({ destructiveHint: true, idempotentHint: true }),
     },
     guard(async ({ fsm, id, outputs, priority, curve, gap, loopSide, fontSize, ...patch }) =>
       mutate(store, fsm, (d) => {
@@ -587,7 +606,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
       title: "Remove transition",
       description: "Remove a transition by id (get_fsm lists the ids).",
       inputSchema: z.object({ fsm: fsmName(), id: z.string().describe("transition id, e.g. t3") }).strict(),
-      annotations: { destructiveHint: true },
+      annotations: hints({ destructiveHint: true }),
     },
     guard(async ({ fsm, id }) =>
       mutate(store, fsm, (d) => {
@@ -606,7 +625,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
       description: "Check an FSM for errors (no states, no reset state, more than one unconditional transition from a state) and warnings " +
         "(unreachable states, duplicate conditions, conditions that use undeclared inputs or are not Verilog expressions, Moore outputs left unset, outputs on the wrong side for the machine type).",
       inputSchema: z.object({ name: fsmName() }).strict(),
-      annotations: { readOnlyHint: true },
+      annotations: hints({ readOnlyHint: true }),
     },
     guard(async ({ name }) => text(checks(await store.load(name)))),
   );
@@ -626,7 +645,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
         spacing: z.number().min(20).max(400).optional().describe("px between states, default 90 (the layout may spread states further to make room for labels)"),
         labels: labelMode().optional().describe("lay out for text drawn this way (match what you will export); default all"),
       }).strict(),
-      annotations: { idempotentHint: true },
+      annotations: hints({ destructiveHint: true, idempotentHint: true }),
     },
     guard(async ({ name, spacing, labels }) =>
       mutate(store, name, async (d) => {
@@ -655,7 +674,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
         gap: z.number().min(0).max(200).optional().describe("straight only: px between the two parallel lines (at most 1.6 x the smaller radius is drawn)"),
         curve: z.number().min(5).max(400).optional().describe("curved only: px the arcs bow out; default automatic"),
       }).strict(),
-      annotations: { idempotentHint: true },
+      annotations: hints({ destructiveHint: true, idempotentHint: true }),
     },
     guard(async ({ fsm, from, to, style, gap, curve }) =>
       mutate(store, fsm, (d) => {
@@ -716,7 +735,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
         png: z.boolean().default(true).describe("also return the drawing as a PNG image"),
         scale: z.number().min(0.5).max(8).default(2).describe("pixel density of that PNG"),
       }).strict(),
-      annotations: { destructiveHint: true, idempotentHint: true },
+      annotations: hints({ destructiveHint: true, idempotentHint: true }),
     },
     guard(async (a) => {
       const hasCode = a.code !== undefined && a.code.trim() !== "";
@@ -735,6 +754,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
         await store.save(d);
         return existed ? "replaced" : "saved";
       });
+      if (verb === "saved") server.sendResourceListChanged();
       const constants = Object.entries(r.constants ?? {});
       const defaults = d.outputs.filter((o) => o.default !== undefined);
       const report = [
@@ -761,7 +781,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
       title: "Export FSM",
       description:
         "Export a diagram. Formats: png (also returned as an image so you can look at it), svg, latex (TikZ, compiles with pdflatex), " +
-        "json (.fsm.json, opens in the FSM Designer app). Text formats are returned inline; give `path` to also write a file " +
+        "json (.fsm.json, opens in the FSM Designer app). Text formats are returned as text; give `path` to write a file instead (inline: true returns both) " +
         "(relative paths are inside the workspace folder, absolute paths and ~ are used as given, a folder gets <name>.<ext>; " +
         "the workspace's own .fsm.json files are never overwritten). " +
         "`labels: \"none\"` hides the text on the lines and the outputs in states, like the editor's label switch. " +
@@ -775,23 +795,34 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
         standalone: z.boolean().default(true).describe("latex only: full document (true) or just the tikzpicture (false)"),
         labels: labelMode().optional(),
         elseLabels: z.boolean().default(true).describe("write 'else' on an unconditional transition that has siblings (false draws it blank)"),
+        inline: z.boolean().optional().describe("svg/latex/json with path: also return the text (default: only when no path is given)"),
       }).strict(),
-      annotations: { readOnlyHint: false, idempotentHint: true },
+      annotations: hints({ destructiveHint: true, idempotentHint: true }),
     },
     guard(async (a) => {
       if (a.background !== undefined) checkColor("background", a.background, true);
       const target = a.path ? await exportTarget(store.location, a.path, a.format, a.name) : undefined;
       let placedNote = "";
-      const d = await store.lock(a.name, async () => {
-        const d = await store.load(a.name);
-        const missing = d.states.filter((s) => !placed(s)).map((s) => s.name);
-        if (missing.length && a.format !== "json") {
+      // Read without the lock, so a read-only workspace can still export; lock only to save a new layout.
+      let d = await store.load(a.name);
+      if (a.format !== "json" && !hasLayout(d)) {
+        try {
+          d = await store.lock(a.name, async () => {
+            const fresh = await store.load(a.name);
+            const missing = fresh.states.filter((s) => !placed(s)).map((s) => s.name);
+            if (missing.length) {
+              await core.ensureLayout(fresh);
+              await store.save(fresh);
+              placedNote = `Placed ${missing.join(", ")}, which had no position, and saved the layout. `;
+            }
+            return fresh;
+          });
+        } catch (e) {
+          const missing = d.states.filter((s) => !placed(s)).map((s) => s.name);
           await core.ensureLayout(d);
-          await store.save(d);
-          placedNote = `Placed ${missing.join(", ")}, which had no position, and saved the layout. `;
+          placedNote = `Placed ${missing.join(", ")}, which had no position, for this export only: the layout could not be saved (${(e as Error).message}). `;
         }
-        return d;
-      });
+      }
       let body: string | Buffer;
       let info = "";
       const draw = { labels: a.labels, elseLabels: a.elseLabels };
@@ -834,7 +865,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
         else parts.push(`It is too large to return inline; ${target ? "open the file" : "pass path to save it"} or use a smaller scale.`);
         return { content: [{ type: "text", text: parts.join(" ") }, ...content] };
       }
-      return text(placedNote + (saved ? `${saved}\n\n${body}` : (body as string)));
+      return text(placedNote + (!saved ? (body as string) : a.inline ? `${saved}\n\n${body}` : saved));
     }),
   );
 
@@ -846,7 +877,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
         "Open a diagram in the FSM Designer desktop app on this computer so the user can see and keep editing it by hand. " +
         "The app shows the file as it is now: after more tool edits, call this again (the user may need to reopen it).",
       inputSchema: z.object({ name: fsmName() }).strict(),
-      annotations: { readOnlyHint: true, openWorldHint: true },
+      annotations: hints({ readOnlyHint: true, openWorldHint: true }),
     },
     guard(async ({ name }) => {
       await store.load(name);
@@ -861,13 +892,16 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
     "fsm",
     new ResourceTemplate("fsm://{name}", {
       list: async () => ({
-        resources: (await store.list()).map((n) => ({ uri: `fsm://${n}`, name: n, mimeType: "application/json" })),
+        resources: (await store.list()).map((n) => ({ uri: `fsm://${n}`, name: n, title: `FSM ${n}`, mimeType: "application/json" })),
       }),
       complete: { name: async (prefix) => (await store.list()).filter((n) => n.startsWith(prefix ?? "")) },
     }),
     { title: "FSM diagram", description: "An FSM diagram as .fsm.json", mimeType: "application/json" },
     async (uri, { name }) => {
-      const d = await store.load(decodeURIComponent(String(name)));
+      const n = decodeURIComponent(String(name));
+      // -32002 is MCP's "resource not found".
+      if (!(await store.exists(n))) throw new McpError(-32002, `Resource not found: ${uri.href}`, { uri: uri.href });
+      const d = await store.load(n);
       return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(d, null, 2) }] };
     },
   );

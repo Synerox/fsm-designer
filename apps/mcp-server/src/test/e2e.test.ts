@@ -106,7 +106,11 @@ test("exports every format", async () => {
   assert.equal((await readFile(join(dir, "out/seq101.png"))).subarray(1, 4).toString(), "PNG");
 
   const svg = await call("export_fsm", { name: "seq101", format: "svg", path: "out/seq101.svg" });
-  assert.match(textOf(svg), /<svg[\s\S]*<\/svg>/);
+  assert.match(textOf(svg), /^Wrote .*seq101\.svg/);
+  assert.doesNotMatch(textOf(svg), /<svg/, "with a path the text is not returned unless inline: true");
+  assert.match(await readFile(join(dir, "out/seq101.svg"), "utf8"), /<svg[\s\S]*<\/svg>/);
+  const both = await call("export_fsm", { name: "seq101", format: "svg", path: "out/seq101.svg", inline: true });
+  assert.match(textOf(both), /^Overwrote [\s\S]*<svg[\s\S]*<\/svg>/);
   const tex = await call("export_fsm", { name: "seq101", format: "latex" });
   assert.match(textOf(tex), /\\begin\{tikzpicture\}[\s\S]*\\end\{document\}/);
   const j = await call("export_fsm", { name: "seq101", format: "json" });
@@ -254,7 +258,7 @@ endmodule`;
   assert.ok(!(await call("import_verilog", { code, name: "det_from_v", overwrite: true })).isError);
   const bad = await call("import_verilog", { code, name: "my fsm" });
   assert.ok(bad.isError);
-  assert.match(textOf(bad), /Invalid FSM name/);
+  assert.match(textOf(bad), /letters, digits and _/);
   const missing = await call("import_verilog", { path: "missing.v" });
   assert.ok(missing.isError);
   assert.match(textOf(missing), /File not found: .*missing\.v/);

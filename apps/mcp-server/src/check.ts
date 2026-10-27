@@ -2,8 +2,8 @@
 // colours, export file targets and PNG sizes.
 
 import { stat } from "node:fs/promises";
-import { homedir } from "node:os";
 import { basename, dirname, extname, join, resolve, isAbsolute } from "node:path";
+import { userPath } from "./store.ts";
 
 // CSS named colours (CSS Color 4), so a typo is an error instead of a black background.
 const NAMED = new Set(
@@ -43,8 +43,7 @@ export const FORMAT_EXT = { png: ".png", svg: ".svg", latex: ".tex", json: ".fsm
  */
 export async function exportTarget(workspace: string, p: string, format: keyof typeof FORMAT_EXT, name: string): Promise<{ file: string; note: string }> {
   if (!p.trim()) throw new Error("path is empty; leave it out to only return the export");
-  let raw = p;
-  if (/^~(?=$|[\\/])/.test(raw)) raw = join(homedir(), raw.slice(1));
+  const raw = userPath(p);
   let file = isAbsolute(raw) ? resolve(raw) : resolve(workspace, raw);
   const isDir = /[\\/]$/.test(p) || (await stat(file).then((s) => s.isDirectory(), () => false));
   if (isDir) file = join(file, `${name}${FORMAT_EXT[format]}`);
@@ -68,14 +67,16 @@ const MAX_SIDE = 16384;
 /** The scale to render a `w`×`h` (px at scale 1) drawing at, never above the caps; `clamped` says if it was lowered. */
 export function pngScale(w: number, h: number, scale: number): { scale: number; clamped: boolean; width: number; height: number } {
   const cap = Math.min(Math.sqrt(MAX_PIXELS / Math.max(1, w * h)), MAX_SIDE / Math.max(1, w, h));
+  if (!Number.isFinite(w) || !Number.isFinite(h)) throw new Error("The drawing has no finite size (a state position or curve is not a finite number); fix the positions or run auto_layout");
   const s = Math.min(scale, Math.floor(cap * 100) / 100);
+  if (s < 0.05) throw new Error(`The drawing is ${Math.round(w)}x${Math.round(h)} px, too large for a PNG; run auto_layout or move far-away states closer, or export svg`);
   return { scale: s, clamped: s < scale, width: Math.round(w * s), height: Math.round(h * s) };
 }
 
 /** Width and height of an SVG produced by renderSvg. */
 export function svgSize(svg: string): { w: number; h: number } {
-  const m = /<svg[^>]*\swidth="([\d.]+)"[^>]*\sheight="([\d.]+)"/.exec(svg);
-  return m ? { w: Number(m[1]), h: Number(m[2]) } : { w: 0, h: 0 };
+  const m = /<svg[^>]*\swidth="([^"]*)"[^>]*\sheight="([^"]*)"/.exec(svg);
+  return m ? { w: Number(m[1]), h: Number(m[2]) } : { w: NaN, h: NaN };
 }
 
 /** Decode a source file: UTF-8 (with or without BOM) or UTF-16 with a BOM, as Windows editors sometimes save. */

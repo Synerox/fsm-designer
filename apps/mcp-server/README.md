@@ -25,15 +25,19 @@ node dist\index.js --help | --version
 
 - `--dir`（或環境變數 `FSM_WORKSPACE`）：圖存成 `<工作資料夾>\<名稱>.fsm.json`，
   資料夾不存在會自動建立。沒指定時是使用者家目錄下的 `fsm-workspace`
-  （Windows 上是 `%USERPROFILE%\fsm-workspace`），建議明確指定。
+  （Windows 上是 `%USERPROFILE%\fsm-workspace`），建議明確指定。可以寫 `~/圖` 這種路徑；
+  指到一個檔案或沒有寫入權限的資料夾時，伺服器會說明原因並結束。
 - `--app`（或環境變數 `FSM_DESIGNER_APP`）：`open_in_app` 要啟動的桌面版程式。
   沒指定時會在 `%LOCALAPPDATA%\FSM Designer`、`%ProgramFiles%\FSM Designer`
   找 `FSM Designer.exe` / `fsm-designer.exe`（安裝檔的預設位置）。
-- 選項少了值或打錯名稱時，伺服器會印出用法並以代碼 2 結束，不會默默用錯的資料夾。
+- 選項少了值、重複或打錯名稱時，伺服器會印出用法並以代碼 2 結束，不會默默用錯的資料夾。
+- FSM 名稱只能用英數字與 `_`，最多 64 字元；`CON`、`NUL` 這類 Windows 裝置名稱，
+  以及只差大小寫的同名圖都會被拒絕（Windows 與 macOS 上它們是同一個檔案）。
 
 同一張圖的修改會逐一排隊執行，並以 `<名稱>.fsm.json.lock` 檔在多個程序之間互斥
 （例如 Claude Desktop 與 Claude Code 同時連到同一個工作資料夾），所以同時呼叫多個
-工具不會互相蓋掉。寫檔採先寫暫存檔再改名，桌面版不會讀到寫到一半的檔案。
+工具不會互相蓋掉。另一個程序最多等 30 秒；持有鎖的程序已結束時，鎖會自動接手，
+不必手動刪除。寫檔採先寫暫存檔再改名，桌面版不會讀到寫到一半的檔案。
 
 ## 在 Windows 上連接 Claude
 
@@ -77,7 +81,7 @@ claude mcp list      # 應該看到 fsm-designer: ... ✓ Connected
 ### 試試看
 
 - 「畫一個偵測序列 1011 的 Moore FSM，輸入 x、輸出 z，匯出 PNG 給我看。」
-- 「把 D:\rtl\uart_rx.v 裡的狀態機畫成狀態圖，用圓形排版，匯出 LaTeX。」
+- 「把 D:\rtl\uart_rx.v 裡的狀態機畫成狀態圖，匯出 LaTeX。」
 - 「S0 和 S1 之間的線改成平行直線，間距 24，隱藏線上文字後匯出 SVG 到 out\seq.svg。」
 - 「在 FSM Designer 裡打開這張圖。」
 
@@ -91,13 +95,14 @@ claude mcp list      # 應該看到 fsm-designer: ... ✓ Connected
 | `add_state`、`update_state`、`remove_state` | 狀態：名稱、顯示文字 `label`（如 `S₀`）、起始/接受、Moore 輸出、顏色、半徑 `radius`、字體大小、起始箭頭方向 `initialFrom`、位置。可用名稱或 id 指定。 |
 | `add_transition`、`update_transition`、`remove_transition` | 轉移：條件、Mealy 輸出、優先順序、彎曲 `curve`、平行線間距 `gap`、自迴圈方向 `loopSide`、字體大小。 |
 | `set_line_style` | 兩個狀態之間的線：`straight`（直線，來回兩條會平行錯開，`gap` 調間距）、`curved`（曲線）、`auto`（回到自動）。 |
-| `auto_layout` | 自動排版，和桌面版按鈕相同（單一規則、沒有選項）：比較方格、分層流程、蛇形與環形（主迴圈繞成長方形，短迴圈貼在旁邊）挑最好的，避免太長的箭頭，互指的三角形調成正三角形，互不相連的子圖分開排再並排；回傳選中的排法與修不掉的問題。`labels: "none"` 依隱藏文字的畫法排得更緊湊。 |
+| `auto_layout` | 自動排版，和桌面版按鈕相同（單一規則，只能調狀態間距 `spacing`）：比較方格、分層流程、蛇形與環形（主迴圈繞成長方形，短迴圈貼在旁邊）挑最好的，避免太長的箭頭，互指的三角形調成正三角形，互不相連的子圖分開排再並排；回傳選中的排法與修不掉的問題。`labels: "none"` 依隱藏文字的畫法排得更緊湊。 |
 | `import_verilog` | 分析 Verilog/SystemVerilog（`code` 或檔案 `path`）：找出狀態暫存器、reset 狀態、每條轉移的條件、Moore/Mealy 輸出，排版後存檔並回傳 PNG 與報告。存檔名稱預設是 module 名稱（可用 `name` 改），已有同名的圖時要給 `overwrite: true`。支援寫法見 `packages/core/src/import/README.md`。 |
 | `validate_fsm` | 錯誤（沒有狀態、沒有 reset 狀態、多條無條件轉移）與警告（到不了的狀態、重複條件、未宣告的輸入、不是合法 Verilog 運算式的條件）。 |
-| `export_fsm` | `png`（同時以圖片回傳，agent 可以檢查自己的成果）、`svg`、`latex`（TikZ，可用 pdflatex 編譯）、`json`。`path` 另存檔案（相對路徑放在工作資料夾）；`labels` = `all` / `noLoops` / `none` 對應桌面版的「全部／隱藏」線上文字。 |
+| `export_fsm` | `png`（同時以圖片回傳，agent 可以檢查自己的成果）、`svg`、`latex`（TikZ，可用 pdflatex 編譯）、`json`。`path` 另存檔案（相對路徑放在工作資料夾，給資料夾時存成 `<名稱>.<副檔名>`，不會覆蓋工作資料夾裡的 `.fsm.json`）。給了 `path` 時文字格式只回報寫入的檔案，要同時回傳內容請加 `inline: true`；`labels` = `all` / `noLoops` / `none` 對應桌面版的「全部／隱藏」線上文字。 |
 | `open_in_app` | 用 FSM Designer 桌面版開啟這張圖，讓你接手手動編輯。桌面版不會自動重新讀檔，agent 之後再修改時需要重新開啟。 |
 
-每張圖也可以用 MCP resource `fsm://<名稱>` 讀取。
+每張圖也可以用 MCP resource `fsm://<名稱>` 讀取；新增或刪除圖時伺服器會通知 client 重新整理清單。
+`list_fsms` 會另外列出工作資料夾裡無法當作圖使用的 `.fsm.json`（例如檔名有空白）。
 
 ### 慣例
 
@@ -123,4 +128,5 @@ pnpm --filter @fsm/mcp-server test   # 透過 stdio 啟動真正的伺服器，�
 ```
 
 測試涵蓋每個工具的正常與錯誤路徑、每種匯出格式、Verilog 匯入、同一張圖的並行修改
-（同一程序與兩個程序）、損壞的 `.fsm.json`、命令列參數，以及用假的執行檔測 `open_in_app`。
+（同一程序與兩個程序）、已結束程序留下的鎖檔、損壞或版本較新的 `.fsm.json`、命令列參數、
+資源清單通知，以及用假的執行檔測 `open_in_app`（這一項在 Windows 上略過）。

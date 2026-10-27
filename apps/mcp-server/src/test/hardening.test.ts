@@ -240,3 +240,88 @@ test("leftover files: a failed edit leaves no temp or lock files", async () => {
   assert.deepEqual((await readdir(dir)).filter((f) => /\.(tmp-|lock)/.test(f)), []);
   await stat(join(dir, "tri.fsm.json"));
 });
+
+// ---- workspace files, locks, command line and resources -----------------------
+
+test("a file whose stored name differs from its file name is loaded under the file name", async () => {
+  await ok("create_fsm", { name: "orig", states: [{ name: "A" }] });
+  const d = await load("orig");
+  d.name = "something_else";
+  await writeFile(join(dir, "copied.fsm.json"), "﻿" + JSON.stringify(d));
+  assert.match(await ok("get_fsm", { name: "copied" }), /copied/);
+  await ok("add_state", { fsm: "copied", name: "B" });
+  assert.equal((await load("copied")).name, "copied");
+  // A newer file version is refused instead of being silently rewritten.
+  await writeFile(join(dir, "future.fsm.json"), JSON.stringify({ ...d, name: "future", version: 2 }));
+  await fails("get_fsm", { name: "future" }, /newer FSM Designer/);
+});
+
+test("locks: a lock left by an exited process or an old broken lock is taken over; nothing is left behind", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { hostname } = await import("node:os");
+  const { readdir, utimes } = await import("node:fs/promises");
+  const dead = spawnSync(process.execPath, ["-e", ""]).pid!;
+  await ok("create_fsm", { name: "locked", states: [{ name: "A" }] });
+  const lock = join(dir, "locked.fsm.json.lock");
+  await writeFile(lock, JSON.stringify({ pid: dead, host: hostname(), token: "old", time: Date.now() }));
+  const t0 = Date.now();
+  await ok("add_state", { fsm: "locked", name: "B" });
+  assert.ok(Date.now() - t0 < 5000, "a dead owner's lock is not waited out");
+  await writeFile(lock, "garbage");
+  const old = new Date(Date.now() - 120_000);
+  await utimes(lock, old, old);
+  await ok("add_state", { fsm: "locked", name: "C" });
+  assert.deepEqual((await load("locked")).states.map((s: { name: string }) => s.name), ["A", "B", "C"]);
+  assert.deepEqual((await readdir(dir)).filter((f) => /\.(lock|stale-)/.test(f)), []);
+});
+
+test("list_fsms names entries it cannot use; resources announce new and deleted diagrams; a missing resource is -32002", async () => {
+  const { mkdir } = await import("node:fs/promises");
+  await writeFile(join(dir, "has space.fsm.json"), "{}");
+  await mkdir(join(dir, "folder.fsm.json"), { recursive: true });
+  const listed = await ok("list_fsms", {});
+  assert.match(listed, /Ignored[^\n]*folder\.fsm\.json/);
+  assert.match(listed, /Ignored[^\n]*has space\.fsm\.json/);
+  assert.doesNotMatch(listed.split("Ignored")[0], /has space|folder/);
+
+  const { ResourceListChangedNotificationSchema } = await import("@modelcontextprotocol/sdk/types.js");
+  let changed = 0;
+  client.setNotificationHandler(ResourceListChangedNotificationSchema, async () => { changed++; });
+  await ok("create_fsm", { name: "announced", states: [{ name: "A" }] });
+  await ok("create_fsm", { name: "announced", states: [{ name: "A" }], overwrite: true });
+  await ok("delete_fsm", { name: "announced" });
+  for (let i = 0; i < 50 && changed < 2; i++) await new Promise((r) => setTimeout(r, 20));
+  assert.equal(changed, 2, "created and deleted, not replaced");
+
+  await assert.rejects(client.readResource({ uri: "fsm://announced" }), (e: { code?: number }) => e.code === -32002);
+});
+
+test("positions are bounded, add_state says which state stopped being initial, backslash paths work on POSIX", async () => {
+  await fails("add_state", { fsm: "locked", name: "FAR", x: 1e9, y: 0 }, /x/);
+  assert.match(await ok("add_state", { fsm: "locked", name: "NEW0", isInitial: true }), /as the initial state \(was A\)/);
+  if (process.platform !== "win32") {
+    await ok("export_fsm", { name: "locked", format: "svg", path: "bs\\sub\\locked.svg" });
+    await stat(join(dir, "bs", "sub", "locked.svg"));
+  }
+});
+
+test("command line: --dir must be a folder; options are checked", async () => {
+  const { execFile } = await import("node:child_process");
+  const run = (args: string[], env: Record<string, string> = {}) => new Promise<{ code: number | null; err: string }>((res) =>
+    execFile(process.execPath, [entry, ...args], { env: { ...process.env, ...env } }, (e, _out, err) => res({ code: (e as { code?: number } | null)?.code ?? 0, err })));
+  const file = join(dir, "not-a-folder.txt");
+  await writeFile(file, "x");
+  const r = await run(["--dir", file]);
+  assert.equal(r.code, 2);
+  assert.match(r.err, /not a folder|not a directory/i);
+  for (const [args, re] of [
+    [["--dir", dir, "--dir", dir], /--dir given twice/],
+    [["--dir", "--app"], /--dir needs a value/],
+    [["--dir", dir, "extra"], /unexpected argument extra/],
+    [["--dir", ""], /--dir needs a value/],
+  ] as const) {
+    const out = await run([...args]);
+    assert.equal(out.code, 2, args.join(" "));
+    assert.match(out.err, re);
+  }
+});
