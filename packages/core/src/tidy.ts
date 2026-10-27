@@ -21,6 +21,10 @@
 //      top left; each piece hanging off it (a short side loop, a lone line)
 //      as its own small shape, an equilateral triangle, square or rectangle,
 //      pointing away from the state it hangs off.
+//    - hub: a state linked to every other state, in the middle of the others
+//      when they make a loop round it (a wheel; four states all linked
+//      become an equilateral triangle round the fourth), or, being the reset
+//      state, on the left with the others above, right of and below it (a fan).
 //    Each at two line lengths: room for the spacing, and room for the
 //    widest label.
 // 3. Local shapes. A triangle of linked states (each candidate also tried
@@ -84,7 +88,7 @@ export interface LayoutIssue {
 
 export interface TidyResult {
   score: LayoutScore;
-  /** The winning arrangement: grid, layers-right, layers-down, snake-k, ring-cxr, or islands (several packed side by side). */
+  /** The winning arrangement: grid, layers-right, layers-down, snake-k, ring-cxr, hub-triangle, hub-square, hub-wheel, hub-fan, or islands (several packed side by side). */
   arrangement: string;
   /** Triangles made equilateral, as their state ids. */
   triangles: string[][];
@@ -190,9 +194,9 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
     const a = g.ids[t[i]], b = g.ids[t[j]];
     return g.out.get(a)!.includes(b) && g.out.get(b)!.includes(a);
   }));
-  const consider = (arrangement: string, given: Pos, sx: number, sy: number, keepRows = false) => {
+  const consider = (arrangement: string, given: Pos, sx: number, sy: number, keepRows = false, asIs = false) => {
     const seen = new Set<string>();
-    for (const tris of [triangles, mutual]) {
+    for (const tris of asIs ? [[]] : [triangles, mutual]) {
       const pos = equilateral(g, given, tris, 2 * R + 60, Math.min(sx, sy), keepRows, keepRows || tris === mutual);
       const key = g.ids.map((id) => { const p = pos.get(id)!; return `${Math.round(p.x / GRID)},${Math.round(p.y / GRID)}`; }).join(" ");
       if (seen.has(key)) continue;
@@ -216,6 +220,8 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
       for (const k of wrapWidths(layers, sx, sy)) consider(`snake-${k}`, snake(layers, k, sx, sy), sx, sy);
       // The main loop round a rectangle, side loops as small shapes beside the state they leave from.
       for (const [name, pos] of rings(g, sx, sy)) consider(name, pos, sx, sy, true);
+      // A state linked to all the others in their middle (or, being the reset state, on their left), drawn as shaped.
+      for (const [name, pos] of hubs(g, sx, sy, R)) consider(name, pos, sx, sy, false, true);
     }
   }
   tried.sort((a, b) => a.score.total - b.score.total);
@@ -696,6 +702,95 @@ function rings(g: Graph, sx: number, sy: number): Array<[string, Pos]> {
       }
     }
     out.push([`ring-${c}x${r}`, pos]);
+  }
+  return out;
+}
+
+// ---- hubs -----------------------------------------------------------------------
+
+/**
+ * A state linked to every other state (a star, a wheel, four states all
+ * linked to each other) drawn in the middle of the others, so its lines are
+ * short and stay clear of the lines between the others: the others go round
+ * it in the order of their own loop, on the eight cells around it (the four
+ * level and upright ones first) or, for three, as an equilateral triangle
+ * with the hub at its centre. A hub that is the reset state, which should be
+ * the leftmost, is also tried as a fan: on the left, the others above, right
+ * of and below it. Each shape is turned so the lines between the others and
+ * the reset state's place cost least (a quick measure, as for the grid); the
+ * score then decides between these and every other arrangement.
+ */
+function hubs(g: Graph, sx: number, sy: number, R: number): Array<[string, Pos]> {
+  const n = g.ids.length;
+  if (n < 4 || n > 9) return [];
+  const edges = edgePairs(g);
+  const quick = (pos: Pos) => {
+    let c = 0;
+    const segs = edges.map(([a, b]) => [pos.get(a)!, pos.get(b)!, a, b] as const);
+    for (let i = 0; i < segs.length; i++) {
+      const [p, q, a, b] = segs[i];
+      const dx = Math.abs(p.x - q.x) / sx, dy = Math.abs(p.y - q.y) / sy, len = Math.hypot(dx, dy);
+      c += len + (dx > 0.1 && dy > 0.1 ? 0.4 : 0) + 4 * Math.max(0, len - 1.5);
+      for (const [id, s] of pos) if (id !== a && id !== b && segDist(s, p, q) < R + 10) c += 15;
+      for (let j = i + 1; j < segs.length; j++) {
+        const [r, s2, e, f] = segs[j];
+        if (e !== a && e !== b && f !== a && f !== b && intersect(p, q, r, s2)) c += 10;
+      }
+    }
+    const o = pos.get(g.init)!;
+    for (const p of pos.values()) if (p.x < o.x - GRID) c += 15; // nothing left of the reset state
+    return c;
+  };
+  // Cells round the hub, clockwise from the left (y grows downwards).
+  const L = { x: -1, y: 0 }, UL = { x: -1, y: -1 }, U = { x: 0, y: -1 }, UR = { x: 1, y: -1 }, Rt = { x: 1, y: 0 }, DR = { x: 1, y: 1 }, D = { x: 0, y: 1 }, DL = { x: -1, y: 1 };
+  const subsets = <T,>(xs: T[], k: number): T[][] => (k === 0 ? [[]] : xs.length < k ? [] : [...subsets(xs.slice(1), k - 1).map((s) => [xs[0], ...s]), ...subsets(xs.slice(1), k)]);
+  const clockwise = (cs: Pt[]) => [...cs].sort((a, b) => Math.atan2(-a.y, a.x) - Math.atan2(-b.y, b.x)).reverse();
+  const out: Array<[string, Pos]> = [];
+  for (const hub of g.ids.filter((id) => g.nb.get(id)!.size === n - 1).slice(0, 4)) {
+    const rim = g.ids.filter((id) => id !== hub);
+    const m = rim.length;
+    const loop = ringOf(g, rim, rim[0]);
+    const order = loop ?? walkOrder(g, rim);
+    const families: Array<[string, Pt[][]]> = []; // name, the cell sets (px) to choose from
+    const step = (sx + sy) / 2;
+    // In the middle only when the others make a loop round it (a wheel), so
+    // the spokes stay inside the loop; a plain star the grid already draws as a plus.
+    if (loop && m === 3) {
+      // An equilateral triangle, the hub at its centre, one step from each corner; pointing left, right, up or down.
+      const tri = [0, 1, 2, 3].map((k) => [0, 1, 2].map((i) => {
+        const a = (k * Math.PI) / 2 + Math.PI + (i * 2 * Math.PI) / 3;
+        return { x: Math.cos(a) * step, y: Math.sin(a) * step };
+      }));
+      for (const t of tri) families.push(["hub-triangle", [t]]); // each way round: the score weighs their shapes
+    } else if (loop && m <= 8) {
+      const cells = (cs: Pt[]) => clockwise(cs).map((c) => ({ x: c.x * sx, y: c.y * sy }));
+      if (m === 4) families.push(["hub-square", [cells([UL, UR, DR, DL])]]);
+      families.push(["hub-wheel", subsets([UL, UR, DR, DL], m - 4).map((cs) => cells([L, U, Rt, D, ...cs]))]);
+    }
+    if (hub === g.init && m >= 3 && m <= 5) families.push(["hub-fan", subsets([UR, Rt, DR], m - 2).map((cs) => [U, ...cs, D].map((c) => ({ x: c.x * sx, y: c.y * sy })))]);
+    for (const [name, sets] of families) {
+      let best: Pos | undefined, bestCost = Infinity;
+      for (const cs of sets) for (let k = 0; k < m; k++) for (const dir of [1, -1]) {
+        const pos: Pos = new Map([[hub, { x: 0, y: 0 }]]);
+        order.forEach((id, i) => pos.set(id, cs[(((k + dir * i) % m) + m) % m]));
+        const c = quick(pos);
+        if (c < bestCost - 1e-9) { bestCost = c; best = pos; }
+      }
+      if (best) out.push([name, best]);
+    }
+  }
+  return out;
+}
+
+/** The states in `ids` in the order of a walk along their lines, jumping to the next unvisited one when stuck. */
+function walkOrder(g: Graph, ids: string[]): string[] {
+  const inside = new Set(ids), seen = new Set<string>(), out: string[] = [];
+  for (const s of ids) {
+    let u: string | undefined = s;
+    while (u && !seen.has(u)) {
+      seen.add(u); out.push(u);
+      u = [...g.nb.get(u)!].find((v) => inside.has(v) && !seen.has(v));
+    }
   }
   return out;
 }

@@ -194,6 +194,33 @@ test("no long arrows: a state with far neighbours moves in between them", () => 
   }
 });
 
+test("four states all linked: an equilateral triangle round the fourth, the reset state leftmost, no arcs", () => {
+  const d = machine(4, [[0, 1], [1, 0], [0, 2], [2, 0], [0, 3], [3, 0], [1, 2], [2, 1], [1, 3], [3, 1], [2, 3], [3, 2]]);
+  const r = tidyLayout(d, { plan: { labels: "none" } });
+  checkTidy(d, "k4");
+  assert.equal(r.arrangement, "hub-triangle");
+  assert.equal(r.score.crossings, 0);
+  assert.ok(d.transitions.every((t) => !t.curve), "straight lines only");
+  assert.ok(d.states.every((s) => s.x! >= d.states[0].x!), "nothing left of the reset state");
+  // One state at the centre of an equilateral triangle of the other three.
+  const hub = d.states.find((h) => { const o = d.states.filter((s) => s !== h); return Math.abs(o.reduce((a, s) => a + s.x!, 0) / 3 - h.x!) <= GRID && Math.abs(o.reduce((a, s) => a + s.y!, 0) / 3 - h.y!) <= GRID; });
+  assert.ok(hub, "a state at the centre");
+  const o = d.states.filter((s) => s !== hub).map((s) => d.states.indexOf(s));
+  const sides = [dist(d, o[0], o[1]), dist(d, o[1], o[2]), dist(d, o[2], o[0])];
+  assert.ok(Math.max(...sides) - Math.min(...sides) <= 2 * GRID, `${sides}`);
+});
+
+test("a wheel round the reset state: a fan, the reset state on the left, no crossings, no long lines", () => {
+  const d = machine(6, [[0, 1], [0, 2], [0, 3], [0, 4], [0, 5], [1, 2], [2, 3], [3, 4], [4, 5], [5, 1]]);
+  const r = tidyLayout(d, { plan: { labels: "none" } });
+  checkTidy(d, "wheel");
+  assert.equal(r.arrangement, "hub-fan");
+  assert.equal(r.score.crossings, 0);
+  assert.ok(d.states.every((s) => s.x! >= d.states[0].x!), "nothing left of the reset state");
+  const step = Math.min(...d.states.slice(1).map((_, i) => dist(d, 0, i + 1)));
+  assert.ok(d.states.slice(1).every((_, i) => dist(d, 0, i + 1) <= step * Math.SQRT2 + 1), "spokes one step, straight or diagonal");
+});
+
 // Pairs of layouts of the same machine, and which one the user preferred
 // when shown both side by side (labels hidden). The score must agree.
 test("the score agrees with the user's picks between pairs of layouts", () => {
