@@ -393,3 +393,66 @@ endmodule`;
   assert.match(await ok("import_verilog", { code, png: false }), /Imported module lower/);
   assert.deepEqual((await load("lower")).states.map((s: { name: string }) => s.name).sort(), ["s0", "s1", "s2"]);
 });
+
+test("locks: a live breaker's guard is never taken over; a dead one's is", { skip: process.platform === "win32" }, async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { hostname } = await import("node:os");
+  await ok("create_fsm", { name: "guarded", states: [{ name: "A" }] });
+  const lock = join(dir, "guarded.fsm.json.lock");
+  const guard = `${lock}.break`;
+  const dead = spawnSync(process.execPath, ["-e", ""]).pid!;
+  await writeFile(lock, JSON.stringify({ pid: dead, host: hostname(), token: "deadlock", time: Date.now() }));
+  // This test process is alive: its guard must be waited for, however old it is.
+  await writeFile(guard, JSON.stringify({ pid: process.pid, host: hostname(), token: "liveguard", time: 0 }));
+  const { utimes } = await import("node:fs/promises");
+  const old = new Date(Date.now() - 3_600_000);
+  await utimes(guard, old, old);
+  const t0 = Date.now();
+  const pending = call("add_state", { fsm: "guarded", name: "B" });
+  setTimeout(() => { rm(guard, { force: true }); }, 1500);
+  const r = await pending;
+  assert.ok(!r.isError, textOf(r));
+  assert.ok(Date.now() - t0 >= 1400, "waited for the live guard");
+  await writeFile(lock, JSON.stringify({ pid: dead, host: hostname(), token: "deadlock2", time: Date.now() }));
+  await writeFile(guard, JSON.stringify({ pid: dead, host: hostname(), token: "deadguard", time: Date.now() }));
+  const t1 = Date.now();
+  await ok("add_state", { fsm: "guarded", name: "C" });
+  assert.ok(Date.now() - t1 < 5000, "a dead breaker's guard is cleared");
+  assert.equal((await load("guarded")).states.length, 3);
+});
+
+test("files: linked names share one lock, devices and pipes are refused, hard links and file modes are kept, odd entries are explained", { skip: process.platform === "win32" }, async () => {
+  const { symlink, link, chmod, mkdir, readdir } = await import("node:fs/promises");
+  const { execFileSync } = await import("node:child_process");
+  await ok("create_fsm", { name: "real", states: [{ name: "S" }] });
+  await symlink(join(dir, "real.fsm.json"), join(dir, "alias.fsm.json"));
+  const rs = await Promise.all(Array.from({ length: 16 }, (_, i) => call("add_state", { fsm: i % 2 ? "alias" : "real", name: `X${i}` })));
+  for (const r of rs) assert.ok(!r.isError, textOf(r));
+  assert.equal((await load("real")).states.length, 17);
+
+  await fails("import_verilog", { path: "/dev/zero" }, /not a regular file/);
+  await fails("export_fsm", { name: "real", format: "svg", path: "/dev/null" }, /not a regular file/);
+
+  const other = join(dir, "elsewhere");
+  await mkdir(other, { recursive: true });
+  await link(join(dir, "real.fsm.json"), join(other, "copy.fsm.json"));
+  await chmod(join(dir, "real.fsm.json"), 0o600);
+  await ok("add_state", { fsm: "real", name: "HARD" });
+  assert.match(await readFile(join(other, "copy.fsm.json"), "utf8"), /"HARD"/);
+  await rm(join(other, "copy.fsm.json"));
+  await ok("add_state", { fsm: "real", name: "MODE" });
+  assert.equal((await stat(join(dir, "real.fsm.json"))).mode & 0o777, 0o600);
+
+  execFileSync("mkfifo", [join(dir, "pipe.fsm.json")]);
+  await symlink(join(dir, "loopb.fsm.json"), join(dir, "loopa.fsm.json"));
+  await symlink(join(dir, "loopa.fsm.json"), join(dir, "loopb.fsm.json"));
+  const listed = await ok("list_fsms", {});
+  assert.match(listed, /pipe\.fsm\.json \(not a regular file\)/);
+  assert.match(listed, /loopa\.fsm\.json \(link loop\)/);
+  await fails("get_fsm", { name: "pipe" }, /not a regular file/);
+  await fails("get_fsm", { name: "loopa" }, /link loop/);
+  await ok("delete_fsm", { name: "loopa" });
+  await fails("delete_fsm", { name: "folder" }, /folder, not a diagram/);
+  assert.ok(!(await readdir(dir)).includes("loopa.fsm.json"));
+  for (const f of ["pipe.fsm.json", "loopb.fsm.json", "alias.fsm.json"]) await rm(join(dir, f), { force: true });
+});

@@ -232,6 +232,8 @@ function conditionNote(d: FsmDiagram, t: Transition): string {
   return w.length ? ` Note: ${w[0]}.` : "";
 }
 
+const MAX_SOURCE = 20_000_000;
+
 /** Read a Verilog file with an error an agent can act on. */
 async function readSource(file: string): Promise<string> {
   let s;
@@ -243,6 +245,9 @@ async function readSource(file: string): Promise<string> {
     throw e;
   }
   if (s.isDirectory()) throw new Error(`${file} is a folder, not a Verilog file`);
+  // A device or pipe (/dev/zero, a FIFO, the server's own stdin) would block or never end.
+  if (!s.isFile()) throw new Error(`${file} is not a regular file`);
+  if (s.size > MAX_SOURCE) throw new Error(`${file} is ${Math.round(s.size / 1e6)} MB; Verilog sources over ${MAX_SOURCE / 1e6} MB are not read`);
   return decodeSource(await readFile(file));
 }
 
@@ -350,7 +355,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
       const names = await store.list();
       const skipped = (await store.ignored?.()) ?? [];
       const note = skipped.length
-        ? `\nIgnored (not usable as FSM files: folders, or names that are not ${NAME_RULE}): ${skipped.join(", ")}.`
+        ? `\nIgnored (not usable as FSM files): ${skipped.join(", ")}.`
         : "";
       if (!names.length) return text(`No FSMs yet in ${store.location}. Create one with create_fsm.${note}`);
       const rows = await Promise.all(names.map(async (n) => {
@@ -386,7 +391,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
     guard(async ({ name }) =>
       store.lock(name, async () => {
         // exists(), not load(): a corrupt file must still be deletable.
-        if (!(await store.exists(name))) throw new Error(`No FSM named "${name}". Existing: ${(await store.list()).join(", ") || "(none)"}.`);
+        if (!(await store.exists(name)) && !(await store.hasEntry?.(name))) throw new Error(`No FSM named "${name}". Existing: ${(await store.list()).join(", ") || "(none)"}.`);
         await store.remove(name);
         return text(`Deleted "${name}".`);
       }).then((r) => {

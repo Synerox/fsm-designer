@@ -57,6 +57,9 @@ export async function exportTarget(workspace: string, p: string, format: keyof t
       throw new Error(`Refusing to write ${file}: that is where the workspace keeps the diagram "${basename(file).slice(0, -".fsm.json".length)}". ` +
         "To copy a diagram use create_fsm with the JSON from get_fsm; to export elsewhere give a path outside the workspace folder or a sub-folder");
   }
+  // A device or pipe (the server's own stdout, /dev/...) is never an export target.
+  const existing = await stat(file).catch(() => undefined);
+  if (existing && !existing.isFile()) throw new Error(`Refusing to write ${file}: it is not a regular file`);
   // Whatever the spelling (links, \\?\ prefixes, short names), never write over a diagram file.
   const same = await sameAsDiagram(workspace, file);
   if (same) throw new Error(`Refusing to write ${file}: it is the workspace's diagram file ${same}. Give a path outside the workspace folder`);

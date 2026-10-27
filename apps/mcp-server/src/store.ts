@@ -2,8 +2,8 @@
 // interface, so a "live document" backend (the desktop app over its local
 // WebSocket) can replace the file store without touching the tools.
 
-import { access, constants, lstat, mkdir, readdir, readFile, realpath, rm, writeFile, rename, open, stat, unlink } from "node:fs/promises";
-import { readFileSync, unlinkSync } from "node:fs";
+import { access, chmod, chown, constants, lstat, mkdir, readdir, readFile, realpath, rm, writeFile, rename, open, stat, unlink } from "node:fs/promises";
+import { readFileSync, readlinkSync, unlinkSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir, hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -28,8 +28,10 @@ export interface DiagramStore {
   fileOf?(name: string): string;
   /** Resolve a user-supplied export path (relative paths go into the workspace). */
   resolvePath(p: string): string;
-  /** Entries that look like diagrams but cannot be used (shown by list_fsms). */
+  /** Entries that look like diagrams but cannot be used, each with the reason (shown by list_fsms). */
   ignored?(): Promise<string[]>;
+  /** Whether anything (even a broken link) sits where the diagram would be, so delete_fsm can clear it. */
+  hasEntry?(name: string): Promise<boolean>;
 }
 
 const FILE_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -59,18 +61,28 @@ export class KeyedQueue {
   }
 }
 
-/** How long to wait for another live process before giving up. */
+/** How long a tool call waits for another live process before giving up. */
 const LOCK_WAIT_MS = 30_000;
 /** A lock from another computer (shared folder) whose owner cannot be checked is abandoned after this long. */
 const FOREIGN_STALE_MS = 10 * 60_000;
 /** A lock file that is still empty or unreadable this long after it was created is abandoned. */
 const BROKEN_STALE_MS = 30_000;
-/** A `.break` guard (see breakStale) older than this was left by a crash. */
-const BREAK_STALE_MS = 5_000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const HOST = hostname();
+/**
+ * Processes in another PID namespace (containers sharing a hostname) cannot be
+ * checked with kill(pid, 0); their locks are treated like another computer's.
+ */
+const PID_NS = (() => {
+  try {
+    return process.platform === "linux" ? readlinkSync("/proc/self/ns/pid") : "";
+  } catch {
+    return "";
+  }
+})();
 
-interface LockInfo { pid: number; host: string; token: string; time: number }
+interface LockInfo { pid: number; host: string; ns?: string; token: string; time: number }
+type Seen = { info?: LockInfo; mtime: number };
 
 function alive(pid: number): boolean {
   try {
@@ -81,32 +93,48 @@ function alive(pid: number): boolean {
   }
 }
 
-async function readLock(path: string): Promise<{ info?: LockInfo; mtime: number } | undefined> {
+/** Read a lock or guard file (only its first few KB: a lock is a short JSON line). */
+async function readLock(path: string): Promise<Seen | undefined> {
+  let fh;
   try {
-    const [text, s] = await Promise.all([readFile(path, "utf8"), stat(path)]);
-    let info: LockInfo | undefined;
-    try { info = JSON.parse(text); } catch { /* still being written, or not ours */ }
-    return { info, mtime: s.mtimeMs };
+    fh = await open(path, "r");
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw e;
   }
+  try {
+    const s = await fh.stat();
+    const buf = Buffer.alloc(4096);
+    const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+    let info: LockInfo | undefined;
+    try {
+      const j = JSON.parse(buf.subarray(0, bytesRead).toString("utf8"));
+      if (j && typeof j.pid === "number" && typeof j.token === "string" && typeof j.host === "string") info = j;
+    } catch { /* still being written, or not ours */ }
+    return { info, mtime: s.mtimeMs };
+  } finally {
+    await fh.close();
+  }
 }
 
-/** Why a lock may be taken over, or undefined while its owner may still be working. */
-function staleReason(l: { info?: LockInfo; mtime: number }): string | undefined {
-  const age = Date.now() - l.mtime;
-  if (!l.info || typeof l.info.pid !== "number") return age > BROKEN_STALE_MS ? "unreadable lock file" : undefined;
-  if (l.info.host === HOST) {
+/** Why a lock (or break guard) may be taken over, or undefined while its owner may still be working. */
+function staleReason(l: Seen): string | undefined {
+  // abs: a clock that was set back must not keep a broken file alive for hours.
+  const age = Math.abs(Date.now() - l.mtime);
+  if (!l.info) return age > BROKEN_STALE_MS ? "unreadable lock file" : undefined;
+  // ns is missing only in locks from older versions of this server.
+  if (l.info.host === HOST && (l.info.ns === undefined || l.info.ns === PID_NS)) {
     // Our own pid on a lock we do not hold: left by an earlier process that had the same pid.
-    if (l.info.pid === process.pid) return [...held.values()].includes(l.info.token) ? undefined : "left by an earlier process with this process id";
+    if (l.info.pid === process.pid) return ours.has(l.info.token) ? undefined : "left by an earlier process with this process id";
     return alive(l.info.pid) ? undefined : `process ${l.info.pid} has exited`;
   }
   return age > FOREIGN_STALE_MS ? `lock from ${l.info.host} is ${Math.round(age / 60000)} minutes old` : undefined;
 }
 
-/** Locks this process holds, removed if the process exits while holding them. */
+/** Lock and guard files this process holds (path -> token), removed if the process exits while holding them. */
 const held = new Map<string, string>();
+/** Tokens of this process's lock and guard files, including ones being created. */
+const ours = new Set<string>();
 process.on("exit", () => {
   for (const [path, token] of held) {
     try {
@@ -117,29 +145,60 @@ process.on("exit", () => {
 
 const permission = (e: unknown) => ["EACCES", "EPERM", "EROFS"].includes((e as NodeJS.ErrnoException).code ?? "");
 
-/**
- * Remove a stale lock, but only the very lock that was judged stale: waiters take
- * `<lock>.break` with O_EXCL first, so two of them can never both remove a lock,
- * and one of them can never remove a fresh lock another waiter has just taken.
- */
-async function breakStale(lockPath: string, seen: { info?: LockInfo; mtime: number }, why: string): Promise<void> {
-  const guard = `${lockPath}.break`;
+/** Create `path` with O_EXCL holding our identity; false if it already exists. */
+async function claim(path: string, token: string): Promise<boolean> {
+  ours.add(token);
+  let fh;
   try {
-    await (await open(guard, "wx")).close();
+    fh = await open(path, "wx");
   } catch (e) {
-    if (permission(e)) throw new Error(`Cannot create ${guard}: the workspace folder is not writable (${(e as NodeJS.ErrnoException).code})`);
-    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-    // Someone else is breaking it; a guard left by a crash is cleared after a while.
-    const g = await stat(guard).catch(() => undefined);
-    if (g && Date.now() - g.mtimeMs > BREAK_STALE_MS) await unlink(guard).catch(() => {});
-    else await sleep(10);
+    ours.delete(token);
+    if (permission(e)) throw new Error(`Cannot create ${path}: the workspace folder is not writable (${(e as NodeJS.ErrnoException).code})`);
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw e;
+  }
+  held.set(path, token);
+  try {
+    await fh.writeFile(JSON.stringify({ pid: process.pid, host: HOST, ns: PID_NS, token, time: Date.now() }) + "\n");
+  } finally {
+    await fh.close();
+  }
+  return true;
+}
+
+/** Remove `path` if it still holds `token`. */
+async function release(path: string, token: string): Promise<void> {
+  held.delete(path);
+  const cur = await readLock(path).catch(() => undefined);
+  if (cur?.info?.token === token) await unlink(path).catch(() => {});
+  ours.delete(token);
+}
+
+const sameLock = (a: Seen, b: Seen) => (a.info ? b.info?.token === a.info.token : !b.info && b.mtime === a.mtime);
+
+/**
+ * Remove a stale lock, but only the very lock that was judged stale. Waiters
+ * first claim `<lock>.break` (O_EXCL, holding their pid like a lock), so two of
+ * them never both remove a lock and one never removes a fresh lock another has
+ * just taken. A guard is only taken over when its owner is gone, never by age
+ * alone, so a breaker that stalls (a long layout, a debugger) keeps it.
+ */
+async function breakStale(lockPath: string, seen: Seen, why: string): Promise<void> {
+  const guard = `${lockPath}.break`;
+  const token = randomUUID();
+  if (!(await claim(guard, token))) {
+    const g = await readLock(guard);
+    if (g && staleReason(g)) {
+      const again = await readLock(guard);
+      if (again && sameLock(g, again)) await unlink(guard).catch(() => {});
+    }
     return;
   }
   try {
     const now = await readLock(lockPath);
-    if (!now) return;
-    const same = seen.info?.token !== undefined ? now.info?.token === seen.info.token : !now.info && now.mtime === seen.mtime;
-    if (!same || !staleReason(now)) return;
+    if (!now || !sameLock(seen, now) || !staleReason(now)) return;
+    // Still ours? Only a dead or very old guard is ever taken over, but check anyway.
+    if ((await readLock(guard))?.info?.token !== token) return;
     try {
       await unlink(lockPath);
     } catch (e) {
@@ -147,7 +206,7 @@ async function breakStale(lockPath: string, seen: { info?: LockInfo; mtime: numb
       throw new Error(`A stale lock (${why}) could not be removed: ${lockPath} (${(e as NodeJS.ErrnoException).code}). Delete it by hand.`);
     }
   } finally {
-    await unlink(guard).catch(() => {});
+    await release(guard, token);
   }
 }
 
@@ -157,47 +216,30 @@ async function breakStale(lockPath: string, seen: { info?: LockInfo; mtime: numb
  * overwrite each other's edits. A lock is only taken over when its owner is
  * gone (same computer: the process has exited), never because a long layout
  * is still running; and it is only removed by the process that holds it.
+ * Gives up at `deadline` (ms since the epoch).
  */
-async function withFileLock<T>(lockPath: string, fn: () => Promise<T>): Promise<T> {
-  const start = Date.now();
+async function withFileLock<T>(lockPath: string, fn: () => Promise<T>, deadline: number): Promise<T> {
   const token = randomUUID();
   let last: LockInfo | undefined;
   for (let attempt = 0; ; attempt++) {
-    try {
-      const fh = await open(lockPath, "wx");
-      try {
-        await fh.writeFile(JSON.stringify({ pid: process.pid, host: HOST, token, time: Date.now() }) + "\n");
-      } finally {
-        await fh.close();
-      }
-      break;
-    } catch (e) {
-      if (permission(e)) throw new Error(`Cannot create ${lockPath}: the workspace folder is not writable (${(e as NodeJS.ErrnoException).code})`);
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-    }
+    if (await claim(lockPath, token)) break;
     const cur = await readLock(lockPath);
-    if (!cur) continue; // released in between
-    last = cur.info;
-    const why = staleReason(cur);
-    if (why) {
-      await breakStale(lockPath, cur, why);
-      continue;
+    if (cur) {
+      last = cur.info ?? last;
+      const why = staleReason(cur);
+      if (why) await breakStale(lockPath, cur, why);
     }
-    const waited = Date.now() - start;
-    if (waited > LOCK_WAIT_MS) {
+    if (Date.now() > deadline) {
       const who = last ? `process ${last.pid} on ${last.host}` : "another process";
-      throw new Error(`The diagram is locked by ${who} (${lockPath}); waited ${Math.round(waited / 1000)} s. ` +
+      throw new Error(`The diagram is locked by ${who} (${lockPath}); waited ${Math.round((Date.now() - deadline + LOCK_WAIT_MS) / 1000)} s. ` +
         "Another FSM server may be running a long auto_layout; try again later, or delete the lock file if that server is gone.");
     }
     await sleep(Math.min(200, 20 + attempt * 10) * (0.5 + Math.random()));
   }
-  held.set(lockPath, token);
   try {
     return await fn();
   } finally {
-    held.delete(lockPath);
-    const cur = await readLock(lockPath).catch(() => undefined);
-    if (cur?.info?.token === token) await unlink(lockPath).catch(() => {});
+    await release(lockPath, token);
   }
 }
 
@@ -258,15 +300,23 @@ export class FileStore implements DiagramStore {
   private static usable(stem: string) {
     try { checkName(stem); return true; } catch { return false; }
   }
-  /** Split the entries into diagrams and the rest; a symlink counts when it leads to a file. */
+  /** Split the entries into diagrams and the rest (with the reason); a symlink counts when it leads to a file. */
   private async sorted() {
     const good: string[] = [];
     const bad: string[] = [];
     for (const e of await this.entries()) {
-      const isFile = e.isFile() || (e.isSymbolicLink() && (await stat(join(this.dir, e.name)).then((s) => s.isFile(), () => false)));
-      (isFile && FileStore.usable(e.name.slice(0, -EXT.length)) ? good : bad).push(e.name);
+      let why = "";
+      if (!FileStore.usable(e.name.slice(0, -EXT.length))) why = "not a valid FSM name";
+      else if (!e.isFile()) {
+        const s = await stat(join(this.dir, e.name)).catch((err: NodeJS.ErrnoException) => err.code ?? "error");
+        if (typeof s === "string") why = s === "ENOENT" ? "link to a missing file" : s === "ELOOP" ? "link loop" : `unreadable (${s})`;
+        else if (s.isDirectory()) why = "a folder";
+        else if (!s.isFile()) why = "not a regular file";
+      }
+      if (why) bad.push(`${e.name} (${why})`);
+      else good.push(e.name.slice(0, -EXT.length));
     }
-    return { good: good.map((n) => n.slice(0, -EXT.length)).sort(), bad: bad.sort() };
+    return { good: good.sort(), bad: bad.sort() };
   }
   async list() {
     return (await this.sorted()).good;
@@ -278,14 +328,23 @@ export class FileStore implements DiagramStore {
   async exists(name: string) {
     return (await this.list()).includes(name);
   }
+  /** Whether anything at all (even a broken link) sits at the diagram's file name. */
+  async hasEntry(name: string) {
+    return lstat(this.file(name)).then(() => true, () => false);
+  }
   async load(name: string) {
     const file = this.file(name);
     let text: string;
     try {
+      // A pipe or device would block or never end; only regular files are diagrams.
+      const s = await stat(file);
+      if (!s.isFile()) throw new Error(`${file} is ${s.isDirectory() ? "a folder" : "not a regular file"}`);
       text = await readFile(file, "utf8");
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT") throw new Error(`Cannot read ${file}: ${code ?? (e as Error).message}`);
+      if (!code) throw e;
+      if (code === "ELOOP") throw new Error(`${file} is a link loop; fix or delete the link`);
+      if (code !== "ENOENT") throw new Error(`Cannot read ${file}: ${code}`);
       if (await lstat(file).then((l) => l.isSymbolicLink(), () => false))
         throw new Error(`${file} is a link to a file that does not exist; fix or delete the link`);
       const all = await this.list();
@@ -316,11 +375,22 @@ export class FileStore implements DiagramStore {
         throw new Error(`${target} is a link to a file that does not exist; fix or delete the link`);
       }
     }
+    const text = JSON.stringify(d, null, 2) + "\n";
+    const old = await stat(target).catch(() => undefined);
     // Write then rename so a watching editor never sees a half-written file.
     // The temp name is unique per write, so overlapping saves cannot share it.
     const tmp = join(dirname(target), `.${d.name}${EXT}.tmp-${process.pid}-${++tmpCounter}`);
     try {
-      await writeFile(tmp, JSON.stringify(d, null, 2) + "\n");
+      if (old && old.nlink > 1) {
+        // Hard-linked: a rename would split the names into two diagrams, so write in place.
+        await writeFile(target, text);
+        return;
+      }
+      await writeFile(tmp, text, old ? { mode: old.mode & 0o7777 } : {});
+      if (old) {
+        await chmod(tmp, old.mode & 0o7777).catch(() => {});
+        if (process.getuid?.() === 0) await chown(tmp, old.uid, old.gid).catch(() => {});
+      }
       await renameRetry(tmp, target);
     } catch (e) {
       await rm(tmp, { force: true }).catch(() => {});
@@ -330,15 +400,18 @@ export class FileStore implements DiagramStore {
     }
   }
   async remove(name: string) {
-    await rm(this.file(name));
+    const file = this.file(name);
+    if (await lstat(file).then((l) => l.isDirectory(), () => false)) throw new Error(`${file} is a folder, not a diagram; it was not deleted`);
+    await rm(file);
   }
   async lock<T>(name: string, fn: () => Promise<T>): Promise<T> {
-    const file = this.file(name);
+    // The wait counts from the call, not from the turn in this process's queue.
+    const deadline = Date.now() + LOCK_WAIT_MS;
+    await mkdir(this.dir, { recursive: true });
+    // Lock the real file, so names that link to one diagram share one lock.
+    const file = await realpath(this.file(name)).catch(() => this.file(name));
     // Lower-cased: on Windows and macOS "Seq" and "seq" are the same file.
-    return this.queue.run(file.toLowerCase(), async () => {
-      await mkdir(this.dir, { recursive: true });
-      return withFileLock(`${file}.lock`, fn);
-    });
+    return this.queue.run(file.toLowerCase(), () => withFileLock(`${file}.lock`, fn, deadline));
   }
   resolvePath(p: string) {
     return resolve(this.dir, userPath(p));
