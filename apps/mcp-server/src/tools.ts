@@ -449,7 +449,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
       title: "Add state",
       description: `Add one state to an existing FSM (to build a whole machine, create_fsm is simpler). Without x/y the state has no position yet: export_fsm places it, or call auto_layout when you have finished adding states.`,
       inputSchema: z.object({ fsm: fsmName(), ...stateFields() }).strict(),
-      annotations: hints({ idempotentHint: true }),
+      annotations: hints({ destructiveHint: true, idempotentHint: true }),
     },
     guard(async ({ fsm, ...s }) =>
       mutate(store, fsm, (d) => {

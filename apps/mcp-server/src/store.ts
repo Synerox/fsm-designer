@@ -2,11 +2,11 @@
 // interface, so a "live document" backend (the desktop app over its local
 // WebSocket) can replace the file store without touching the tools.
 
-import { access, constants, link, mkdir, readdir, readFile, rm, writeFile, rename, open, stat, unlink } from "node:fs/promises";
+import { access, constants, lstat, mkdir, readdir, readFile, realpath, rm, writeFile, rename, open, stat, unlink } from "node:fs/promises";
 import { readFileSync, unlinkSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir, hostname } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parseDiagram } from "@fsm/core";
 import type { FsmDiagram } from "@fsm/core";
 
@@ -65,6 +65,8 @@ const LOCK_WAIT_MS = 30_000;
 const FOREIGN_STALE_MS = 10 * 60_000;
 /** A lock file that is still empty or unreadable this long after it was created is abandoned. */
 const BROKEN_STALE_MS = 30_000;
+/** A `.break` guard (see breakStale) older than this was left by a crash. */
+const BREAK_STALE_MS = 5_000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const HOST = hostname();
 
@@ -95,7 +97,11 @@ async function readLock(path: string): Promise<{ info?: LockInfo; mtime: number 
 function staleReason(l: { info?: LockInfo; mtime: number }): string | undefined {
   const age = Date.now() - l.mtime;
   if (!l.info || typeof l.info.pid !== "number") return age > BROKEN_STALE_MS ? "unreadable lock file" : undefined;
-  if (l.info.host === HOST) return alive(l.info.pid) ? undefined : `process ${l.info.pid} has exited`;
+  if (l.info.host === HOST) {
+    // Our own pid on a lock we do not hold: left by an earlier process that had the same pid.
+    if (l.info.pid === process.pid) return [...held.values()].includes(l.info.token) ? undefined : "left by an earlier process with this process id";
+    return alive(l.info.pid) ? undefined : `process ${l.info.pid} has exited`;
+  }
   return age > FOREIGN_STALE_MS ? `lock from ${l.info.host} is ${Math.round(age / 60000)} minutes old` : undefined;
 }
 
@@ -110,6 +116,40 @@ process.on("exit", () => {
 });
 
 const permission = (e: unknown) => ["EACCES", "EPERM", "EROFS"].includes((e as NodeJS.ErrnoException).code ?? "");
+
+/**
+ * Remove a stale lock, but only the very lock that was judged stale: waiters take
+ * `<lock>.break` with O_EXCL first, so two of them can never both remove a lock,
+ * and one of them can never remove a fresh lock another waiter has just taken.
+ */
+async function breakStale(lockPath: string, seen: { info?: LockInfo; mtime: number }, why: string): Promise<void> {
+  const guard = `${lockPath}.break`;
+  try {
+    await (await open(guard, "wx")).close();
+  } catch (e) {
+    if (permission(e)) throw new Error(`Cannot create ${guard}: the workspace folder is not writable (${(e as NodeJS.ErrnoException).code})`);
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    // Someone else is breaking it; a guard left by a crash is cleared after a while.
+    const g = await stat(guard).catch(() => undefined);
+    if (g && Date.now() - g.mtimeMs > BREAK_STALE_MS) await unlink(guard).catch(() => {});
+    else await sleep(10);
+    return;
+  }
+  try {
+    const now = await readLock(lockPath);
+    if (!now) return;
+    const same = seen.info?.token !== undefined ? now.info?.token === seen.info.token : !now.info && now.mtime === seen.mtime;
+    if (!same || !staleReason(now)) return;
+    try {
+      await unlink(lockPath);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw new Error(`A stale lock (${why}) could not be removed: ${lockPath} (${(e as NodeJS.ErrnoException).code}). Delete it by hand.`);
+    }
+  } finally {
+    await unlink(guard).catch(() => {});
+  }
+}
 
 /**
  * Cross-process advisory lock: `<file>.lock` is created with O_EXCL, so two MCP
@@ -140,20 +180,7 @@ async function withFileLock<T>(lockPath: string, fn: () => Promise<T>): Promise<
     last = cur.info;
     const why = staleReason(cur);
     if (why) {
-      // Move it aside first, so two waiters cannot both remove it and then each other's new lock.
-      const aside = `${lockPath}.stale-${token}`;
-      try {
-        await rename(lockPath, aside);
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
-        throw new Error(`A stale lock (${why}) could not be removed: ${lockPath} (${(e as NodeJS.ErrnoException).code}). Delete it by hand.`);
-      }
-      const moved = await readLock(aside);
-      if (moved?.info?.token && moved.info.token !== cur.info?.token) {
-        // Someone replaced the stale lock just before we moved it: put theirs back.
-        await link(aside, lockPath).catch(() => {});
-      }
-      await unlink(aside).catch(() => {});
+      await breakStale(lockPath, cur, why);
       continue;
     }
     const waited = Date.now() - start;
@@ -231,12 +258,22 @@ export class FileStore implements DiagramStore {
   private static usable(stem: string) {
     try { checkName(stem); return true; } catch { return false; }
   }
-  async list() {
-    return (await this.entries()).filter((e) => (e.isFile() || e.isSymbolicLink()) && FileStore.usable(e.name.slice(0, -EXT.length))).map((e) => e.name.slice(0, -EXT.length)).sort();
+  /** Split the entries into diagrams and the rest; a symlink counts when it leads to a file. */
+  private async sorted() {
+    const good: string[] = [];
+    const bad: string[] = [];
+    for (const e of await this.entries()) {
+      const isFile = e.isFile() || (e.isSymbolicLink() && (await stat(join(this.dir, e.name)).then((s) => s.isFile(), () => false)));
+      (isFile && FileStore.usable(e.name.slice(0, -EXT.length)) ? good : bad).push(e.name);
+    }
+    return { good: good.map((n) => n.slice(0, -EXT.length)).sort(), bad: bad.sort() };
   }
-  /** .fsm.json entries that cannot be used as diagrams (folders, names that are not FSM names), for list_fsms. */
+  async list() {
+    return (await this.sorted()).good;
+  }
+  /** .fsm.json entries that cannot be used as diagrams (folders, broken links, names that are not FSM names), for list_fsms. */
   async ignored() {
-    return (await this.entries()).filter((e) => !(e.isFile() || e.isSymbolicLink()) || !FileStore.usable(e.name.slice(0, -EXT.length))).map((e) => e.name).sort();
+    return (await this.sorted()).bad;
   }
   async exists(name: string) {
     return (await this.list()).includes(name);
@@ -249,6 +286,8 @@ export class FileStore implements DiagramStore {
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code;
       if (code !== "ENOENT") throw new Error(`Cannot read ${file}: ${code ?? (e as Error).message}`);
+      if (await lstat(file).then((l) => l.isSymbolicLink(), () => false))
+        throw new Error(`${file} is a link to a file that does not exist; fix or delete the link`);
       const all = await this.list();
       throw new Error(`No FSM named "${name}". Existing: ${all.join(", ") || "(none)"}. Create one with create_fsm.`);
     }
@@ -268,16 +307,25 @@ export class FileStore implements DiagramStore {
   }
   async save(d: FsmDiagram) {
     await mkdir(this.dir, { recursive: true });
-    const target = this.file(d.name);
+    let target = this.file(d.name);
+    // A linked diagram is saved into the file it links to, so the link and the original stay one diagram.
+    if (await lstat(target).then((l) => l.isSymbolicLink(), () => false)) {
+      try {
+        target = await realpath(target);
+      } catch {
+        throw new Error(`${target} is a link to a file that does not exist; fix or delete the link`);
+      }
+    }
     // Write then rename so a watching editor never sees a half-written file.
     // The temp name is unique per write, so overlapping saves cannot share it.
-    const tmp = `${target}.tmp-${process.pid}-${++tmpCounter}`;
+    const tmp = join(dirname(target), `.${d.name}${EXT}.tmp-${process.pid}-${++tmpCounter}`);
     try {
       await writeFile(tmp, JSON.stringify(d, null, 2) + "\n");
       await renameRetry(tmp, target);
     } catch (e) {
       await rm(tmp, { force: true }).catch(() => {});
       if (permission(e)) throw new Error(`Cannot save ${target}: ${(e as NodeJS.ErrnoException).code} (is the workspace folder read-only, or the file open in another program?)`);
+      if ((e as NodeJS.ErrnoException).code === "EISDIR") throw new Error(`Cannot save ${target}: a folder has that name; rename or remove the folder, or pick another FSM name`);
       throw e;
     }
   }
@@ -305,7 +353,8 @@ export class FileStore implements DiagramStore {
 export function userPath(p: string): string {
   let q = p.replace(/^~(?=$|[\\/])/, homedir());
   if (process.platform !== "win32") {
-    if (/^[A-Za-z]:[\\/]/.test(q)) throw new Error(`"${p}" is a Windows path, but this server runs on ${process.platform}; give a path on this computer`);
+    if (/^[A-Za-z]:/.test(q) || /^\\\\/.test(q))
+      throw new Error(`"${p}" is a Windows path, but this server runs on ${process.platform}; give a path on this computer`);
     q = q.replace(/\\/g, "/");
   }
   return q;

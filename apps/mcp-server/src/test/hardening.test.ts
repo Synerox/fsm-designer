@@ -325,3 +325,71 @@ test("command line: --dir must be a folder; options are checked", async () => {
     assert.match(out.err, re);
   }
 });
+
+test("locks: many servers breaking the same stale lock never lose an edit", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { hostname } = await import("node:os");
+  const extra = await Promise.all([0, 1].map(async (i) => {
+    const c = new Client({ name: `stale-${i}`, version: "0" });
+    await c.connect(new StdioClientTransport({ command: process.execPath, args: [entry, "--dir", dir], stderr: "ignore" }));
+    return c;
+  }));
+  try {
+    await ok("create_fsm", { name: "stale", states: [{ name: "A" }] });
+    const clients = [client, ...extra];
+    let expected = 1;
+    for (let round = 0; round < 12; round++) {
+      const dead = spawnSync(process.execPath, ["-e", ""]).pid!;
+      await writeFile(join(dir, "stale.fsm.json.lock"), JSON.stringify({ pid: dead, host: hostname(), token: `dead${round}`, time: Date.now() }));
+      const rs = await Promise.all(clients.flatMap((c, ci) => [0, 1].map((k) =>
+        c.callTool({ name: "add_state", arguments: { fsm: "stale", name: `R${round}_${ci}_${k}` } }) as Promise<Out>)));
+      for (const r of rs) assert.ok(!r.isError, textOf(r));
+      expected += rs.length;
+      assert.equal((await load("stale")).states.length, expected, `round ${round}`);
+    }
+  } finally {
+    await Promise.all(extra.map((c) => c.close()));
+  }
+});
+
+test("links: a linked diagram is edited in place; a broken link is named; a linked workspace path cannot overwrite a diagram", { skip: process.platform === "win32" }, async () => {
+  const { mkdtemp: tmp, symlink, readdir } = await import("node:fs/promises");
+  const outside = await tmp(join(tmpdir(), "fsm-mcp-out-"));
+  try {
+    await ok("create_fsm", { name: "linked", states: [{ name: "A" }] });
+    await writeFile(join(outside, "linked.fsm.json"), await readFile(join(dir, "linked.fsm.json")));
+    await rm(join(dir, "linked.fsm.json"));
+    await symlink(join(outside, "linked.fsm.json"), join(dir, "linked.fsm.json"));
+    await ok("add_state", { fsm: "linked", name: "NEW" });
+    const { lstat } = await import("node:fs/promises");
+    assert.ok((await lstat(join(dir, "linked.fsm.json"))).isSymbolicLink());
+    assert.match(await readFile(join(outside, "linked.fsm.json"), "utf8"), /"NEW"/);
+    assert.deepEqual((await readdir(outside)).filter((f) => f.includes("tmp-")), []);
+
+    await symlink(join(outside, "gone.fsm.json"), join(dir, "dangling.fsm.json"));
+    await fails("get_fsm", { name: "dangling" }, /link to a file that does not exist/);
+    assert.match(await ok("list_fsms", {}), /Ignored[^\n]*dangling\.fsm\.json/);
+
+    const alias = join(outside, "ws-alias");
+    await symlink(dir, alias);
+    await fails("export_fsm", { name: "linked", format: "json", path: join(alias, "tri.fsm.json") }, /Refusing/);
+    await fails("export_fsm", { name: "linked", format: "svg", path: "\\\\server\\share\\x.svg" }, /Windows path/);
+  } finally {
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("import_verilog: states named s0, s1, s2 import", async () => {
+  const code = `module lower(input clk, input rst, input x, output reg z);
+  localparam s0 = 2'd0, s1 = 2'd1, s2 = 2'd2;
+  reg [1:0] state;
+  always @(posedge clk) if (rst) state <= s0; else case (state)
+    s0: if (x) state <= s1;
+    s1: if (x) state <= s2; else state <= s0;
+    default: state <= s0;
+  endcase
+  always @* z = (state == s2);
+endmodule`;
+  assert.match(await ok("import_verilog", { code, png: false }), /Imported module lower/);
+  assert.deepEqual((await load("lower")).states.map((s: { name: string }) => s.name).sort(), ["s0", "s1", "s2"]);
+});

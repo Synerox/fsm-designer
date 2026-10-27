@@ -1,7 +1,7 @@
 // Checks on agent-supplied values that @fsm/core passes through unchanged:
 // colours, export file targets and PNG sizes.
 
-import { stat } from "node:fs/promises";
+import { readdir, realpath, stat } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve, isAbsolute } from "node:path";
 import { userPath } from "./store.ts";
 
@@ -44,22 +44,56 @@ export const FORMAT_EXT = { png: ".png", svg: ".svg", latex: ".tex", json: ".fsm
 export async function exportTarget(workspace: string, p: string, format: keyof typeof FORMAT_EXT, name: string): Promise<{ file: string; note: string }> {
   if (!p.trim()) throw new Error("path is empty; leave it out to only return the export");
   const raw = userPath(p);
+  // Windows: "a.fsm.json::$DATA" or "a.fsm.json:x" write a stream of a.fsm.json.
+  if (process.platform === "win32" && raw.replace(/^(\\\\\?\\)?[A-Za-z]:/, "").includes(":"))
+    throw new Error(`"${p}" is not a usable file name (":" is only allowed after a drive letter)`);
   let file = isAbsolute(raw) ? resolve(raw) : resolve(workspace, raw);
   const isDir = /[\\/]$/.test(p) || (await stat(file).then((s) => s.isDirectory(), () => false));
   if (isDir) file = join(file, `${name}${FORMAT_EXT[format]}`);
   const lower = basename(file).toLowerCase();
   if (lower.endsWith(".fsm.json")) {
     if (format !== "json") throw new Error(`Refusing to write ${format} into ${file}: .fsm.json files are diagrams. Use a ${FORMAT_EXT[format]} file name`);
-    // Lower-cased: on Windows and macOS the file system ignores case.
-    if (dirname(file).toLowerCase() === resolve(workspace).toLowerCase())
+    if (await inWorkspace(workspace, file))
       throw new Error(`Refusing to write ${file}: that is where the workspace keeps the diagram "${basename(file).slice(0, -".fsm.json".length)}". ` +
         "To copy a diagram use create_fsm with the JSON from get_fsm; to export elsewhere give a path outside the workspace folder or a sub-folder");
   }
+  // Whatever the spelling (links, \\?\ prefixes, short names), never write over a diagram file.
+  const same = await sameAsDiagram(workspace, file);
+  if (same) throw new Error(`Refusing to write ${file}: it is the workspace's diagram file ${same}. Give a path outside the workspace folder`);
   const want = FORMAT_EXT[format];
   const note = lower.endsWith(want) || (format === "latex" && extname(lower) === ".latex") ? "" : ` (note: the file name does not end in ${want})`;
   return { file, note };
 }
 
+/** The real path of `p`, resolving links in the part of it that exists. */
+async function real(p: string): Promise<string> {
+  try {
+    return await realpath(p);
+  } catch {
+    const parent = dirname(p);
+    return parent === p ? p : join(await real(parent), basename(p));
+  }
+}
+
+/** Whether `file` is directly in the workspace folder, however either path is spelled. Lower-cased: Windows and macOS ignore case. */
+async function inWorkspace(workspace: string, file: string): Promise<boolean> {
+  const a = (await real(dirname(file))).toLowerCase();
+  const b = (await real(resolve(workspace))).toLowerCase();
+  return a === b || a.replace(/[\\/]+$/, "") === b.replace(/[\\/]+$/, "");
+}
+
+/** The workspace diagram file that `file` already is (same device and inode), if any. */
+async function sameAsDiagram(workspace: string, file: string): Promise<string | undefined> {
+  const t = await stat(file).catch(() => undefined);
+  if (!t || !t.isFile()) return undefined;
+  const names = await readdir(workspace).catch(() => [] as string[]);
+  for (const n of names) {
+    if (!n.toLowerCase().endsWith(".fsm.json")) continue;
+    const s = await stat(join(workspace, n)).catch(() => undefined);
+    if (s && s.dev === t.dev && s.ino === t.ino && s.ino !== 0) return join(workspace, n);
+  }
+  return undefined;
+}
 /** Largest PNG we render: about 40 megapixels, at most 16384 px on a side. */
 const MAX_PIXELS = 40_000_000;
 const MAX_SIDE = 16384;
