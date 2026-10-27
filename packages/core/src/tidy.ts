@@ -51,7 +51,7 @@ import { labelLines, planDiagram, transitionLabel } from "./export/svg.ts";
 import type { PlanOptions } from "./export/svg.ts";
 import { LABEL_SIZE, stateRadius, textWidth } from "./metrics.ts";
 
-import { GRID, crossCount, emptyScore, intersect, score, segDist } from "./layout-score.ts";
+import { GRID, crossCount, emptyScore, score, segDist } from "./layout-score.ts";
 import type { LayoutScore, Pt } from "./layout-score.ts";
 
 export { GRID, score };
@@ -245,21 +245,22 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
       let improved = false;
       const at = new Map(cur.d.states.map((s) => [s.id, { x: s.x!, y: s.y! }]));
       const reach = (id: string, p: Pt) => [...g.nb.get(id)!].reduce((sum, v) => sum + Math.hypot((p.x - at.get(v)!.x) / cur.sx, (p.y - at.get(v)!.y) / cur.sy), 0);
-      const longest = (id: string) => Math.max(0, ...[...g.nb.get(id)!].map((v) => Math.hypot((at.get(id)!.x - at.get(v)!.x) / cur.sx, (at.get(id)!.y - at.get(v)!.y) / cur.sy)));
-      const movers = g.ids.filter((id) => longest(id) > 1.5).sort((a, b) => longest(b) - longest(a));
+      const longest = new Map(g.ids.map((id) => [id, Math.max(0, ...[...g.nb.get(id)!].map((v) => Math.hypot((at.get(id)!.x - at.get(v)!.x) / cur.sx, (at.get(id)!.y - at.get(v)!.y) / cur.sy)))]));
+      const movers = g.ids.filter((id) => longest.get(id)! > 1.5).sort((a, b) => longest.get(b)! - longest.get(a)!);
       const o = at.get(g.init)!;
       for (const id of movers) {
         if (budget <= 0) break;
         const here = at.get(id)!;
         const ns = [...g.nb.get(id)!].map((v) => at.get(v)!);
         const mx = ns.reduce((s, p) => s + p.x, 0) / ns.length, my = ns.reduce((s, p) => s + p.y, 0) / ns.length;
-        const spots: Pt[] = [];
+        const now = reach(id, here);
+        const spots: Array<{ p: Pt; r: number }> = []; // free grid spots near the neighbours' centre, with the line length they give
         for (let i = -2; i <= 2; i++) for (let j = -2; j <= 2; j++) {
           const p = { x: o.x + (Math.round((mx - o.x) / cur.sx) + i) * cur.sx, y: o.y + (Math.round((my - o.y) / cur.sy) + j) * cur.sy };
-          if ([...at].every(([v, q]) => v === id || Math.hypot(p.x - q.x, p.y - q.y) >= gap)) spots.push(p);
+          const r = reach(id, p);
+          if (r < now - 0.3 && [...at].every(([v, q]) => v === id || Math.hypot(p.x - q.x, p.y - q.y) >= gap)) spots.push({ p, r });
         }
-        const now = reach(id, here);
-        for (const p of spots.filter((p) => reach(id, p) < now - 0.3).sort((a, b) => reach(id, a) - reach(id, b)).slice(0, 2)) {
+        for (const { p } of spots.sort((a, b) => a.r - b.r).slice(0, 2)) {
           if (budget-- <= 0) break;
           const c = structuredClone(cur.d);
           for (const t of c.transitions) { delete t.curve; delete t.loopAngle; }
@@ -704,6 +705,171 @@ function edgePairs(g: Graph): Array<[string, string]> {
   return out;
 }
 
+/** Whether segments ab and ce cross (same test as intersect(), without making the point). */
+function crosses(a: Pt, b: Pt, c: Pt, e: Pt): boolean {
+  const d = (b.x - a.x) * (e.y - c.y) - (b.y - a.y) * (e.x - c.x);
+  if (Math.abs(d) < 1e-9) return false;
+  const t = ((c.x - a.x) * (e.y - c.y) - (c.y - a.y) * (e.x - c.x)) / d;
+  const u = ((c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x)) / d;
+  return t >= 0 && t < 1 && u >= 0 && u < 1;
+}
+
+/**
+ * The grid annealer's cost, kept up to date as states move instead of
+ * recomputed from scratch: one entry per line (its length cost and how many
+ * states it runs through) and one per pair of lines (whether they cross).
+ * A move changes only the lines of the states that moved, plus, when a state
+ * moves into or out of an empty cell, which lines run through that cell; so
+ * a step costs about degree × (states + lines) instead of lines × (states + lines).
+ * Geometry that depends only on the cells (a line's cost between two cells,
+ * whether a line between two cells runs through a third) is tabled once.
+ */
+export class GridCost { // exported for the layout tests only
+  readonly cells: Pt[];
+  readonly C: number; // cells
+  readonly E: number; // lines
+  private readonly sy: number;
+  readonly slot: Int32Array; // cell of each state
+  readonly owner: Int32Array; // state in each cell, -1 when empty
+  readonly ea: Int32Array; readonly eb: Int32Array; // the two states of each line
+  readonly inc: number[][]; // lines at each state
+  private readonly lineCost: Float64Array; // [a * C + b]: cost of a line between cells a and b
+  private readonly through: Uint8Array; // [(a * C + b) * C + c]: a line from cell a to cell b runs through cell c
+  private readonly eLen: Float64Array; // per line: its length cost
+  private readonly eThru: Int32Array; // per line: occupied cells it runs through (its own two ends included)
+  private readonly X: Uint8Array; // [e * E + f]: lines e and f cross
+  private readonly stamp: Int32Array; private tick = 0; // marks the lines touched by the current move
+  // Undo log of the last move: moved states and their old cells, old per-line entries, old pair entries.
+  private readonly mvS: number[] = []; private readonly mvFrom: number[] = [];
+  private readonly logE: number[] = []; private readonly logLen: number[] = []; private readonly logThru: number[] = [];
+  private readonly logX: number[] = []; private readonly logXv: number[] = [];
+  private readonly freed: number[] = []; private readonly filled: number[] = []; // cells a move emptied or filled
+  private prev = 0;
+  total = 0;
+
+  constructor(cells: Pt[], n: number, pairs: Array<[number, number]>, sx: number, sy: number, R: number) {
+    const C = (this.C = cells.length), E = (this.E = pairs.length);
+    this.cells = cells; this.sy = sy;
+    this.slot = new Int32Array(n).fill(-1); this.owner = new Int32Array(C).fill(-1);
+    this.ea = Int32Array.from(pairs, (p) => p[0]); this.eb = Int32Array.from(pairs, (p) => p[1]);
+    this.inc = Array.from({ length: n }, () => []);
+    pairs.forEach(([a, b], e) => { this.inc[a].push(e); this.inc[b].push(e); });
+    this.lineCost = new Float64Array(C * C); this.through = new Uint8Array(C * C * C);
+    for (let a = 0; a < C; a++) for (let b = a + 1; b < C; b++) {
+      const p = cells[a], q = cells[b];
+      const dx = Math.abs(p.x - q.x) / sx, dy = Math.abs(p.y - q.y) / sy, l = Math.hypot(dx, dy);
+      this.lineCost[a * C + b] = this.lineCost[b * C + a] = l + (dx && dy ? 0.4 : 0) + 4 * Math.max(0, l - 1.5);
+      for (let c = 0; c < C; c++) this.through[(a * C + b) * C + c] = this.through[(b * C + a) * C + c] = segDist(cells[c], p, q) < R + 10 ? 1 : 0;
+    }
+    this.eLen = new Float64Array(E); this.eThru = new Int32Array(E); this.X = new Uint8Array(E * E); this.stamp = new Int32Array(E);
+  }
+
+  /** Put every state in its cell and compute everything from scratch. */
+  reset(slot: ArrayLike<number>): number {
+    this.owner.fill(-1);
+    for (let s = 0; s < this.slot.length; s++) { this.slot[s] = slot[s]; this.owner[slot[s]] = s; }
+    const { E, X } = this;
+    let total = this.home();
+    for (let e = 0; e < E; e++) {
+      total += this.eLen[e] = this.lineCost[this.slot[this.ea[e]] * this.C + this.slot[this.eb[e]]];
+      total += 15 * ((this.eThru[e] = this.thruOf(e)) - 2);
+      for (let f = e + 1; f < E; f++) total += 10 * (X[e * E + f] = X[f * E + e] = this.crossOf(e, f));
+    }
+    return (this.total = total);
+  }
+
+  /** The same, from scratch, without touching the tables (to check the running total). */
+  full(): number {
+    let total = this.home();
+    for (let e = 0; e < this.E; e++) {
+      total += this.lineCost[this.slot[this.ea[e]] * this.C + this.slot[this.eb[e]]] + 15 * (this.thruOf(e) - 2);
+      for (let f = e + 1; f < this.E; f++) total += 10 * this.crossOf(e, f);
+    }
+    return total;
+  }
+
+  private home(): number {
+    const h = this.cells[this.slot[0]]; // the reset state, first in g.ids: on the left and near the top
+    return (h.x !== 0 ? 50 : 0) + (0.2 * h.y) / this.sy;
+  }
+  private thruOf(e: number): number {
+    const base = (this.slot[this.ea[e]] * this.C + this.slot[this.eb[e]]) * this.C, slot = this.slot, through = this.through;
+    let k = 0;
+    for (let s = 0; s < slot.length; s++) k += through[base + slot[s]];
+    return k;
+  }
+  private crossOf(e: number, f: number): number {
+    const a = this.ea[e], b = this.eb[e], c = this.ea[f], d = this.eb[f];
+    if (a === c || a === d || b === c || b === d) return 0;
+    const cells = this.cells, slot = this.slot;
+    return crosses(cells[slot[a]], cells[slot[b]], cells[slot[c]], cells[slot[d]]) ? 1 : 0;
+  }
+
+  /** Move states[i] to cell to[i] (all at once, so two may swap) and return the new total; undo() takes it back. */
+  move(states: ArrayLike<number>, to: ArrayLike<number>): number {
+    const { slot, owner, stamp, inc, E, C, X } = this;
+    const tick = ++this.tick;
+    this.mvS.length = this.mvFrom.length = this.logE.length = this.logLen.length = this.logThru.length = this.logX.length = this.logXv.length = 0;
+    this.prev = this.total;
+    let total = this.total - this.home();
+    for (let i = 0; i < states.length; i++) { this.mvS.push(states[i]); this.mvFrom.push(slot[states[i]]); owner[slot[states[i]]] = -1; }
+    for (let i = 0; i < states.length; i++) { slot[states[i]] = to[i]; owner[to[i]] = states[i]; }
+    total += this.home();
+    // Lines of the moved states: everything about them is recomputed.
+    for (let i = 0; i < states.length; i++) for (const e of inc[states[i]]) {
+      if (stamp[e] === tick) continue;
+      stamp[e] = tick;
+      this.logE.push(e); this.logLen.push(this.eLen[e]); this.logThru.push(this.eThru[e]);
+      const len = this.lineCost[slot[this.ea[e]] * C + slot[this.eb[e]]], thru = this.thruOf(e);
+      total += len - this.eLen[e] + 15 * (thru - this.eThru[e]);
+      this.eLen[e] = len; this.eThru[e] = thru;
+      for (let f = 0; f < E; f++) {
+        if (f === e || (stamp[f] === tick && f < e)) continue; // each pair once
+        const x = this.crossOf(e, f), i = e * E + f;
+        if (x === X[i]) continue;
+        this.logX.push(i); this.logXv.push(X[i]);
+        total += 10 * (x - X[i]);
+        X[i] = X[f * E + e] = x;
+      }
+    }
+    // Other lines: a state moved into or out of their way (never in a plain swap).
+    const freed = this.freed, filled = this.filled;
+    freed.length = filled.length = 0;
+    for (let i = 0; i < states.length; i++) {
+      if (owner[this.mvFrom[i]] < 0) freed.push(this.mvFrom[i]);
+      if (this.mvFrom.indexOf(to[i]) < 0) filled.push(to[i]);
+    }
+    if (freed.length || filled.length) for (let f = 0; f < E; f++) {
+      if (stamp[f] === tick) continue;
+      const base = (slot[this.ea[f]] * C + slot[this.eb[f]]) * C;
+      let d = 0;
+      for (const c of filled) d += this.through[base + c];
+      for (const c of freed) d -= this.through[base + c];
+      if (!d) continue;
+      this.logE.push(f); this.logLen.push(this.eLen[f]); this.logThru.push(this.eThru[f]);
+      this.eThru[f] += d; total += 15 * d;
+    }
+    return (this.total = total);
+  }
+
+  /** Take the last move back. */
+  undo() {
+    const { slot, owner } = this;
+    for (let i = 0; i < this.mvS.length; i++) owner[slot[this.mvS[i]]] = -1;
+    for (let i = 0; i < this.mvS.length; i++) { slot[this.mvS[i]] = this.mvFrom[i]; owner[this.mvFrom[i]] = this.mvS[i]; }
+    for (let i = 0; i < this.logE.length; i++) { this.eLen[this.logE[i]] = this.logLen[i]; this.eThru[this.logE[i]] = this.logThru[i]; }
+    for (let i = 0; i < this.logX.length; i++) { const k = this.logX[i], e = Math.floor(k / this.E), f = k % this.E; this.X[k] = this.X[f * this.E + e] = this.logXv[i]; }
+    this.total = this.prev;
+  }
+}
+
+/**
+ * States in a grid of `cols` columns, moved between cells by simulated
+ * annealing (a state to another cell, swapping with the state there) to cut
+ * crossings, lines through states, diagonals and long lines: the cost in
+ * GridCost, kept up to date move by move. A fixed seed and a work limit (not
+ * a clock), so the result is the same on every machine.
+ */
 function improveGrid(g: Graph, start: string[], cols: number, sx: number, sy: number, R: number, loop = false): [Pos, number] {
   const n = g.ids.length;
   const rows = Math.ceil(n / cols);
@@ -719,53 +885,33 @@ function improveGrid(g: Graph, start: string[], cols: number, sx: number, sy: nu
     for (let r = 1; r < rows; r++) for (let k = 0; k < cols - 1; k++) snake.push(at(r, r % 2 ? cols - 1 - k : k + 1));
     for (let r = rows - 1; r >= 1; r--) snake.push(at(r, 0));
   }
-  const slot = new Map(start.map((id, i) => [id, snake[i]]));
-  const edges = edgePairs(g);
-  const cost = () => {
-    let c = 0;
-    const segs = edges.map(([a, b]) => [cells[slot.get(a)!], cells[slot.get(b)!], a, b] as const);
-    for (let i = 0; i < segs.length; i++) {
-      const [p, q, a, b] = segs[i];
-      const dx = Math.abs(p.x - q.x) / sx, dy = Math.abs(p.y - q.y) / sy;
-      c += Math.hypot(dx, dy) + (dx && dy ? 0.4 : 0) + 4 * Math.max(0, Math.hypot(dx, dy) - 1.5);
-      for (const [id, k] of slot) if (id !== a && id !== b && segDist(cells[k], p, q) < R + 10) c += 15;
-      for (let j = i + 1; j < segs.length; j++) {
-        const [r, s2, e, f] = segs[j];
-        if (e === a || e === b || f === a || f === b) continue;
-        if (intersect(p, q, r, s2)) c += 10;
-      }
-    }
-    const home = cells[slot.get(g.init)!];
-    if (home.x !== 0) c += 50; // reset state on the left
-    c += (0.2 * home.y) / sy; // and near the top
-    return c;
-  };
-  // Simulated annealing with a fixed seed and a work limit (not a clock), so
-  // the result is the same on every machine.
-  const iters = Math.min(4000, Math.max(300, 4e6 / (edges.length * (edges.length + n) + 1)));
+  const index = new Map(g.ids.map((id, i) => [id, i]));
+  const first = new Int32Array(n);
+  start.forEach((id, i) => { first[index.get(id)!] = snake[i]; });
+  const pairs = edgePairs(g).map(([a, b]) => [index.get(a)!, index.get(b)!] as [number, number]);
+  const gc = new GridCost(cells, n, pairs, sx, sy, R);
+  const C = cells.length, E = pairs.length;
+  // Work limit: a step costs about degree × (states + lines); only the very biggest machines get fewer steps.
+  const iters = Math.min(4000, Math.max(300, Math.round(5e6 / (((4 * E) / n) * (n + E) + 1))));
   let seed = 7;
   const rnd = () => { seed ^= seed << 13; seed >>>= 0; seed ^= seed >>> 17; seed ^= seed << 5; seed >>>= 0; return seed / 4294967296; };
-  let cur = cost();
-  let best = new Map(slot), bestCost = cur;
-  const owner = (k: number) => { for (const [id, v] of slot) if (v === k) return id; return undefined; };
+  const one = new Int32Array(1), two = new Int32Array(2), oneTo = new Int32Array(1), twoTo = new Int32Array(2);
+  let cur = gc.reset(first), bestCost = cur;
+  const best = new Int32Array(first);
   for (let it = 0; it < iters; it++) {
     const temp = 3 * Math.pow(0.02 / 3, it / iters);
-    const a = g.ids[Math.floor(rnd() * n)];
-    const k = Math.floor(rnd() * cells.length);
-    const from = slot.get(a)!;
+    const a = Math.floor(rnd() * n), k = Math.floor(rnd() * C), from = gc.slot[a];
     if (k === from) continue;
-    const other = owner(k);
-    slot.set(a, k);
-    if (other) slot.set(other, from);
-    const c = cost();
-    if (c <= cur || rnd() < Math.exp((cur - c) / temp)) {
+    const other = gc.owner[k];
+    let c: number;
+    if (other < 0) { one[0] = a; oneTo[0] = k; c = gc.move(one, oneTo); }
+    else { two[0] = a; two[1] = other; twoTo[0] = k; twoTo[1] = from; c = gc.move(two, twoTo); }
+    if (c <= cur + 1e-9 || rnd() < Math.exp((cur - c) / temp)) {
       cur = c;
-      if (c < bestCost - 1e-9) { bestCost = c; best = new Map(slot); }
-    } else { slot.set(a, from); if (other) slot.set(other, k); }
+      if (c < bestCost - 1e-9) { bestCost = c; best.set(gc.slot); }
+    } else gc.undo();
   }
-  for (const [id, v] of best) slot.set(id, v);
-  cur = bestCost;
-  return [new Map(g.ids.map((id) => [id, cells[slot.get(id)!]])), cur];
+  return [new Map(g.ids.map((id, i) => [id, cells[best[i]]])), bestCost];
 }
 
 // ---- local shapes ---------------------------------------------------------------
@@ -948,7 +1094,12 @@ function routeEdges(d: FsmDiagram) {
   const key = (a: string, b: string) => `${a}\u0000${b}`;
   const has = new Set(groups.map((ts) => key(ts[0].from, ts[0].to)));
   const circles = [...at.values()];
-  const clear = (pts: Pt[], a: string, b: string) => circles.every((s) => s.id === a || s.id === b || pts.every((p) => Math.hypot(p.x - s.x, p.y - s.y) > s.r + 12));
+  const clear = (pts: Pt[], a: string, b: string) => {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of pts) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+    // A state outside the line's box (by its radius) cannot be on it.
+    return circles.every((s) => s.id === a || s.id === b || s.x < x0 - s.r - 12 || s.x > x1 + s.r + 12 || s.y < y0 - s.r - 12 || s.y > y1 + s.r + 12 || pts.every((p) => Math.hypot(p.x - s.x, p.y - s.y) > s.r + 12));
+  };
   const lines = new Map<string, Pt[]>();
   const blocked: typeof groups = [];
   for (const ts of groups) {
@@ -1053,7 +1204,7 @@ function placeLoops(d: FsmDiagram) {
   const cx = d.states.reduce((s, p) => s + p.x!, 0) / d.states.length;
   const cy = d.states.reduce((s, p) => s + p.y!, 0) / d.states.length;
   const groups = groupsOf(d);
-  const lines: Pt[][] = [];
+  const lines: Array<{ pts: Pt[]; x0: number; y0: number; x1: number; y1: number }> = []; // each with its bounding box
   const busy = new Map(d.states.map((s) => [s.id, [] as number[]]));
   const init = d.states.find((s) => s.isInitial);
   if (init) busy.get(init.id)!.push(init.initialAngle ?? Math.PI);
@@ -1062,7 +1213,7 @@ function placeLoops(d: FsmDiagram) {
     if (from === to) continue;
     const a = at.get(from)!, b = at.get(to)!;
     const pts = arc(a, b, ts[0].curve ?? 0);
-    lines.push(pts);
+    lines.push({ pts, x0: Math.min(...pts.map((p) => p.x)), y0: Math.min(...pts.map((p) => p.y)), x1: Math.max(...pts.map((p) => p.x)), y1: Math.max(...pts.map((p) => p.y)) });
     // Direction the line leaves each end.
     busy.get(from)!.push(Math.atan2(pts[2].y - a.y, pts[2].x - a.x));
     busy.get(to)!.push(Math.atan2(pts[18].y - b.y, pts[18].x - b.x));
@@ -1073,11 +1224,14 @@ function placeLoops(d: FsmDiagram) {
     if (id !== ts[0].to) continue;
     const s = at.get(id)!;
     const out = Math.hypot(s.x - cx, s.y - cy) > 20 ? Math.atan2(s.y - cy, s.x - cx) : undefined;
+    const rl = 0.75 * s.r;
+    // Only lines that come near the state can touch a loop on it (the loop's centre is 1.5 r away, its radius rl).
+    const reach = 1.5 * s.r + rl + 9;
+    const near = lines.filter((l) => s.x + reach > l.x0 && s.x - reach < l.x1 && s.y + reach > l.y0 && s.y - reach < l.y1);
     let best = -Math.PI / 2, bestScore = -Infinity;
     for (let k = 0; k < 8; k++) {
       const ang = -Math.PI / 2 + (k * Math.PI) / 4;
       const c = { x: s.x + 1.5 * s.r * Math.cos(ang), y: s.y + 1.5 * s.r * Math.sin(ang) };
-      const rl = 0.75 * s.r;
       const used = busy.get(id)!;
       // A right angle to the nearest line is room enough; past that, direction matters more.
       let sc = Math.min(Math.PI / 2, ...used.map((u) => Math.abs(Math.atan2(Math.sin(ang - u), Math.cos(ang - u)))));
@@ -1088,7 +1242,7 @@ function placeLoops(d: FsmDiagram) {
       if (k === 4 && s.y > cy + 20) sc += 0.15;
       for (const [oid, o] of at) if (oid !== id && Math.hypot(c.x - o.x, c.y - o.y) < rl + o.r + 16) sc -= 5;
       for (const l of loops) if (Math.hypot(c.x - l.x, c.y - l.y) < 2 * rl + 30) sc -= 5;
-      for (const pts of lines) if (pts.some((p) => Math.hypot(p.x - c.x, p.y - c.y) < rl + 8)) sc -= 1.5;
+      for (const l of near) if (c.x + rl + 8 > l.x0 && c.x - rl - 8 < l.x1 && c.y + rl + 8 > l.y0 && c.y - rl - 8 < l.y1 && l.pts.some((p) => Math.hypot(p.x - c.x, p.y - c.y) < rl + 8)) sc -= 1.5;
       if (sc > bestScore + 1e-9) { bestScore = sc; best = ang; }
     }
     loops.push({ x: s.x + 1.5 * s.r * Math.cos(best), y: s.y + 1.5 * s.r * Math.sin(best) });
