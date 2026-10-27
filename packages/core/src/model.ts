@@ -138,7 +138,8 @@ function uniqueId(prefix: string, taken: Set<string>, avoid: Set<string> = new S
   let i = 0;
   for (const id of taken) {
     const n = id.startsWith(prefix) ? id.slice(prefix.length) : "";
-    if (/^\d+$/.test(n)) i = Math.max(i, Number(n) + 1);
+    // Longer suffixes are not exact numbers (i + 1 === i past 2^53); the loop below steps past any clash.
+    if (/^\d{1,15}$/.test(n)) i = Math.max(i, Number(n) + 1);
   }
   while (taken.has(`${prefix}${i}`) || avoid.has(`${prefix}${i}`)) i++;
   return `${prefix}${i}`;
@@ -313,7 +314,9 @@ export function parseDiagram(json: unknown): FsmDiagram {
     }
     return seen;
   };
-  const rawStates = raw.states ?? [];
+  // Ids and references are strings; a hand-written file may have numbers there.
+  const str = (v: unknown) => (typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : undefined);
+  const rawStates = (raw.states ?? []).map((s) => ({ ...s, id: str(s.id) }));
   const given = dup("state", rawStates.map((s) => s.id));
   const added = rawStates.map((s) => addState(d, { ...s, isInitial: !!s.isInitial }));
   const names = new Set(added.map((st) => st.name));
@@ -330,7 +333,7 @@ export function parseDiagram(json: unknown): FsmDiagram {
     const old = rawStates[i].id;
     if (old) remap.set(old, st.id);
   }
-  const rawTransitions = raw.transitions ?? [];
+  const rawTransitions = (raw.transitions ?? []).map((t) => ({ ...t, id: str(t.id), from: str(t.from) ?? "", to: str(t.to) ?? "" }));
   const givenT = dup("transition", rawTransitions.map((t) => t.id));
   // Transitions in a file refer to state ids; ones written by hand may use names (see findState).
   const ref = (r: string) => remap.get(r) ?? r;

@@ -127,3 +127,34 @@ test("a statement that does not parse is named when no state machine is found", 
 endmodule`;
   assert.throws(() => importVerilog(code), /No state machine found.*did not parse.*line \d+/s);
 });
+
+test("states named s0, s1, s2 import from Verilog; ids never equal another state's name", () => {
+  const code = `module m(input clk, input rst, input x, output reg z);
+  localparam s0 = 2'd0, s1 = 2'd1, s2 = 2'd2;
+  reg [1:0] state;
+  always @(posedge clk) if (rst) state <= s0; else case (state)
+    s0: if (x) state <= s1;
+    s1: if (x) state <= s2; else state <= s0;
+    default: state <= s0;
+  endcase
+  always @* z = (state == s2);
+endmodule`;
+  const d = importVerilog(code).diagram;
+  const names = new Set(d.states.map((s) => s.name));
+  assert.deepEqual([...names].sort(), ["s0", "s1", "s2"]);
+  for (const s of d.states) assert.ok(!names.has(s.id) || s.name === s.id, `${s.name} has id ${s.id}`);
+  const name = (id: string) => d.states.find((s) => s.id === id)!.name;
+  assert.ok(d.transitions.some((t) => name(t.from) === "s1" && name(t.to) === "s2"));
+});
+
+test("ids: huge numeric suffixes and numbers in hand-written files", () => {
+  const d = parseDiagram({ states: [{ id: "s100000000000000000", name: "A" }, { name: "B" }] });
+  addState(d, { name: "C" });
+  assert.equal(new Set(d.states.map((s) => s.id)).size, 3);
+  const n = parseDiagram({ states: [{ id: 5, name: "A" }, { name: "B" }], transitions: [{ id: 3, from: 5, to: "B" }] });
+  assert.equal(n.states[0].id, "5");
+  assert.equal(n.transitions[0].from, "5");
+  addState(n, { name: "C" });
+  addTransition(n, { from: "A", to: "C" });
+  assert.equal(new Set(n.transitions.map((t) => t.id)).size, 2);
+});

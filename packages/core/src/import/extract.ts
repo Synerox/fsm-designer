@@ -962,6 +962,19 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
     ids.set(k, st.id);
     stateCodes[name] = `${Rw}'b${v.toString(2).padStart(Rw, "0")}`;
   }
+  // An id given while adding the states can be the name of a state added later
+  // (states named s0, s1...); renumber them so every id differs from every name.
+  const drawnNames = new Set(d.states.map((s) => s.name));
+  if (d.states.some((s) => drawnNames.has(s.id) && s.name !== s.id)) {
+    let n = 0;
+    const fresh = new Map<string, string>();
+    for (const s of d.states) {
+      while (drawnNames.has(`s${n}`)) n++;
+      fresh.set(s.id, `s${n++}`);
+    }
+    for (const s of d.states) s.id = fresh.get(s.id)!;
+    for (const [k, id] of ids) ids.set(k, fresh.get(id)!);
+  }
   for (const v of order) {
     const k = v.toString();
     for (const t of transitionsOf.get(k) ?? []) {
