@@ -50,8 +50,9 @@ export async function ensureLayout(d: FsmDiagram): Promise<void> {
   const placed = d.states.filter((s) => !missing.includes(s));
   const minX = Math.min(...placed.map((s) => s.x!));
   const maxY = Math.max(...placed.map((s) => s.y!));
+  const r = Math.max(STATE_RADIUS, ...d.states.map((s) => s.radius ?? STATE_RADIUS));
   missing.forEach((s, i) => {
-    s.x = minX + i * (2 * STATE_RADIUS + 90);
-    s.y = maxY + 2 * STATE_RADIUS + 120;
+    s.x = minX + i * (2 * r + 90);
+    s.y = maxY + 2 * r + 120;
   });
 }

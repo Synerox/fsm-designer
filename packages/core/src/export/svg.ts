@@ -427,7 +427,7 @@ export function renderSvg(d: FsmDiagram, opts: SvgOptions = {}): string {
     const lh = lineHeight(e.fontSize);
     const top = e.label.y - (e.lines.length * lh) / 2 + lh / 2;
     for (const [i, l] of e.lines.entries())
-      out.push(`<text x="${f(e.label.x)}" y="${f(top + i * lh)}" font-size="${e.fontSize}" text-anchor="middle" dominant-baseline="central" fill="${stroke}" stroke="${halo}" stroke-width="4" stroke-linejoin="round" paint-order="stroke">${esc(l)}</text>`);
+      out.push(`<text x="${f(e.label.x)}" y="${f(top + i * lh)}" font-size="${e.fontSize}" text-anchor="middle" dominant-baseline="central" fill="${stroke}" stroke="${esc(halo)}" stroke-width="4" stroke-linejoin="round" paint-order="stroke">${esc(l)}</text>`);
   }
 
   const pad = 16;
