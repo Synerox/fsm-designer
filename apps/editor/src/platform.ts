@@ -2,6 +2,7 @@
 // files directly; in a plain browser it falls back to <input type=file> and
 // downloads so the editor still works for development and a future web build.
 
+import type { InvokeArgs, InvokeOptions } from "@tauri-apps/api/core";
 import { modalKeys } from "./dialog.ts";
 import { tr } from "./i18n.ts";
 
@@ -26,9 +27,9 @@ export function baseName(path: string): string {
 }
 
 // Desktop file I/O goes through the shell's own commands (apps/desktop/src-tauri/src/lib.rs).
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+async function invoke<T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T> {
   const core = await import("@tauri-apps/api/core");
-  return core.invoke<T>(cmd, args);
+  return core.invoke<T>(cmd, args, options);
 }
 
 export async function openTextFile(filters: FileFilter[]): Promise<OpenedFile | null> {
@@ -75,8 +76,11 @@ let launched: Promise<OpenedFile | null> | undefined;
 /**
  * Save data. With `path` (desktop only) it overwrites that file silently;
  * otherwise it asks where to save. Returns the path written, or null if cancelled.
+ * The data can also be a function that makes the bytes (a PNG takes up to a second to
+ * render): on desktop it runs only after the save dialog, so the dialog opens
+ * at once and a cancel costs nothing.
  */
-export async function saveFile(data: string | Uint8Array, opts: { path?: string | null; suggestedName: string; filters: FileFilter[]; mime: string }): Promise<string | null> {
+export async function saveFile(make: string | Uint8Array | (() => Promise<Uint8Array>), opts: { path?: string | null; suggestedName: string; filters: FileFilter[]; mime: string }): Promise<string | null> {
   if (isDesktop) {
     let path = opts.path ?? null;
     if (!path) {
@@ -84,10 +88,15 @@ export async function saveFile(data: string | Uint8Array, opts: { path?: string 
       path = await save({ defaultPath: opts.suggestedName, filters: opts.filters });
       if (!path) return null;
     }
+    const data = typeof make === "function" ? await make() : make;
     const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
-    await invoke("write_file", { path, contents: Array.from(bytes) });
+    // The bytes go as the raw request body: inside an args object they would be
+    // sent as a JSON array of numbers, 3.5 times their size. Header values must
+    // be ASCII, hence the encoding (lib.rs decodes it).
+    await invoke("write_file", bytes, { headers: { "file-path": encodeURIComponent(path) } });
     return path;
   }
+  const data = typeof make === "function" ? await make() : make;
   const name = opts.path ? baseName(opts.path) : opts.suggestedName;
   const host = await hostDownloads();
   if (host) return saveViaHost(host, name, data);

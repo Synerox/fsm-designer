@@ -181,7 +181,8 @@ export async function pngBytes(scale = 2): Promise<Uint8Array> {
 }
 
 export async function exportPng(scale = 2): Promise<void> {
-  await saveFile(await pngBytes(scale), { suggestedName: `${stem()}.png`, filters: [{ name: tr("PNG image", "PNG 圖片", "PNG 画像"), extensions: ["png"] }], mime: "image/png" });
+  // The function form renders after the save dialog, not before it (desktop).
+  await saveFile(() => pngBytes(scale), { suggestedName: `${stem()}.png`, filters: [{ name: tr("PNG image", "PNG 圖片", "PNG 画像"), extensions: ["png"] }], mime: "image/png" });
 }
 
 // ---- Autosave: the open diagram survives a reload or crash, like Evan's editor ----

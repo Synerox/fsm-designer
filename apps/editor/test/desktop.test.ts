@@ -23,7 +23,7 @@ const storage = new Map<string, string>();
   removeItem: (k: string) => { storage.delete(k); },
 };
 
-const { isDesktop, launchFile } = await import("../src/platform.ts");
+const { isDesktop, launchFile, saveFile } = await import("../src/platform.ts");
 const { loadText, restoreSession, serialize } = await import("../src/actions.ts");
 const { createState, newDiagram, useEditor } = await import("../src/store.ts");
 
@@ -53,4 +53,32 @@ test("one page load asks the shell for the launch file once, and every caller ge
   assert.equal(calls.filter((c) => c.cmd === "launch_file").length, 1);
   assert.equal(useEditor.getState().filePath, "/home/u/t.fsm.json");
   assert.equal(useEditor.getState().doc.states.length, 2);
+});
+
+test("bytes are written as the raw body, with the path in a header", async () => {
+  calls.length = 0;
+  answer = () => null;
+  const path = "C:\\Users\\王\\a b%.png";
+  const bytes = new Uint8Array([137, 80, 78, 71, 0, 255]);
+  assert.equal(await saveFile(bytes, { path, suggestedName: "x.png", filters: [], mime: "image/png" }), path);
+  const w = calls.find((c) => c.cmd === "write_file")!;
+  assert.ok(w.args instanceof Uint8Array, "not a JSON array of numbers, 3.5 times the size");
+  assert.deepEqual([...(w.args as Uint8Array)], [...bytes]);
+  assert.equal(decodeURIComponent(w.options!.headers!["file-path"]), path);
+  // Text goes the same way, as UTF-8.
+  await saveFile("é", { path: "/t.tex", suggestedName: "t.tex", filters: [], mime: "application/x-tex" });
+  assert.deepEqual([...(calls.at(-1)!.args as Uint8Array)], [0xc3, 0xa9]);
+});
+
+test("a PNG is rendered after the save dialog, and not at all when it is cancelled", async () => {
+  calls.length = 0;
+  let rendered = 0;
+  const render = async () => { rendered++; calls.push({ cmd: "render", args: null }); return new Uint8Array([1, 2, 3]); };
+  answer = () => null; // the dialog is cancelled
+  assert.equal(await saveFile(render, { suggestedName: "m.png", filters: [], mime: "image/png" }), null);
+  assert.equal(rendered, 0);
+  answer = (c) => c.cmd === "plugin:dialog|save" ? "/home/u/m.png" : null;
+  assert.equal(await saveFile(render, { suggestedName: "m.png", filters: [], mime: "image/png" }), "/home/u/m.png");
+  assert.deepEqual(calls.map((c) => c.cmd), ["plugin:dialog|save", "plugin:dialog|save", "render", "write_file"]);
+  assert.deepEqual([...(calls.at(-1)!.args as Uint8Array)], [1, 2, 3]);
 });

@@ -25,6 +25,31 @@ pub fn decode_text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// Undo the encodeURIComponent the editor puts on a path it sends in a header
+/// (header values must be ASCII). Anything malformed is kept as it was.
+pub fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = b
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (b[i], hex) {
+            (b'%', Some(v)) => {
+                out.push(v);
+                i += 3;
+            }
+            (c, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Save `contents` to `path` so that a failed or interrupted write (disk full,
 /// a network share dropping, a crash) leaves the old file as it was: write a
 /// temporary file beside it, flush it to disk, then rename it over the old one,
@@ -77,7 +102,8 @@ mod tests {
     use std::path::PathBuf;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("fsm-files-test-{}-{name}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("fsm-files-test-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -100,9 +126,23 @@ mod tests {
     fn decode_text_drops_bom_and_replaces_invalid_bytes() {
         assert_eq!(decode_text(b"\xEF\xBB\xBF{\"a\":1}"), "{\"a\":1}");
         // "// " then Big5 for a CJK word: opens with replacement characters, as in the browser.
-        assert_eq!(decode_text(b"// \xAA\xAC\xBA\x41\nmodule"), "// \u{FFFD}\u{FFFD}\u{FFFD}A\nmodule");
+        assert_eq!(
+            decode_text(b"// \xAA\xAC\xBA\x41\nmodule"),
+            "// \u{FFFD}\u{FFFD}\u{FFFD}A\nmodule"
+        );
         // Only a leading BOM is dropped.
         assert_eq!(decode_text("a\u{FEFF}".as_bytes()), "a\u{FEFF}");
+    }
+
+    #[test]
+    fn percent_decode_round_trips_encode_uri_component() {
+        // encodeURIComponent("C:\\Users\\王\\a b%.fsm.json")
+        assert_eq!(
+            percent_decode("C%3A%5CUsers%5C%E7%8E%8B%5Ca%20b%25.fsm.json"),
+            "C:\\Users\\王\\a b%.fsm.json"
+        );
+        assert_eq!(percent_decode("/x/100%"), "/x/100%");
+        assert_eq!(percent_decode("%zz%4"), "%zz%4");
     }
 
     #[test]
@@ -113,8 +153,15 @@ mod tests {
         assert_eq!(fs::read(&p).unwrap(), b"one");
         write_replacing(&p, b"two, longer").unwrap();
         assert_eq!(fs::read(&p).unwrap(), b"two, longer");
-        let names: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
-        assert_eq!(names, [OsString::from("a.fsm.json")], "no temporary file is left behind");
+        let names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            names,
+            [OsString::from("a.fsm.json")],
+            "no temporary file is left behind"
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -137,7 +184,11 @@ mod tests {
         assert_eq!(s, "old contents");
         let after = fs::metadata(&p).unwrap();
         assert_ne!(after.ino(), before);
-        assert_eq!(after.permissions().mode() & 0o777, 0o600, "permissions are kept");
+        assert_eq!(
+            after.permissions().mode() & 0o777,
+            0o600,
+            "permissions are kept"
+        );
         assert_eq!(fs::read(&p).unwrap(), b"new");
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -151,7 +202,10 @@ mod tests {
         fs::write(&real, b"old").unwrap();
         std::os::unix::fs::symlink(&real, &link).unwrap();
         write_replacing(&link, b"new").unwrap();
-        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(fs::read(&real).unwrap(), b"new");
 
         let ro = dir.join("ro.fsm.json");
