@@ -160,6 +160,8 @@ kbd {
   .inspector { width: auto; max-height: 38%; border-left: 0; border-top: 1px solid var(--border); }
   .statusbar { flex-wrap: wrap; padding: 4px 8px; }
   .statusbar .status { display: none; }
+  /* The status text is hidden here; the warning gets a row of its own, in full. */
+  .statusbar .storage-warn { flex-basis: 100%; white-space: normal; padding-top: 2px; }
   .statusbar .view-controls { flex: 1; min-width: 0; flex-wrap: wrap; row-gap: 4px; }
 }
 
