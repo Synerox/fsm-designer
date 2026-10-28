@@ -320,6 +320,24 @@ export function App() {
           <Canvas view={view} setView={setView} grid={grid} />
           {hints && <Hints onClose={() => setHints(false)} />}
           {report && <ImportReport result={report.result} onClose={() => setReport(null)} />}
+          {/* Stacked over the bottom of the canvas, so an error and a notice
+              never hide each other or the status bar's controls. Always in
+              the page so screen readers announce what appears in them. */}
+          <div className="toasts">
+            <div role="alert">
+              {error && (
+                <div className="toast" onClick={() => setError(null)}>
+                  {error}
+                  <button className="toast-close" onClick={() => setError(null)} aria-label={tr("Close", "關閉")}>×</button>
+                </div>
+              )}
+            </div>
+            <div role="status">
+              {notice && (
+                <div className="toast ok" onClick={() => setNotice(null)} onPointerEnter={() => setHoldNotice(true)} onPointerLeave={() => setHoldNotice(false)}>{notice}</div>
+              )}
+            </div>
+          </div>
         </div>
         <Inspector snap={grid.snap} />
       </main>
@@ -362,20 +380,6 @@ export function App() {
           }}
         />
       )}
-      {/* Always in the page so screen readers announce what appears in them. */}
-      <div role="alert">
-        {error && (
-          <div className="toast" onClick={() => setError(null)}>
-            {error}
-            <button className="toast-close" onClick={() => setError(null)} aria-label={tr("Close", "關閉")}>×</button>
-          </div>
-        )}
-      </div>
-      <div role="status">
-        {notice && (
-          <div className="toast ok" onClick={() => setNotice(null)} onPointerEnter={() => setHoldNotice(true)} onPointerLeave={() => setHoldNotice(false)}>{notice}</div>
-        )}
-      </div>
     </div>
   );
 }

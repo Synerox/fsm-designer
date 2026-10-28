@@ -146,7 +146,10 @@ kbd {
 .modal.confirm { width: min(380px, 92vw); }
 .modal.confirm p { margin: 0; line-height: 1.6; }
 
-.toast { position: fixed; z-index: 11; bottom: 48px; left: 50%; transform: translateX(-50%); background: #fdecec; color: #8a1f1f; border: 1px solid #f5c2c2; padding: 8px 14px; border-radius: 8px; cursor: pointer; max-width: 80vw; box-shadow: var(--shadow-md); }
+/* Over the bottom of the canvas (above the dialogs' backdrop), error on top of
+   notice; only the messages themselves take clicks. */
+.toasts { position: absolute; z-index: 11; left: 12px; right: 12px; bottom: 12px; display: flex; flex-direction: column; align-items: center; pointer-events: none; }
+.toast { pointer-events: auto; margin-top: 6px; background: #fdecec; color: #8a1f1f; border: 1px solid #f5c2c2; padding: 8px 14px; border-radius: 8px; cursor: pointer; max-width: 80vw; box-shadow: var(--shadow-md); }
 .toast.ok { background: var(--text); color: #fff; border-color: transparent; }
 .toast .toast-close { margin-left: 10px; padding: 0 4px; height: auto; border: 0; background: transparent; color: inherit; font-size: 15px; line-height: 1; }
 .toast .toast-close:hover:not(:disabled) { background: rgb(0 0 0 / 6%); }
@@ -209,5 +212,7 @@ button.primary:disabled { background: var(--surface-muted); border-color: var(--
 .import-report dd { margin: 0; overflow-wrap: anywhere; }
 .import-report code { font: 11px ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
 .import-report .warnings { margin: 8px 0 0; padding-left: 16px; color: #8a5a00; line-height: 1.5; }
-.verilog-import .machine-pick { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); margin: 8px 0 0; }
-.verilog-import .machine-pick select { font: inherit; color: var(--text); padding: 0 6px; border-radius: var(--radius); border: 1px solid var(--border-strong); background: var(--surface); height: var(--control-h); }
+/* The select is as wide as its longest "state in module" option; on a phone it
+   drops below the label and shrinks to the dialog rather than running past it. */
+.verilog-import .machine-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; color: var(--muted); margin: 8px 0 0; }
+.verilog-import .machine-pick select { min-width: 0; max-width: 100%; text-overflow: ellipsis; font: inherit; color: var(--text); padding: 0 6px; border-radius: var(--radius); border: 1px solid var(--border-strong); background: var(--surface); height: var(--control-h); }
