@@ -37,3 +37,12 @@ test("latex node names stay distinct when ids differ only in punctuation or scri
   assert.match(tex, new RegExp(`\\(${at(0)}\\) edge\\[\\] \\(${at(5)}\\)`));
   assert.match(tex, new RegExp(`\\(${at(10)}\\) edge\\[\\] \\(${at(15)}\\)`));
 });
+
+test("latex reports a transition with non-numeric geometry instead of crashing", () => {
+  const d = createDiagram({ name: "m" });
+  addState(d, { name: "A", x: 0, y: 0, isInitial: true });
+  addState(d, { name: "B", x: 200, y: 0 });
+  const t = addTransition(d, { from: "A", to: "B" });
+  (t as Transition & { curve: unknown }).curve = "abc"; // as a hand-edited .fsm.json can hold
+  assert.throws(() => renderLatex(d), /A -> B has no valid geometry/);
+});

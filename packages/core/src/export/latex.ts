@@ -36,6 +36,19 @@ function nodeNames(d: FsmDiagram): Map<string, string> {
   return names;
 }
 
+/**
+ * The numbers of an SVG path from the plan ("M x y Q cx cy x y"). A curve,
+ * gap or position that is not a number (hand-edited JSON is not
+ * type-checked) gives NaN geometry; say which edge rather than writing NaN
+ * into the TeX or failing on it later.
+ */
+function pathNumbers(d: FsmDiagram, path: string, from: string, to: string): number[] {
+  const v = path.split(/\s+/).filter((t) => !/^[A-Za-z]$/.test(t)).map(Number);
+  if (v.length && v.every(Number.isFinite)) return v;
+  const name = (id: string) => d.states.find((s) => s.id === id)?.name ?? id;
+  throw new Error(`Transition ${name(from)} -> ${name(to)} has no valid geometry: check that its curve, gap and loop angle, and the states' x, y and radius, are numbers.`);
+}
+
 /** TikZ automata only draws the start arrow on four sides; pick the nearest. */
 function texFont(pt: number): string {
   const p = Math.round(pt * 10) / 10;
@@ -79,6 +92,8 @@ export function renderLatex(d: FsmDiagram, opts: LatexOptions = {}): string {
     // edges), as separate nodes rather than TikZ's midway edge labels.
     if (e.label && e.lines.length)
       labelLines.push(`  \\node[font=${e.transitions[0].fontSize !== undefined ? texFont((e.fontSize * 6) / 13) : "\\scriptsize"}\\ttfamily, align=center, fill=white, inner sep=1pt] at (${(e.label.x / k).toFixed(2)}, ${(-e.label.y / k).toFixed(2)}) {${e.lines.map(latexText).join("\\\\")}};`);
+    const v = pathNumbers(d, e.path, from, to);
+    const pt = (x: number, y: number) => `(${(x / k).toFixed(2)}, ${(-y / k).toFixed(2)})`;
     let shape = "";
     if (e.loopAngle !== undefined) {
       const deg = Math.round((-e.loopAngle * 180) / Math.PI); // TikZ y axis points up
@@ -88,8 +103,7 @@ export function renderLatex(d: FsmDiagram, opts: LatexOptions = {}): string {
     } else if (e.curve !== 0) {
       // The SVG route as an explicit Bézier: TikZ's `bend` overflows ("Dimension
       // too large") on long edges, and this way both exports match exactly.
-      const [x0, y0, cx, cy, x1, y1] = e.path.match(/-?[\d.]+/g)!.map((v) => Number(v) / k);
-      const pt = (x: number, y: number) => `(${x.toFixed(2)}, ${(-y).toFixed(2)})`;
+      const [x0, y0, cx, cy, x1, y1] = v;
       curveLines.push(`  \\draw[->] ${pt(x0, y0)} .. controls ${pt(x0 + ((cx - x0) * 2) / 3, y0 + ((cy - y0) * 2) / 3)} and ${pt(x1 + ((cx - x1) * 2) / 3, y1 + ((cy - y1) * 2) / 3)} .. ${pt(x1, y1)};`);
       continue;
     }
