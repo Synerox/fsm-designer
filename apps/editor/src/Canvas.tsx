@@ -322,6 +322,11 @@ export function Canvas({ view, setView, grid }: { view: View; setView: Dispatch<
       ref={svgRef}
       className="canvas"
       data-testid="canvas"
+      // A named, focusable surface; keys typed with it focused go to the
+      // window handler like anywhere else (editing the selection's text).
+      role="application"
+      aria-label={tr("State diagram canvas", "狀態圖畫布", "状態遷移図のキャンバス")}
+      tabIndex={0}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
