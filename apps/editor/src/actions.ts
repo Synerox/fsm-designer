@@ -71,10 +71,24 @@ export async function openFile(): Promise<void> {
 }
 
 /**
+ * Resolves once the browser has painted. The layout is synchronous and can
+ * hold the page for seconds on a big machine, so callers wait for this first
+ * to let their busy state show. (Outside a browser it resolves at once.)
+ */
+export function afterPaint(): Promise<void> {
+  if (typeof requestAnimationFrame !== "function") return Promise.resolve();
+  return new Promise((done) => {
+    const fallback = setTimeout(done, 100); // a hidden tab gets no frames
+    requestAnimationFrame(() => setTimeout(() => { clearTimeout(fallback); done(); }, 0));
+  });
+}
+
+/**
  * Draw the FSM found in Verilog source as a new, unsaved diagram.
  * Returns null if the user kept the current unsaved diagram.
  */
 export async function importVerilogText(source: string, opts: ImportOptions = {}): Promise<ImportResult | null> {
+  await afterPaint();
   const r = await importVerilogLaidOut(source, { ...opts, layout: { draw: drawOptions() } }); // throws before anything is replaced
   if (!(await confirmDiscard())) return null;
   useEditor.getState().load(r.diagram, null);
@@ -84,6 +98,7 @@ export async function importVerilogText(source: string, opts: ImportOptions = {}
 
 /** Re-place every state with the auto layout, as one undoable edit. moved is false if nothing moved; issues are what the layout could not fix. */
 export async function tidyUp(): Promise<{ moved: boolean; issues: LayoutIssue[] }> {
+  await afterPaint();
   const { doc } = useEditor.getState();
   if (!doc.states.length) return { moved: false, issues: [] };
   const d = structuredClone(doc);

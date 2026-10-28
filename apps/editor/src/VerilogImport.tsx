@@ -104,7 +104,7 @@ export function VerilogImportDialog({ onClose, onImported }: { onClose: () => vo
           <button onClick={() => { setCode(SAMPLE); setError(null); }}>{tr("Example", "範例")}</button>
           <button onClick={() => void openFile()}>{tr("Open file…", "開啟檔案…")}</button>
           <button onClick={onClose}>{tr("Cancel", "取消")}</button>
-          <button className="primary" disabled={!code.trim() || busy} onClick={() => void run()} title="Ctrl+Enter" data-testid="verilog-import">{tr("Import", "匯入")}</button>
+          <button className="primary" disabled={!code.trim() || busy} onClick={() => void run()} title="Ctrl+Enter" data-testid="verilog-import" aria-busy={busy}>{busy ? tr("Importing…", "匯入中…", "読み込み中…") : tr("Import", "匯入")}</button>
         </div>
       </div>
     </div>
