@@ -265,3 +265,10 @@ test("an import draft too big to share storage with the autosave is not kept", (
   saveVerilogDraft("/*" + "x".repeat(MAX_DRAFT) + "*/");
   assert.equal(loadVerilogDraft(), "", "a 5 MB draft made every later autosave fail");
 });
+
+test("an autosave with an output the diagram does not declare is set aside with a message", async () => {
+  const bad = JSON.stringify({ doc: { name: "m", type: "moore", outputs: [], states: [{ id: "s0", name: "A", isInitial: true, outputs: { light: 2 } }] }, filePath: null, dirty: true });
+  storage.set("fsm-designer:autosave", bad);
+  await assert.rejects(restoreSession(), /Could not restore the last session: .*Unknown output "light"/);
+  assert.equal(storage.get("fsm-designer:autosave.bad"), bad, "a copy survives the next autosave");
+});

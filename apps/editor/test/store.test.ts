@@ -34,6 +34,31 @@ test("one transition per ordered pair, self loops keep their angle", () => {
   assert.equal(d.transitions.length, 0);
 });
 
+test("a new transition goes before the state's unconditional fallback, not after it", async () => {
+  const { addState, addTransition, createDiagram, outgoing, validate } = await import("@fsm/core");
+  // Imported with priorities: A->B "a" (1), A->C always (2). Delete A->B and draw it again.
+  const d = createDiagram({ name: "m", inputs: ["a"] });
+  const A = addState(d, { name: "A", x: 0, y: 0 }), B = addState(d, { name: "B", x: 100, y: 0 }), C = addState(d, { name: "C", x: 0, y: 100 });
+  addTransition(d, { from: A.id, to: B.id, condition: "a", priority: 1 });
+  addTransition(d, { from: A.id, to: C.id, priority: 2 });
+  addTransition(d, { from: B.id, to: A.id, priority: 1 });
+  deleteSelection(d, { kind: "edge", from: A.id, to: B.id });
+  createTransition(d, A.id, B.id);
+  d.transitions.find((t) => t.from === A.id && t.to === B.id)!.condition = "a";
+  assert.deepEqual(outgoing(d, A.id).map((t) => [t.to, t.condition, t.priority]), [[B.id, "a", 2], [C.id, "", 3]]);
+  assert.deepEqual(validate(d), []);
+  assert.equal(d.transitions.find((t) => t.from === B.id)!.priority, 1, "other states' priorities stay");
+
+  // Without priorities: array order, and creation order among blank sketch lines.
+  const e = newDiagram();
+  const [p, q, r, s] = [0, 1, 2, 3].map((i) => createState(e, i * 100, 0));
+  createTransition(e, p.id, q.id);
+  createTransition(e, p.id, r.id);
+  createTransition(e, p.id, s.id);
+  assert.deepEqual(e.transitions.map((t) => t.to), [r.id, s.id, q.id]);
+  assert.ok(e.transitions.every((t) => t.priority === undefined));
+});
+
 test("start arrow moves to the chosen state", () => {
   const d = newDiagram();
   const a = createState(d, 0, 0), b = createState(d, 100, 0);
@@ -104,6 +129,160 @@ test("copy and paste: states with the transitions between them, fresh names, off
   pasteClipboard(d);
   assert.deepEqual([d.states[5].name, d.states[5].x], ["IDLE_2", 80], "each paste lands further down-right");
   assert.equal(new Set(d.states.map((s) => s.id)).size, d.states.length, "ids stay unique");
+});
+
+test("paste into a diagram without the copy's signals declares them, so the file opens again", async () => {
+  const { copySelection, pasteClipboard, selectAll } = await import("../src/store.ts");
+  const { addState, addTransition, createDiagram, parseDiagram } = await import("@fsm/core");
+  // Moore: state outputs, pasted after File > New.
+  const moore = createDiagram({ name: "lights", inputs: ["go", "car"], outputs: [{ name: "light", width: 2, default: 0 }] });
+  const g = addState(moore, { name: "GREEN", outputs: { light: 2 }, x: 0, y: 0 });
+  const y = addState(moore, { name: "YELLOW", outputs: { light: 1 }, x: 100, y: 0 });
+  addTransition(moore, { from: g.id, to: y.id, condition: "go && !car && other" });
+  copySelection(moore, selectAll(moore));
+  const d = newDiagram();
+  pasteClipboard(d);
+  const back = parseDiagram(JSON.parse(JSON.stringify(d)));
+  assert.deepEqual(back.outputs, [{ name: "light", width: 2, default: 0 }], "the output is declared as in the source");
+  assert.deepEqual(back.inputs.map((s) => s.name), ["go", "car"], "the inputs the condition uses; 'other' was never an input");
+  assert.deepEqual(back.states.map((s) => s.outputs), [{ light: 2 }, { light: 1 }]);
+
+  // Mealy: an empty diagram takes the kind, so the transition outputs stay drawn.
+  const mealy = createDiagram({ name: "det", type: "mealy", inputs: ["x"], outputs: ["z"] });
+  const a = addState(mealy, { name: "A", x: 0, y: 0 }), b = addState(mealy, { name: "B", x: 100, y: 0 });
+  addTransition(mealy, { from: a.id, to: b.id, condition: "x", outputs: { z: 1 } });
+  copySelection(mealy, selectAll(mealy));
+  const e = newDiagram();
+  pasteClipboard(e);
+  assert.equal(e.type, "mealy");
+  assert.deepEqual(parseDiagram(JSON.parse(JSON.stringify(e))).transitions[0].outputs, { z: 1 });
+
+  // Into a Moore machine with states, where "z" is already an input: the
+  // Mealy output can be neither drawn nor declared, so it is dropped.
+  const f = newDiagram();
+  createState(f, 0, 0);
+  f.inputs.push({ name: "z", width: 1 });
+  pasteClipboard(f);
+  assert.equal(f.type, "moore");
+  assert.deepEqual(f.outputs, []);
+  assert.ok(f.transitions.every((t) => Object.keys(t.outputs).length === 0));
+  assert.deepEqual(f.inputs.map((s) => s.name), ["z", "x"]);
+  parseDiagram(JSON.parse(JSON.stringify(f)));
+
+  // Moore into Moore: outputs the file's transitions carry (hidden) are kept.
+  addTransition(moore, { from: y.id, to: g.id, condition: "car", outputs: { light: 3 } });
+  copySelection(moore, selectAll(moore));
+  pasteClipboard(moore);
+  assert.deepEqual(moore.transitions.slice(-2).map((t) => t.outputs), [{}, { light: 3 }]);
+});
+
+test("typing on a merged line edits the transition whose text was clicked, with the caret drawn in it", async () => {
+  const { caretSpot, editedTransition, lineOwners, setEdgeText } = await import("../src/store.ts");
+  const { addState, addTransition, createDiagram, labelLines, transitionLabel } = await import("@fsm/core");
+  const d = createDiagram({ name: "m", type: "mealy", inputs: ["a", "b"], outputs: ["y", "z"] });
+  const A = addState(d, { name: "A", x: 0, y: 0 }), B = addState(d, { name: "B", x: 200, y: 0 });
+  const t0 = addTransition(d, { from: A.id, to: B.id, condition: "a", outputs: { z: 1 } });
+  const t1 = addTransition(d, { from: A.id, to: B.id, condition: "b", outputs: { y: 1 } });
+  const t2 = addTransition(d, { from: A.id, to: B.id, outputs: { z: 0 } });
+  assert.deepEqual(lineOwners(d, [t0, t1, t2]), [0, 1, 2], "one line each: 'a / z=1', 'b / y=1', '/ z=0'");
+  const sel = { kind: "edge" as const, from: A.id, to: B.id, tid: t1.id };
+  assert.equal(editedTransition(d, sel), t1);
+  assert.equal(editedTransition(d, { ...sel, tid: undefined }), t0, "no line picked: the first");
+  assert.equal(editedTransition(d, { ...sel, tid: "gone" }), t0, "a picked transition undone away: the first");
+  setEdgeText(d, A.id, B.id, "bZ", t1.id);
+  assert.deepEqual(d.transitions.map((t) => t.condition), ["a", "bZ", ""]);
+
+  // Mealy: the caret sits in "cond / outs", not nowhere.
+  assert.deepEqual(caretSpot(d, t1, 1), { line: 0, offset: 1 });
+  assert.deepEqual(caretSpot(d, t2, 0), { line: 0, offset: 0 }, "before the '/' of an output-only label");
+  // A wrapped condition: the caret follows the text onto the second line.
+  t0.condition = "(req_valid && grant_ready) || (a && !b && c) || (!a && b)";
+  const lines = labelLines(transitionLabel(d, t0, { elseLabels: false }));
+  assert.deepEqual(lines, ["(req_valid && grant_ready) ||", "(a && !b && c) || (!a && b)", "/ z=1"]);
+  assert.deepEqual(caretSpot(d, t0, 0), { line: 0, offset: 0 });
+  assert.deepEqual(caretSpot(d, t0, 29), { line: 0, offset: 29 }, "just after the first '||'");
+  assert.deepEqual(caretSpot(d, t0, 30), { line: 1, offset: 0 }, "after the space at the break");
+  assert.deepEqual(caretSpot(d, t0, t0.condition.length), { line: 1, offset: lines[1].length });
+  assert.deepEqual(lineOwners(d, [t0, t1, t2]), [0, 0, 0, 1, 2]);
+
+  // Moore: an emptied transition draws no line, so it has no spot (the
+  // canvas draws its caret between the other lines instead).
+  d.type = "moore";
+  t1.condition = "";
+  assert.equal(caretSpot(d, t1, 0), null);
+  assert.deepEqual(lineOwners(d, [t0, t1, t2]), [0, 0]);
+});
+
+test("a pasted state never shows the same text as another; typed text never names a state after a signal or keyword", async () => {
+  const { copySelection, pasteClipboard } = await import("../src/store.ts");
+  const { stateText } = await import("@fsm/core");
+  const d = newDiagram();
+  const a = createState(d, 0, 0), b = createState(d, 100, 0);
+  setStateText(d, a.id, "S₀");
+  setStateText(d, b.id, "IDLE");
+  copySelection(d, { kind: "multi", states: [a.id, b.id], edges: [], initial: false });
+  for (let i = 0; i < 4; i++) pasteClipboard(d);
+  assert.deepEqual(d.states.map(stateText), ["S₀", "IDLE", "S₀′", "IDLE_1", "S₀″", "IDLE_2", "S₀‴", "IDLE_3", "S₀′′′′", "IDLE_4"]);
+  assert.deepEqual(d.states.map((s) => s.name), ["S_0", "IDLE", "S_0_1", "IDLE_1", "S_0_2", "IDLE_2", "S_0_3", "IDLE_3", "S_0_4", "IDLE_4"]);
+  // Opening the file again runs the old shortcut syntax through prettyText:
+  // a label like "S₀_1" would come back as "S₀₁".
+  const { loadText, serialize } = await import("../src/actions.ts");
+  await loadText(serialize(d), null);
+  assert.deepEqual(useEditor.getState().doc.states.map(stateText), d.states.map(stateText), "labels survive a reload");
+  // An unlabelled state whose name another state shows as its label.
+  const e = newDiagram();
+  const c = createState(e, 0, 0);
+  setStateText(e, c.id, "A");
+  e.states[0].name = "S9"; e.states[0].label = "A";
+  const f = newDiagram();
+  setStateText(f, createState(f, 0, 0).id, "A");
+  copySelection(f, { kind: "state", id: f.states[0].id });
+  pasteClipboard(e);
+  assert.deepEqual(e.states.map(stateText), ["A", "A_1"]);
+
+  const g = newDiagram();
+  g.inputs.push({ name: "x", width: 1 });
+  const s = createState(g, 0, 0);
+  for (const text of ["x", "clk", "rst_n", "module", "State_Diagram", "next_state"]) {
+    setStateText(g, s.id, text);
+    assert.deepEqual([g.states[0].name, g.states[0].label], ["S0", text], `"${text}" is drawn but is not the identifier`);
+  }
+  setStateText(g, s.id, "x1");
+  assert.deepEqual([g.states[0].name, g.states[0].label], ["x1", undefined]);
+
+  // Typed a key at a time, "clk" passes through "c" and "cl", which are
+  // usable names: the state goes back to the name it had, not "cl".
+  const { typeStateText } = await import("../src/store.ts");
+  const h = newDiagram();
+  const q = createState(h, 0, 0);
+  setStateText(h, q.id, "WAIT");
+  useEditor.getState().load(h, null);
+  for (const text of ["", "c", "cl", "clk"]) typeStateText(q.id, text);
+  assert.deepEqual([useEditor.getState().doc.states[0].name, useEditor.getState().doc.states[0].label], ["WAIT", "clk"]);
+  assert.equal(useEditor.getState().past.length, 1, "one undo step");
+});
+
+test("the canvas and inspector share one plan, and an edit that moves nothing reuses it", async () => {
+  const { canvasOptions, viewPlan, drawOptions: draw } = await import("../src/store.ts");
+  const { planDiagram } = await import("@fsm/core");
+  const { edit, load } = useEditor.getState();
+  const d = newDiagram();
+  const a = createState(d, 0, 0), b = createState(d, 200, 0);
+  createTransition(d, a.id, b.id);
+  load(d, null);
+  const opts = canvasOptions("all", { kind: "edge", from: a.id, to: b.id, tid: "t0" });
+  assert.deepEqual(opts, { ...draw("all"), shownEdge: { from: a.id, to: b.id } });
+  const p1 = viewPlan(useEditor.getState().doc, opts);
+  assert.equal(viewPlan(useEditor.getState().doc, canvasOptions("all", { kind: "edge", from: a.id, to: b.id })), p1, "the second panel gets the same plan");
+  edit((x) => { setStateText(x, a.id, "A_LONGER_NAME"); x.states[1].isAccepting = true; x.states[1].color = "#fee"; });
+  assert.equal(viewPlan(useEditor.getState().doc, opts), p1, "text, ring and colour do not move anything");
+  edit((x) => { x.states[1].x = 260; });
+  const p2 = viewPlan(useEditor.getState().doc, opts);
+  assert.notEqual(p2, p1);
+  assert.deepEqual(p2.edges.map((e) => e.path), planDiagram(useEditor.getState().doc, opts).edges.map((e) => e.path));
+  edit((x) => { x.transitions[0].condition = "go"; });
+  assert.notEqual(viewPlan(useEditor.getState().doc, opts), p2, "a transition's text changes its label");
+  assert.notEqual(viewPlan(useEditor.getState().doc, canvasOptions("none", null)), p2, "other options, other plan");
 });
 
 test("align and spread states", async () => {
