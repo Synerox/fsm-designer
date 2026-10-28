@@ -20,7 +20,7 @@ import type { Dispatch, ReactElement, SVGProps, SetStateAction } from "react";
 import type { PointerEvent as RPointerEvent } from "react";
 import { SMALL_SIZE, SUB_LINE_H, drawnSubLines, stateDisplay, stateFontSize, unreachableStates } from "@fsm/core";
 import type { DiagramPlan, EdgePlan } from "@fsm/core";
-import { canvasOptions, caretSpot, editedTransition, mergeSelections, createState, createTransition, edgeTransitions, isEdgeSelected, isStateSelected, lineOwners, multiSelection, selectionParts, setInitial, toggleInSelection, useEditor, viewPlan } from "./store.ts";
+import { canvasOptions, caretSpot, editedTransition, mergeSelections, createState, createTransition, edgeTransitions, isEdgeSelected, isStateSelected, lineOwners, multiSelection, selectionParts, setInitial, stackOrder, toggleInSelection, useEditor, viewPlan } from "./store.ts";
 import type { Selection } from "./store.ts";
 import { GRID, SNAP_PX, angleOf, boxOf, circleHitsBox, edgePoints, inBox, segmentHitsBox, borderPoint, curveThrough, edgeMidpoint, loopPath, snapAngle, snapPoint, snapToGrid, stateAt } from "./geometry.ts";
 import type { Guide, Pt } from "./geometry.ts";
@@ -368,6 +368,7 @@ export function Canvas({ view, setView, grid }: { view: View; setView: Dispatch<
               key={edgeKey(e)}
               e={e}
               owners={e.lines.length ? lineOwners(doc, e.transitions) : []}
+              stack={stackOrder(doc, e.transitions)}
               selected={isEdgeSelected(shown, e.transitions[0].from, e.transitions[0].to)}
               edited={t ? e.transitions.indexOf(t) : -1}
               spot={t ? caretSpot(doc, t, Math.min(caret ?? t.condition.length, t.condition.length)) : null}
@@ -577,9 +578,10 @@ function CaretText({ x, y, text, caret, fontSize, ...rest }: { x: number; y: num
  * lineOwners). On the selected line the text cursor is drawn in the
  * transition being edited (`edited`, its index; -1 when none) at `spot`;
  * one with no text gets a cursor between the others' lines, where its text
- * will appear, or at the middle of the line when nothing is written on it.
+ * will appear (`stack` is the order the labels are stacked in, see
+ * stackOrder), or at the middle of the line when nothing is written on it.
  */
-function Edge({ e, owners, selected, edited, spot, mid }: { e: EdgePlan; owners: number[]; selected: boolean; edited: number; spot: { line: number; offset: number } | null; mid: Pt }) {
+function Edge({ e, owners, stack, selected, edited, spot, mid }: { e: EdgePlan; owners: number[]; stack: number[]; selected: boolean; edited: number; spot: { line: number; offset: number } | null; mid: Pt }) {
   const color = selected ? SELECT : STROKE;
   const lines = e.lines;
   const lh = e.fontSize * 1.3;
@@ -589,7 +591,7 @@ function Edge({ e, owners, selected, edited, spot, mid }: { e: EdgePlan; owners:
   let gap: { at: Pt; h: number } | null = null;
   if (edited >= 0 && !spot) {
     if (e.label && lines.length) {
-      const next = owners.findIndex((o) => o > edited);
+      const next = owners.findIndex((o) => stack.indexOf(o) > stack.indexOf(edited));
       gap = { at: { x: e.label.x, y: top + (next < 0 ? lines.length : next) * lh - lh / 2 }, h: lh * 0.35 };
     } else gap = { at: mid, h: 8 };
   }

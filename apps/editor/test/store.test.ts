@@ -213,6 +213,29 @@ test("typing on a merged line edits the transition whose text was clicked, with 
   assert.deepEqual(lineOwners(d, [t0, t1, t2]), [0, 0]);
 });
 
+test("line owners and the text cursor follow the drawn lines: a long Moore condition with ' / ', and priorities", async () => {
+  const { caretSpot, lineOwners, stackOrder } = await import("../src/store.ts");
+  const { addState, addTransition, createDiagram, planDiagram } = await import("@fsm/core");
+  const d = createDiagram({ name: "m", type: "moore" });
+  const s0 = addState(d, { name: "A", x: 100, y: 100 }), s1 = addState(d, { name: "B", x: 500, y: 100 });
+  const long = addTransition(d, { from: s0.id, to: s1.id, condition: "counter_value == LIMIT / 2 + OFFSET_VALUE" });
+  const go = addTransition(d, { from: s0.id, to: s1.id, condition: "go" });
+  const e = planDiagram(d, { elseLabels: false }).edges[0];
+  assert.deepEqual(e.lines, ["counter_value == LIMIT / 2 + OFFSET_VALUE", "go"]);
+  // Not [0, 0, 1]: that gave the 'go' line to the long transition, so a click on it edited the other one.
+  assert.deepEqual(lineOwners(d, e.transitions), [0, 1]);
+  assert.deepEqual(caretSpot(d, long, long.condition.length), { line: 0, offset: long.condition.length }, "the caret stays on the one drawn line");
+  assert.deepEqual(caretSpot(d, long, 25), { line: 0, offset: 25 }, "past the ' / '");
+  assert.deepEqual(caretSpot(d, go, 2), { line: 0, offset: 2 });
+
+  // Labels are stacked in the order the transitions are checked, so the owners are too.
+  go.priority = 0;
+  long.priority = 1;
+  assert.deepEqual(planDiagram(d, { elseLabels: false }).edges[0].lines, ["go", "counter_value == LIMIT / 2 + OFFSET_VALUE"]);
+  assert.deepEqual(lineOwners(d, [long, go]), [1, 0]);
+  assert.deepEqual(stackOrder(d, [long, go]), [1, 0]);
+});
+
 test("a pasted state never shows the same text as another; typed text never names a state after a signal or keyword", async () => {
   const { copySelection, pasteClipboard } = await import("../src/store.ts");
   const { stateText } = await import("@fsm/core");

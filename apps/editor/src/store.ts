@@ -3,7 +3,7 @@
 
 import { create } from "zustand";
 import { current, isDraft, produce } from "immer";
-import { addState, addTransition, asciiText, createDiagram, isUnconditional, labelLines, outgoing, planDiagram, removeState, stateText, transitionLabel } from "@fsm/core";
+import { addState, addTransition, asciiText, createDiagram, isUnconditional, outgoing, planDiagram, removeState, stateText, transitionLabel, transitionLines } from "@fsm/core";
 import type { DiagramPlan, FsmDiagram, MachineType, PlanOptions, Signal, State, Transition } from "@fsm/core";
 
 export type Selection =
@@ -304,10 +304,20 @@ export function setEdgeText(d: FsmDiagram, from: string, to: string, text: strin
 /**
  * Which transition each label line of an arc belongs to (its index in `ts`,
  * the arc's transitions): the lines are each transition's label lines in
- * turn, and a transition with no text has none.
+ * turn, in the order the transitions are checked (as planDiagram stacks
+ * them), and a transition with no text has none. The lines come from
+ * transitionLines, as the drawn ones do, so a " / " in a Moore condition is
+ * not taken for an outputs separator that would add a line.
  */
 export function lineOwners(d: FsmDiagram, ts: Transition[]): number[] {
-  return ts.flatMap((t, i) => labelLines(transitionLabel(d, t, DRAW)).map(() => i));
+  return stackOrder(d, ts).flatMap((i) => transitionLines(d, ts[i], DRAW).map(() => i));
+}
+
+/** The indexes in `ts` (an arc's transitions) in the order their labels are stacked: the order they are checked. */
+export function stackOrder(d: FsmDiagram, ts: Transition[]): number[] {
+  if (!ts.length) return [];
+  const order = outgoing(d, ts[0].from);
+  return ts.map((_, i) => i).sort((a, b) => order.indexOf(ts[a]) - order.indexOf(ts[b]));
 }
 
 /**
@@ -318,8 +328,10 @@ export function lineOwners(d: FsmDiagram, ts: Transition[]): number[] {
  * order, less the spaces at the breaks. Null when the transition draws no text.
  */
 export function caretSpot(d: FsmDiagram, t: Transition, caret: number): { line: number; offset: number } | null {
+  // The drawn lines (see lineOwners); the condition lines are pieces of the
+  // condition in order, so their starts are found in the label, which it begins.
   const text = transitionLabel(d, t, DRAW);
-  const lines = labelLines(text);
+  const lines = transitionLines(d, t, DRAW);
   let from = 0;
   for (let i = 0; i < lines.length; i++) {
     const start = text.indexOf(lines[i], from), end = start + lines[i].length;
