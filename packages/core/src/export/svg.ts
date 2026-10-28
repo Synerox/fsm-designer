@@ -393,6 +393,10 @@ export function planDiagram(d: FsmDiagram, opts: PlanOptions = {}): DiagramPlan 
   return { states: d.states.map((s) => ({ state: s, r: R.get(s.id)! })), edges, initialArrow, bounds: bx };
 }
 
+// Characters XML 1.0 does not allow anywhere, even escaped. One pasted into a
+// label would make the whole file fail to parse (and the PNG export, which
+// loads this SVG as an image, fail with it), so they are dropped.
+const XML_ILLEGAL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g;
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const f = (n: number) => (Math.round(n * 10) / 10).toString();
 
@@ -458,5 +462,5 @@ export function renderSvg(d: FsmDiagram, opts: SvgOptions = {}): string {
     ...out,
     `</svg>`,
     "",
-  ].filter((x, i, arr) => x !== "" || i === arr.length - 1).join("\n");
+  ].filter((x, i, arr) => x !== "" || i === arr.length - 1).join("\n").replace(XML_ILLEGAL, "");
 }

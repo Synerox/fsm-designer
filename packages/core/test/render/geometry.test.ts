@@ -3,7 +3,7 @@
 // well-formed whatever the labels contain.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { addState, addTransition, createDiagram, planDiagram } from "../../src/index.ts";
+import { addState, addTransition, createDiagram, planDiagram, renderSvg } from "../../src/index.ts";
 
 type Pt = { x: number; y: number };
 /** Does the segment a-b pass through the label rect (centre + size)? */
@@ -47,4 +47,15 @@ test("an edge between touching or overlapping states still points from A to B", 
   addTransition(d, { from: "B", to: "A", curve: 0 });
   const [ab, ba] = planDiagram(d).edges.map((e) => e.path.match(/-?[\d.]+/g)!.map(Number));
   assert.ok(ab[2] - ab[0] >= 10 && ba[0] - ba[2] >= 10, "both point the right way");
+});
+
+test("control characters pasted into labels do not break the SVG", () => {
+  const d = createDiagram({ name: "m" });
+  d.name = "m\u0007"; // reaches the <title>
+  addState(d, { name: "A", label: "ctrl\u0001\u0007\u001f chars", x: 0, y: 0 });
+  addState(d, { name: "B", x: 200, y: 0 });
+  addTransition(d, { from: "A", to: "B", condition: "a\u000Bb￾" });
+  const svg = renderSvg(d);
+  assert.doesNotMatch(svg, /[\u0000-\u0008\u000B\u000C\u000E-\u001F￾￿]/);
+  assert.ok(svg.includes(">ctrl chars<") && svg.includes(">ab<") && svg.includes("<title>m</title>"));
 });
