@@ -2,7 +2,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { addState, addTransition, asciiText, createDiagram, latexText, parseDiagram, prettyText, renderLatex } from "../../src/index.ts";
-import type { Transition } from "../../src/index.ts";
 
 /** Every `\node[state...] (name) at (x, y)` of the output, by name. */
 function stateNodes(tex: string): Map<string, { x: number; y: number }> {
@@ -38,13 +37,16 @@ test("latex node names stay distinct when ids differ only in punctuation or scri
   assert.match(tex, new RegExp(`\\(${at(10)}\\) edge\\[\\] \\(${at(15)}\\)`));
 });
 
-test("latex reports a transition with non-numeric geometry instead of crashing", () => {
+test("latex draws a transition with non-numeric geometry as a plain line instead of crashing", () => {
   const d = createDiagram({ name: "m" });
   addState(d, { name: "A", x: 0, y: 0, isInitial: true });
   addState(d, { name: "B", x: 200, y: 0 });
   const t = addTransition(d, { from: "A", to: "B" });
-  (t as Transition & { curve: unknown }).curve = "abc"; // as a hand-edited .fsm.json can hold
-  assert.throws(() => renderLatex(d), /A -> B has no valid geometry/);
+  (t as unknown as { curve: unknown }).curve = "abc"; // as a hand-edited .fsm.json can hold
+  // The plan treats a curve that is not a finite number as unset (svg.ts given()).
+  const tex = renderLatex(d);
+  assert.match(tex, /\(s0\) edge\[\] \(s1\)/);
+  assert.doesNotMatch(tex, /NaN/);
 });
 
 test("straight edges both ways keep their ends on the circles in latex, whatever the gap", () => {

@@ -93,12 +93,12 @@ test("a file without coordinates still gets circles that fit its names, and a la
 });
 
 test("a hand-edited file with a null or NaN coordinate opens with every state placed", async () => {
-  // JSON has no NaN; a script writing one gives null. Drawing refuses both, so
-  // opening must place such a state instead of handing it to the canvas.
+  // JSON has no NaN; a script writing one gives null. A null coordinate means
+  // "not placed" (parseDiagram), so opening must place such a state.
   const text = JSON.stringify({ name: "m", states: [
     { id: "s0", name: "A", x: 100, y: 100 },
     { id: "s1", name: "B", x: 300, y: 100 },
-    { id: "s2", name: "C", x: null, y: 200, radius: 0 },
+    { id: "s2", name: "C", x: null, y: 200 },
   ], transitions: [{ id: "t0", from: "s0", to: "s2", condition: "" }] });
   await loadText(text, "hand.fsm.json");
   const st = useEditor.getState().doc.states;
