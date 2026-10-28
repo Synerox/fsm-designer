@@ -47,7 +47,10 @@
 //    the triangle's states slide sideways instead.
 // 4. Finishing, each candidate from scratch (arcs, loop sides and the start
 //    arrow's side an earlier layout or the user left are dropped; the arrow
-//    comes from the left unless blocked). A dense drawing finishes only the 8
+//    comes from the left unless blocked). Every candidate but the hub shapes
+//    with more states above the reset state than below it is also finished
+//    upside down, and kept that way unless that is clearly worse (more
+//    crossings, or a score 25 worse). A dense drawing finishes only the 8
 //    candidates with the fewest crossings and lines through states when
 //    drawn straight. Centres on a 20 px grid; a line that would cross a state
 //    becomes an arc (back edges bow below a row, forward jumps above),
@@ -194,6 +197,36 @@ function forget(d: FsmDiagram) {
   for (const s of d.states) delete s.initialAngle;
 }
 
+/**
+ * Whether more states sit above the reset state than below it: a grid whose
+ * triangles point up from the reset state's row, or a polish move that took
+ * the reset state down (traffic's square drew it at the bottom left, as good
+ * as the grid but for the tie-break), puts the reset state low with the
+ * machine above it (gen14_4, e2e check). A reset state in the middle row is
+ * fine: a diamond or fan from the left (the user's picks p01, p20) reads well.
+ */
+function startLow(d: FsmDiagram, init: string) {
+  const o = d.states.find((s) => s.id === init)!.y!;
+  let above = 0, below = 0;
+  for (const s of d.states) { if (s.y! < o - GRID) above++; else if (s.y! > o + GRID) below++; }
+  return above > below;
+}
+
+/** The drawing upside down, over the same rows (turned twice, it is as it was). */
+function turnOver(d: FsmDiagram) {
+  const ys = d.states.map((s) => s.y!), sum = Math.min(...ys) + Math.max(...ys);
+  for (const s of d.states) s.y = sum - s.y!;
+}
+
+/**
+ * Upside down a finished drawing is not the same drawing (arcs bow below a
+ * row for back edges and above for forward jumps): a turned candidate is kept
+ * unless it has more crossings, lines through states, overlapping labels or
+ * states too close, or scores this much worse (gen14_4 turned costs 8 more).
+ */
+const UPRIGHT_MARGIN = 25;
+const mustFix = (s: LayoutScore) => s.crossings + s.throughStates + s.labelOverlaps + s.tooClose;
+
 /** Positions, arcs, loop sides and start-arrow side from `from` onto `to`, shifted by (dx, dy). */
 function copyLayout(from: FsmDiagram, to: FsmDiagram, dx = 0, dy = 0) {
   const byId = new Map(from.states.map((s) => [s.id, s]));
@@ -235,13 +268,30 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
 
   const triangles = trianglesOf(g);
   const tried: Tried[] = [];
-  // Every candidate is finished from scratch: no arcs or loop sides, the start arrow from the left.
-  const finish = (c: FsmDiagram, sx: number) => {
-    forget(c);
+  // Every candidate is finished from scratch: no arcs or loop sides, the start
+  // arrow from the left. One with the reset state low is finished both ways
+  // round and kept upright unless that is clearly worse (`turn` false: as it
+  // is, for polish moves). Hub shapes are drawn as made: each already puts
+  // the reset state where it wants it, and turned over one would only repeat
+  // another hub's shape.
+  const finishAs = (c: FsmDiagram, sx: number) => {
     clearStartArrow(c, sx);
     clearStartArrow(c, sx, routeEdges(c));
     placeLoops(c);
     return score(c, planDiagram(c, popts), sx);
+  };
+  // Candidates that finished turned over (the repair spreads them as made).
+  const turned = new WeakSet<FsmDiagram>();
+  const finish = (c: FsmDiagram, sx: number, arrangement: string, turn = true) => {
+    forget(c);
+    if (!turn || arrangement.startsWith("hub-") || !startLow(c, g.init)) return finishAs(c, sx);
+    const up = structuredClone(c);
+    turnOver(up);
+    const su = finishAs(up, sx), sl = finishAs(c, sx);
+    if (mustFix(su) > mustFix(sl) || su.total > sl.total + UPRIGHT_MARGIN) return sl;
+    c.states = up.states; c.transitions = up.transitions;
+    turned.add(c);
+    return su;
   };
   // Triangles with two states linked both ways must come out equilateral;
   // the others, and any three in a row, may also stay as placed if that scores better.
@@ -319,7 +369,7 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
     const cost = new Map(drafts.map((t) => [t, straightCost(t.d, lines)]));
     keep = new Set([...drafts].sort((a, b) => cost.get(a)! - cost.get(b)!).slice(0, 8));
   }
-  for (const t of drafts) if (keep.has(t)) tried.push({ ...t, score: finish(t.d, t.sx) });
+  for (const t of drafts) if (keep.has(t)) tried.push({ ...t, score: finish(t.d, t.sx, t.arrangement) });
   tried.sort(byScore);
 
   // Repair and polish add a drawing only if no candidate has its positions already
@@ -338,8 +388,13 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
     for (const k of [1.25, 1.5]) {
       if (!bad(cur.score)) break;
       const c = structuredClone(cand.d);
+      // A turned candidate spreads as it was made, and finishing turns it
+      // over again only if that is not clearly worse: spread, the two ways
+      // round can differ more than unspread (gen17_7's grid: the same score
+      // either way, but 14 crossings spread as made and 17 turned over).
+      if (turned.has(cand.d)) turnOver(c);
       for (const s of c.states) { s.x = Math.round((s.x! * k) / GRID) * GRID; s.y = Math.round((s.y! * k) / GRID) * GRID; }
-      const sc = finish(c, cand.sx * k); // measured in its own (spread) step, like every other candidate
+      const sc = finish(c, cand.sx * k, cand.arrangement); // measured in its own (spread) step, like every other candidate
       if (bad(sc) < bad(cur.score)) cur = { score: sc, arrangement: `${cand.arrangement} (spread)`, d: c, sx: cand.sx * k, sy: cand.sy * k };
     }
     if (cur !== cand) add(cur);
@@ -392,13 +447,21 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
           const c = structuredClone(cur.d);
           const s = c.states.find((x) => x.id === id)!;
           s.x = Math.round(p.x / GRID) * GRID; s.y = Math.round(p.y / GRID) * GRID;
-          const sc = finish(c, cur.sx);
+          const sc = finish(c, cur.sx, cand.arrangement, false);
           if (sc.total < (next ?? cur).score.total - 1e-6) next = { ...cur, score: sc, d: c, arrangement: cand.arrangement.endsWith("(polished)") ? cand.arrangement : `${cand.arrangement} (polished)` };
         }
         if (next) break;
       }
       if (!next) break;
       cur = next;
+    }
+    // Moves are tried the way round the candidate is, and only the polished
+    // drawing is turned over if a move took the reset state low: turning
+    // between moves sends the search elsewhere (gen14_1: 4.8 worse, a
+    // crossing more).
+    if (cur !== cand && startLow(cur.d, g.init)) {
+      const c = structuredClone(cur.d);
+      cur = { ...cur, score: finish(c, cur.sx, cand.arrangement), d: c };
     }
     if (cur !== cand) add(cur);
   }
