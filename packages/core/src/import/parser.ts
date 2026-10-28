@@ -105,6 +105,12 @@ const SKIP_BLOCKS: Record<string, string> = {
   interface: "endinterface", program: "endprogram", class: "endclass", checker: "endchecker",
 };
 
+const PROCEDURAL = new Set(["always", "always_ff", "always_comb", "always_latch", "initial", "final"]);
+const ITEM_START = new Set([
+  ...PROCEDURAL, "assign", "module", "macromodule", "endmodule", "package", "endpackage", "parameter", "localparam",
+  "typedef", "input", "output", "inout", "function", "task", "generate",
+]);
+
 export function parseVerilog(source: string): SourceFile {
   // Only a body that parses as a whole expression keeps its name; anything
   // else is expanded as text where it is used, as a Verilog compiler would.
@@ -331,12 +337,35 @@ class Parser {
         if (!(e instanceof VerilogSyntaxError)) throw e;
         m.skipped.push(e.message);
         this.i = at;
-        this.skipStatement();
+        // A broken always block holds statements of its own: resyncing at the
+        // next `;` would land inside it and read the rest of it as module
+        // items (`instance of else`), so skip to the next module item instead.
+        if (PROCEDURAL.has(this.peek().text)) this.skipToItem(end);
+        else this.skipStatement();
       }
       if (this.i === at) this.i++;
     }
     this.accept(end);
     if (this.accept(":")) this.i++;
+  }
+
+  /** Skip past the current token to the next keyword that starts a module item. */
+  private skipToItem(end: string) {
+    this.i++;
+    while (!this.done()) {
+      const t = this.peek();
+      if (t.kind === "id" && (t.text === end || ITEM_START.has(t.text) || NET_TYPES.has(t.text) || t.text in INT_TYPES)) return;
+      this.i++;
+    }
+  }
+
+  /**
+   * At a keyword that cannot be inside a statement: an unclosed begin or case
+   * ran into the next always block, so the error is reported where it opened.
+   */
+  private atItem() {
+    const t = this.peek();
+    return t.kind === "id" && (PROCEDURAL.has(t.text) || t.text === "endmodule" || t.text === "module" || t.text === "macromodule" || t.text === "endpackage");
   }
 
   private item(m: Module) {
@@ -527,7 +556,7 @@ class Parser {
       const body: Stmt[] = [];
       const end = w === "begin" ? ["end"] : ["join", "join_any", "join_none"];
       while (!end.includes(this.peek().text)) {
-        if (this.done()) throw new VerilogSyntaxError(`"${w}" without "${end[0]}"`, t.line);
+        if (this.done() || this.atItem()) throw new VerilogSyntaxError(`"${w}" without "${end[0]}"`, t.line);
         // Local declarations inside a block.
         if (this.peek().kind === "id" && (NET_TYPES.has(this.peek().text) || this.peek().text in INT_TYPES)) { this.skipStatement(); continue; }
         body.push(this.stmt());
@@ -555,7 +584,7 @@ class Parser {
       this.accept("inside");
       const items: CaseItem[] = [];
       while (!this.accept("endcase")) {
-        if (this.done()) throw new VerilogSyntaxError(`"${w}" without "endcase"`, t.line);
+        if (this.done() || this.atItem()) throw new VerilogSyntaxError(`"${w}" without "endcase"`, t.line);
         if (this.accept("default")) {
           this.accept(":");
           items.push({ labels: null, body: this.stmt() });

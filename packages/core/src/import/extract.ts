@@ -633,7 +633,13 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
     if (!blocks.some((b) => b.seq && b.writes.has(opts.stateVar!))) throw new VerilogImportError(`"${opts.stateVar}" is not a register written in a clocked always block of module ${m.name}`);
     cand = { name: opts.stateVar, score: 0, values: new Set() };
   }
-  if (!cand) throw new VerilogImportError(`No state machine found in module ${m.name}: no register written in a clocked always block takes two or more constant state values`);
+  if (!cand) {
+    // A syntax error drops the always block it is in, which is the likely
+    // reason nothing was found: say where it is rather than only that no FSM is there.
+    const errors = m.skipped.filter((s) => /^line \d+:/.test(s));
+    if (errors.length) throw new VerilogImportError(`${errors[0]}${errors.length > 1 ? ` (and ${errors.length - 1} more syntax error${errors.length > 2 ? "s" : ""})` : ""}; the code there could not be read, so no state machine was found in module ${m.name}`);
+    throw new VerilogImportError(`No state machine found in module ${m.name}: no register written in a clocked always block takes two or more constant state values`);
+  }
   for (const o of cands) if (o !== cand && o.score >= 6 && !opts.stateVar) c.warn(`Register "${o.name}" also looks like a state register; import it with stateVar: "${o.name}"`);
   const R = cand.name;
   const N = cand.next;
