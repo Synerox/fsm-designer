@@ -179,8 +179,12 @@ export async function exportSvg(): Promise<void> {
   await saveFile(svgText(), { suggestedName: `${stem()}.svg`, filters: [{ name: tr("SVG image", "SVG 圖片", "SVG 画像"), extensions: ["svg"] }], mime: "image/svg+xml" });
 }
 
-export async function exportLatex(): Promise<void> {
-  await saveFile(latexText(), { suggestedName: `${stem()}.tex`, filters: [{ name: "LaTeX", extensions: ["tex"] }], mime: "application/x-tex" });
+/**
+ * Returns the name written, or null if cancelled. A published page cannot save
+ * .tex, so there it is the name with .txt added, which the user must be told.
+ */
+export async function exportLatex(): Promise<string | null> {
+  return saveFile(latexText(), { suggestedName: `${stem()}.tex`, filters: [{ name: "LaTeX", extensions: ["tex"] }], mime: "application/x-tex" });
 }
 
 /** Rasterise the exported SVG in the webview, so PNG matches SVG exactly. */

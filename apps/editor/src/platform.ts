@@ -117,6 +117,11 @@ export async function saveFile(data: string | Uint8Array, opts: { path?: string 
   const name = opts.path ? baseName(opts.path) : opts.suggestedName;
   const host = await hostDownloads();
   if (host) return saveViaHost(host, name, data);
+  // A published page whose viewer cannot run `downloads` (not declared, not
+  // granted, or no answer in 10 s): its frame blocks <a download> as well, so
+  // the link below would save nothing while Save marked the diagram saved.
+  // (A plain page in a sandbox without allow-downloads cannot be told apart.)
+  if (onHostPage()) throw new Error(cantSave());
   const blob = new Blob([data as BlobPart], { type: opts.mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -139,12 +144,17 @@ interface HostDownloads {
 
 let downloadsPromise: Promise<HostDownloads | null> | undefined;
 
+const hostClaude = () => (window as { claude?: { use?: (name: string) => Promise<unknown> } }).claude;
+const onHostPage = () => typeof hostClaude()?.use === "function";
+
 function hostDownloads(): Promise<HostDownloads | null> {
-  const claude = (window as { claude?: { use?: (name: string) => Promise<unknown> } }).claude;
+  const claude = hostClaude();
   if (!claude?.use) return Promise.resolve(null);
   downloadsPromise ??= claude.use("downloads").then((d) => (d as HostDownloads | null) ?? null, () => null);
   return downloadsPromise;
 }
+
+const cantSave = () => tr("This page can't save files.", "這個頁面無法儲存檔案。", "このページはファイルを保存できません。");
 
 async function saveViaHost(host: HostDownloads, filename: string, data: string | Uint8Array): Promise<string | null> {
   const attempt = async (name: string) => { await host.save({ filename: name, data }); return name; };
@@ -155,17 +165,31 @@ async function saveViaHost(host: HostDownloads, filename: string, data: string |
     if (code === "declined") return null;
     // Only common extensions are allowed (e.g. not .tex): save as plain text instead.
     if (code === "rejected_extension") {
-      try { return await attempt(`${filename}.txt`); } catch (e2) { if ((e2 as { code?: string }).code === "declined") return null; throw saveError(e2); }
+      const txt = `${filename}.txt`;
+      try { return await attempt(txt); } catch (e2) { if ((e2 as { code?: string }).code === "declined") return null; throw saveError(e2, txt); }
     }
-    throw saveError(e);
+    throw saveError(e, filename);
   }
 }
 
-function saveError(e: unknown): Error {
-  const code = (e as { code?: string }).code;
-  return new Error(code === "rate_limited"
-    ? tr("The previous save dialog is still open; answer it and try again.", "上一個儲存視窗還開著，請先回應它再試一次。")
-    : tr(`This page can't save files right now (${code ?? String(e)}).`, `這個頁面目前無法儲存檔案（${code ?? String(e)}）。`, `このページは現在ファイルを保存できません（${code ?? String(e)}）。`));
+/** The host's error codes (see its downloads contract) as sentences; the raw code is kept only for the ones that mean a bug here. */
+function saveError(e: unknown, filename: string): Error {
+  const code = (e as { code?: unknown } | null)?.code;
+  const ext = filename.slice(filename.lastIndexOf(".") + 1);
+  switch (code) {
+    case "rate_limited":
+      return new Error(tr("The previous save dialog is still open; answer it and try again.", "上一個儲存視窗還開著，請先回應它再試一次。"));
+    case "extension_not_enabled":
+      return new Error(tr(`This page can't save .${ext} files.`, `這個頁面無法儲存 .${ext} 檔案。`, `このページでは .${ext} ファイルを保存できません。`));
+    case "too_large":
+      return new Error(tr("The file is too large to save from this page.", "檔案太大，無法從這個頁面儲存。", "ファイルが大きすぎるため、このページから保存できません。"));
+    case "bad_request": case "transform_error": case "request_unknown": case "not_signed": case undefined: {
+      const detail = typeof code === "string" ? code : String(e);
+      return new Error(tr(`This page can't save files right now (${detail}).`, `這個頁面目前無法儲存檔案（${detail}）。`, `このページは現在ファイルを保存できません（${detail}）。`));
+    }
+    default: // unavailable, not_granted, capability_disabled/removed, and codes added later
+      return new Error(cantSave());
+  }
 }
 
 let confirmCount = 0; // gives each confirm's text a unique id for aria-labelledby

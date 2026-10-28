@@ -322,7 +322,11 @@ export function App() {
           </span>
         </div>
       </footer>
-      {latex !== null && <LatexDialog latex={latex} onClose={() => setLatex(null)} onSave={run(exportLatex)} setNotice={setNotice} />}
+      {latex !== null && <LatexDialog latex={latex} onClose={() => setLatex(null)} onSave={run(async () => {
+        const name = await exportLatex();
+        // A published page saves .tex only as text (see saveViaHost).
+        if (name && !isDesktop && name.endsWith(".tex.txt")) setNotice(tr(`Saved as ${name}: this page can't save .tex files, so rename it to .tex`, `已存成 ${name}：這個頁面無法儲存 .tex 檔，請把副檔名改回 .tex`, `${name} として保存しました。このページは .tex を保存できないため、拡張子を .tex に変更してください`));
+      })} setNotice={setNotice} />}
       {importing && (
         <VerilogImportDialog
           onClose={() => setImporting(false)}
