@@ -75,6 +75,12 @@ interface Path {
   nb: Map<string, Expr>; // values registered at the clock edge
   subst: Map<string, Expr>; // input values implied by assumptions
   assume: Map<string, Assumption>;
+  /**
+   * Values each multi-bit input can still take under the path's assumptions
+   * about it (sig: those assumptions, printed), so the next assumption only
+   * filters these instead of re-enumerating every value against all of them.
+   */
+  dom?: Map<string, { sig: string[]; vals: number[] }>;
 }
 
 interface Run {
@@ -561,7 +567,7 @@ class Engine {
 }
 
 function clonePath(p: Path): Path {
-  return { env: new Map(p.env), nb: new Map(p.nb), subst: new Map(p.subst), assume: new Map(p.assume) };
+  return { env: new Map(p.env), nb: new Map(p.nb), subst: new Map(p.subst), assume: new Map(p.assume), dom: new Map(p.dom) };
 }
 
 /** The first sub-expression a condition depends on that is not itself boolean structure. */
@@ -577,7 +583,12 @@ function pickAtom(e: Expr, ctx: EvalCtx): Expr {
   return e;
 }
 
-/** Is there an input assignment that satisfies every assumption of the path? Checked per signal. */
+/**
+ * Is there an input assignment that satisfies every assumption of the path?
+ * Checked per signal, by trying its values (up to 12 bits). A single
+ * assumption is checked too: cnt > 4'd15 on a 4-bit cnt can never hold, and a
+ * branch the code can never take must not become a transition.
+ */
 function feasible(p: Path, c: Ctx, ctx: EvalCtx): boolean {
   const groups = new Map<string, Assumption[]>();
   for (const a of p.assume.values()) {
@@ -590,16 +601,54 @@ function feasible(p: Path, c: Ctx, ctx: EvalCtx): boolean {
     groups.set(ids[0], g);
   }
   for (const [id, as] of groups) {
-    const w = c.widths.get(id) ?? 1;
-    if (w > 12 || as.length < 2) continue;
-    let ok = false;
-    for (let x = 0; x < 1 << w && !ok; x++) {
-      const vctx: EvalCtx = { lookup: (n) => (n === id ? num(x, w) : undefined), width: ctx.width };
-      ok = as.every((a) => { const r = simplify(a.atom, vctx); return isConst(r) && (r.v !== 0n) === a.val; });
+    const w = c.widths.get(id);
+    if (w === undefined || w > 12) continue; // (an undeclared name's width is unknown)
+    const tests = as.map((a) => valueTest(a.atom, id, w, ctx));
+    const holds = (x: number, from: number) => {
+      for (let i = from; i < as.length; i++) if (tests[i](x) !== as[i].val) return false;
+      return true;
+    };
+    const sig = as.map((a) => `${a.val ? "" : "!"}${printExpr(a.atom)}`);
+    const known = p.dom?.get(id);
+    let vals: number[];
+    if (known && known.sig.length <= sig.length && known.sig.every((s, i) => s === sig[i])) {
+      // The usual case on a long else-if chain: one new assumption on top of
+      // the parent path's, so only the values still possible are tried.
+      vals = known.vals.filter((x) => holds(x, known.sig.length));
+    } else if (!p.dom || as.length === 1) {
+      // Just look for one value (no list to keep for later assumptions).
+      let ok = false;
+      for (let x = 0; x < 1 << w && !ok; x++) ok = holds(x, 0);
+      if (!ok) return false;
+      continue;
+    } else {
+      vals = [];
+      for (let x = 0; x < 1 << w; x++) if (holds(x, 0)) vals.push(x);
     }
-    if (!ok) return false;
+    if (!vals.length) return false;
+    p.dom!.set(id, { sig, vals });
   }
   return true;
+}
+
+/** The truth of `atom` (which reads only `id`) for each value of id. */
+function valueTest(atom: Expr, id: string, w: number, ctx: EvalCtx): (x: number) => boolean | undefined {
+  // id == 5, id < 4'd9 ...: compared directly, the common case and the hot loop.
+  if (atom.k === "bin" && atom.a.k === "id" && isConst(atom.b) && atom.b.v <= BigInt(Number.MAX_SAFE_INTEGER)) {
+    const k = Number(atom.b.v);
+    switch (atom.op) {
+      case "==": case "===": return (x) => x === k;
+      case "!=": case "!==": return (x) => x !== k;
+      case "<": return (x) => x < k;
+      case "<=": return (x) => x <= k;
+      case ">": return (x) => x > k;
+      case ">=": return (x) => x >= k;
+    }
+  }
+  return (x) => {
+    const r = simplify(atom, { lookup: (n) => (n === id ? num(x, w) : undefined), width: ctx.width });
+    return isConst(r) ? r.v !== 0n : undefined;
+  };
 }
 
 // ---- output values ------------------------------------------------------------
@@ -732,7 +781,7 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
   };
   const fixedBase = new Map<string, Expr>();
   const limit = opts.maxPaths ?? 4096;
-  const empty = (): Path => ({ env: new Map(), nb: new Map(), subst: new Map(), assume: new Map() });
+  const empty = (): Path => ({ env: new Map(), nb: new Map(), subst: new Map(), assume: new Map(), dom: new Map() });
 
   // Reset state: run the state register's block with reset asserted.
   let resetValue: bigint | undefined;
@@ -922,7 +971,9 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
       groups.set(key, g);
     }
     const conds = conditions([...groups.values()].map((g) => g.runs), runs, c, internal);
-    const list = [...groups.values()].map((g, i) => ({ to: g.next, condition: conds[i], outputs: g.outs }));
+    // (A group no input value can reach has no condition: leave it out rather
+    // than draw it as an unconditional transition.)
+    const list = [...groups.values()].flatMap((g, i) => (conds[i] === undefined ? [] : [{ to: g.next, condition: conds[i]!, outputs: g.outs }]));
     transitionsOf.set(k, list);
   }
 
@@ -1011,12 +1062,16 @@ function tryAdd(d: FsmDiagram, kind: "inputs" | "outputs", name: string, width: 
 /**
  * One condition string per group. Each group is a set of runs; the runs of a
  * state partition its input space, so the conditions are mutually exclusive.
+ * undefined for a group that no input value reaches (all its runs turn out
+ * impossible once every assumption is checked together): its condition would
+ * be the empty one, which means "always".
  */
-function conditions(groups: Run[][], all: Run[], c: Ctx, internal: Set<string>): string[] {
+function conditions(groups: Run[][], all: Run[], c: Ctx, internal: Set<string>): Array<string | undefined> {
   if (groups.length === 1) return [""];
   const atoms: Assumption["atom"][] = [];
   const keys: string[] = [];
-  for (const r of all) for (const [k, a] of r.assume) if (!keys.includes(k)) { keys.push(k); atoms.push(a.atom); }
+  const index = new Map<string, number>();
+  for (const r of all) for (const [k, a] of r.assume) if (!index.has(k)) { index.set(k, keys.length); keys.push(k); atoms.push(a.atom); }
   for (const a of atoms) for (const n of freeIds(a)) if (!c.params.has(n)) internal.add(n);
   const lit = (i: number, val: boolean) => {
     if (val) return printExpr(atoms[i]);
@@ -1042,7 +1097,9 @@ function conditions(groups: Run[][], all: Run[], c: Ctx, internal: Set<string>):
       if (gi < 0) dc.push(m);
       else on[gi].push(m);
     }
+    const reached = on.filter((o) => o.length).length;
     return groups.map((_, gi) => {
+      if (!on[gi].length && reached) return undefined;
       const others = on.some((o, j) => j !== gi && o.length);
       if (!others) return "";
       const cubes = minimize(k, on[gi], dc);
@@ -1053,6 +1110,23 @@ function conditions(groups: Run[][], all: Run[], c: Ctx, internal: Set<string>):
       }));
     });
   }
-  // Too many atoms to minimise exactly: list the runs' cubes.
-  return groups.map((g) => fmt(g.map((r) => [...r.assume.keys()].map((key): [number, boolean] => [keys.indexOf(key), r.assume.get(key)!.val]))));
+  // Too many atoms to minimise exactly: list the runs' cubes, without the
+  // literals that an equality in the same cube already decides (op == 8'd4
+  // makes op != 8'd0 ... op != 8'd3 redundant, and a case with many labels
+  // would otherwise repeat every earlier label in every later one).
+  const ctx: EvalCtx = { lookup: () => undefined, width: (n) => c.widths.get(n) };
+  return groups.map((g) => fmt(g.map((r) => {
+    const cube = [...r.assume].map(([key, a]): [number, boolean] => [index.get(key)!, a.val]);
+    const eq = new Map<string, { at: number; value: Num }>();
+    for (const [i, v] of cube) { const a = atoms[i]; if (v && a.k === "bin" && (a.op === "==" || a.op === "===") && a.a.k === "id" && isConst(a.b)) eq.set(a.a.name, { at: i, value: a.b }); }
+    if (!eq.size) return cube;
+    return cube.filter(([i, v]) => {
+      const ids = [...freeIds(atoms[i])];
+      const known = ids.length === 1 ? eq.get(ids[0]) : undefined;
+      if (!known || known.at === i) return true;
+      const w = c.widths.get(ids[0]) ?? known.value.w ?? 32;
+      const r = simplify(atoms[i], { ...ctx, lookup: (n) => (n === ids[0] ? num(known.value.v, w) : undefined) });
+      return !(isConst(r) && (r.v !== 0n) === v);
+    });
+  })));
 }
