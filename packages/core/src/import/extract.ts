@@ -12,8 +12,8 @@
 //     on an unknown signal forks the run; every finished run is one cube of
 //     input conditions with a next state and output values.
 //  4. Outputs that are the same in every run of a state depend on the state
-//     only (Moore); outputs that vary with inputs are Mealy and go on the
-//     transitions. Registered outputs that always take the same value when
+//     only (Moore); outputs that vary with inputs, or whose value reads an
+//     input (q = data), are Mealy and go on the transitions. Registered outputs that always take the same value when
 //     entering a state are that state's Moore outputs.
 //  5. Runs are grouped by (next state, Mealy outputs) and each group's
 //     condition is minimised with Quine-McCluskey.
@@ -1013,6 +1013,10 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
   // Registered outputs that take an input's value at the clock edge (dout <=
   // din): the same text on every entry into a state is not the same value.
   const regFromInputs = new Set<string>();
+  // Combinational outputs whose value reads an input (q = data): they follow
+  // the inputs, so they are Mealy even in a state with a single run.
+  const combFromInputs = new Set<string>();
+  const readsInput = (e: Expr) => [...freeIds(e)].some((n) => m.decls.get(n)?.dir === "input");
   for (let i = 0; i < order.length; i++) {
     if (order.length > 256) throw new VerilogImportError(`More than 256 states reached from "${R}"; is it really a state register?`);
     const s = order[i];
@@ -1061,13 +1065,19 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
       for (const q of forks) {
         const qctx = eng.ctx(q);
         const combVals = new Map<string, OutputValue>();
-        for (const o of combOut) { const v = q.env.get(o); if (v) combVals.set(o, outputValue(simplify(v, qctx), c.widths.get(o) ?? 1)); }
+        for (const o of combOut) {
+          const v = q.env.get(o);
+          if (!v) continue;
+          const sv = simplify(v, qctx);
+          combVals.set(o, outputValue(sv, c.widths.get(o) ?? 1));
+          if (!isConst(sv) && readsInput(sv)) combFromInputs.add(o);
+        }
         const regVals = new Map<string, OutputValue | undefined>();
         for (const o of regOut) {
           const v = q.nb.get(o);
           const sv = v && simplify(v, qctx);
           regVals.set(o, sv ? outputValue(sv, c.widths.get(o) ?? 1) : undefined);
-          if (sv && !isConst(sv) && [...freeIds(sv)].some((n) => m.decls.get(n)?.dir === "input")) regFromInputs.add(o);
+          if (sv && !isConst(sv) && readsInput(sv)) regFromInputs.add(o);
         }
         runs.push({ assume: q.assume, next, comb: combVals, reg: regVals });
         enqueue(next);
@@ -1098,7 +1108,7 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
     mooreValue.set(state, mm);
   };
   for (const o of combOut) {
-    let same = true;
+    let same = !combFromInputs.has(o);
     for (const runs of runsByState.values()) {
       const vals = runs.filter((r) => r.comb.has(o)).map((r) => r.comb.get(o));
       if (vals.some((v) => !sameValue(v, vals[0]))) { same = false; break; }

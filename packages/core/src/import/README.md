@@ -85,7 +85,9 @@ files with several FSMs (the editor shows it as a drop-down).
    run of a state depends on the state only: it is drawn in the state (Moore).
    One that varies with the inputs is drawn on the transitions as
    `condition / output=value` (Mealy); the machine is Mealy if it has any.
-   A value computed from internal data (`tx = shreg[0]`) is shown as written.
+   So is one whose value reads an input (`q = data`), even in a state with a
+   single run. A value computed from internal data (`tx = shreg[0]`) is shown
+   as written.
    A registered output (written in a clocked block, e.g. a one-block FSM) that
    always takes the same value when entering a state is that state's Moore
    output; otherwise it goes on the transitions, with a warning. One that

@@ -2,7 +2,7 @@
 // them (found by differential fuzzing against a Verilog-accurate simulator).
 // A multi-bit value tested as a condition is not 1, an unsized literal is 32
 // bits, + - ~ << work at the width of their context, an assignment keeps the
-// low bits.
+// low bits, and an output that copies an input is Mealy.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { importVerilog } from "../../src/import/index.ts";
@@ -91,6 +91,13 @@ test("a 1-bit output assigned a wider value keeps its bit 0", () => {
   assert.deepEqual(edges(c.diagram).filter((e) => e.startsWith("S0->")), ["S0->S1: en[2] / z=1", "S0->S1: !en[2] / z=0"]);
   const d = fsm("input [3:0] a, output reg z", "begin z = a >> 1; next = S1; end", "z = 0;");
   assert.deepEqual(edges(d.diagram).filter((e) => e.startsWith("S0->")), ["S0->S1: a[1] / z=1", "S0->S1: !a[1] / z=0"]);
+});
+
+test("an output that copies an input is Mealy also in a state with a single path", () => {
+  const r = fsm("input [3:0] data, output reg [3:0] q", "begin q = data; next = S1; end", "q = 0;");
+  assert.equal(r.machine, "mealy");
+  assert.deepEqual(r.mealyOutputs, ["q"]);
+  assert.deepEqual(edges(r.diagram), ["S0->S1:  / q=data", "S1->S0:  / q=0"]);
 });
 
 test("the test simulator evaluates inputs at their declared widths", () => {
