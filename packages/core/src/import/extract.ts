@@ -329,9 +329,19 @@ interface ResetInfo {
   async: boolean;
 }
 
-function firstIf(s: Stmt): Extract<Stmt, { k: "if" }> | undefined {
+/**
+ * The if a reset would be in: the block's first if, past statements that do
+ * not touch the state register (cnt <= cnt + 1; t = a & b; before the reset).
+ */
+function firstIf(s: Stmt, stateVar: string): Extract<Stmt, { k: "if" }> | undefined {
   if (s.k === "if") return s;
-  if (s.k === "block") for (const b of s.body) { if (b.k === "if") return b; if (b.k === "block") { const r = firstIf(b); if (r) return r; } else if (b.k !== "skip") return undefined; }
+  if (s.k === "block") {
+    for (const b of s.body) {
+      if (b.k === "if") return b;
+      if (b.k === "block") { const r = firstIf(b, stateVar); if (r) return r; }
+      else if (b.k !== "skip" && !(b.k === "assign" && !lhsBase(b.lhs).includes(stateVar))) return undefined;
+    }
+  }
   return undefined;
 }
 
@@ -348,7 +358,7 @@ function resetLiteral(c: Expr): { name: string; activeLow: boolean } | undefined
 function findReset(c: Ctx, stateBlocks: Block[], stateVar: string): { reset?: ResetInfo; clock: string } {
   const b = stateBlocks[0];
   const edges = b.always?.sens.filter((s) => s.edge) ?? [];
-  const ifs = firstIf(b.stmt);
+  const ifs = firstIf(b.stmt, stateVar);
   let lit = ifs ? resetLiteral(ifs.c) : undefined;
   // state <= !rst_n ? IDLE : next;
   const tern = assignsTo(b.stmt, stateVar).map((a) => a.rhs).find((e) => e.k === "tern" && resetLiteral(e.c));
@@ -366,8 +376,13 @@ function findReset(c: Ctx, stateBlocks: Block[], stateVar: string): { reset?: Re
     if (edge && edges.length > 1) {
       reset = { name: lit.name, activeLow: lit.activeLow, async: true };
     } else if (!edge && c.m.decls.get(lit.name)?.dir !== "output") {
-      const setsState = assignsTo(ifs!.t, stateVar).length > 0;
-      if (RESET_NAME.test(lit.name) || (setsState && ifs!.e)) reset = { name: lit.name, activeLow: lit.activeLow, async: false };
+      // Without a reset-like name, only an if that sets the state to a
+      // constant (if (go) state <= S1; else ...) counts as a synchronous
+      // reset: if (en) state <= next; else state <= state; is an enable.
+      const pctx: EvalCtx = { lookup: (n) => c.params.get(n), width: (n) => c.widths.get(n) };
+      const sets = assignsTo(ifs!.t, stateVar);
+      const setsConst = sets.length > 0 && sets.every((a) => isConst(simplify(a.rhs, pctx)));
+      if (RESET_NAME.test(lit.name) || (setsConst && ifs!.e)) reset = { name: lit.name, activeLow: lit.activeLow, async: false };
     }
   }
   const clockEdge = edges.find((e) => e.sig !== reset?.name && e.edge === "posedge") ?? edges.find((e) => e.sig !== reset?.name);

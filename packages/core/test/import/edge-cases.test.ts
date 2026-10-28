@@ -114,3 +114,40 @@ endmodule`;
   assert.equal(fold("4'b1000 < 4'sd0"), 0n);
   assert.equal(fold("$signed(4'b1000) < 0"), 1n);
 });
+
+test("an enable in the first if is not taken for a synchronous reset", () => {
+  const r = importVerilog(`
+module m7(input clk, input en, input a, output reg y);
+  localparam S0 = 0, S1 = 1; reg s = S0, n;
+  always @(posedge clk) if (en) s <= n; else s <= s;
+  always @* begin n = s; case (s) S0: if (a) n = S1; S1: if (!a) n = S0; endcase end
+  always @* y = (s == S1);
+endmodule`);
+  assert.notEqual(r.diagram.reset.name, "en");
+  assert.deepEqual(r.diagram.inputs.map((s) => s.name), ["en", "a"]);
+  assert.ok(edges(r.diagram).includes("S0->S1: a && en"), edges(r.diagram).join("\n"));
+  // A constant preset without a reset-like name still is one.
+  const g = importVerilog(`
+module g(input clk, input go, input a, output y);
+  localparam S0 = 0, S1 = 1; reg s, n;
+  always @(posedge clk) if (go) s <= S1; else s <= n;
+  always @* begin n = s; case (s) S0: if (a) n = S1; S1: n = S0; endcase end
+  assign y = s;
+endmodule`);
+  assert.deepEqual(g.diagram.reset, { name: "go", activeLow: false, async: false });
+});
+
+test("the reset is found past statements before it in the clocked block", () => {
+  const r = importVerilog(`
+module m3(input clk, input rst, input a, output reg y);
+  localparam S0 = 0, S1 = 1; reg s; reg [3:0] cnt;
+  always @(posedge clk) begin
+    cnt <= cnt + 1;
+    if (rst) s <= S0; else case (s) S0: if (a) s <= S1; S1: if (!a) s <= S0; endcase
+  end
+  always @* y = (s == S1);
+endmodule`);
+  assert.deepEqual(r.diagram.reset, { name: "rst", activeLow: false, async: false });
+  assert.deepEqual(r.diagram.inputs.map((s) => s.name), ["a"]);
+  assert.deepEqual(r.warnings, []);
+});
