@@ -68,15 +68,21 @@ function edgeLines(d: FsmDiagram, ts: Transition[], opts: PlanOptions, hidden: b
   // checked (priority, then file order), as outgoing() evaluates them.
   const order = outgoing(d, ts[0].from);
   const checked = [...ts].sort((a, b) => order.indexOf(a) - order.indexOf(b));
-  // Wrap the condition and the outputs separately: a condition can hold a
-  // division (" / "), which re-splitting the joined label would take for the
-  // outputs separator.
-  return checked.flatMap((t) => {
-    const { cond, outs } = labelParts(d, t, opts);
-    const text = joinLabel(cond, outs);
-    if (text.length <= WRAP_CHARS) return text ? [text] : [];
-    return [...wrapCondition(cond, WRAP_CHARS), ...(outs ? [`/ ${outs}`] : [])];
-  });
+  return checked.flatMap((t) => transitionLines(d, t, opts));
+}
+
+/**
+ * The lines one transition's label is drawn as (none when it has no text).
+ * The condition and the outputs are wrapped separately: a condition can hold
+ * a division (" / "), which re-splitting the joined label with labelLines()
+ * would take for the outputs separator. Anything that must line up with the
+ * drawn lines (the editor's line owners and text cursor) uses this.
+ */
+export function transitionLines(d: FsmDiagram, t: Transition, opts: PlanOptions = {}): string[] {
+  const { cond, outs } = labelParts(d, t, opts);
+  const text = joinLabel(cond, outs);
+  if (text.length <= WRAP_CHARS) return text ? [text] : [];
+  return [...wrapCondition(cond, WRAP_CHARS), ...(outs ? [`/ ${outs}`] : [])];
 }
 
 function labelParts(d: FsmDiagram, t: Transition, opts: PlanOptions): { cond: string; outs: string } {
