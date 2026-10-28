@@ -3,7 +3,8 @@
 // renderer later. Diagrams come from hand-written and agent-written JSON too.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { addState, addTransition, createDiagram, describe, FsmError, parseDiagram, renderSvg, updateState, updateTransition } from "../../src/index.ts";
+import { addState, addTransition, createDiagram, describe, FsmError, isUnconditional, parseDiagram, renderSvg, updateState, updateTransition, validate } from "../../src/index.ts";
+import type { Transition } from "../../src/index.ts";
 
 const base = { version: 1, name: "m", type: "moore", inputs: ["a"], outputs: ["z"] };
 const parse = (extra: object) => parseDiagram({ ...base, ...extra });
@@ -126,4 +127,13 @@ test("describe shows labels and prints booleans as 1/0 like the drawing", () => 
   const text = describe(d);
   assert.match(text, /s0 A label "S₀" \[initial\] outputs: z=1/);
   assert.match(text, /s1 B label ""/);
+});
+
+test("isUnconditional knows every spelling of a literal 1", () => {
+  const u = (condition: string) => isUnconditional({ condition } as Transition);
+  for (const c of ["", "1", "1'b1", " 1 ' b 1 ", "1'd1", "'b1", "2'b01", "4'h1", "1'sb1", "(1)", "((1'b1))", "01"]) assert.ok(u(c), c);
+  for (const c of ["0", "1'b0", "a", "2'b10", "11", "1'bx", "(1)|(a)", "!1"]) assert.ok(!u(c), c);
+  // So two always-taken transitions out of one state are an error.
+  const d = parse({ states: [{ name: "A" }, { name: "B" }], transitions: [{ from: "A", to: "B", condition: "1'b1" }, { from: "A", to: "A", condition: "1'd1" }] });
+  assert.ok(validate(d).some((i) => i.level === "error" && /2 unconditional transitions/.test(i.message)));
 });

@@ -373,9 +373,14 @@ export function outgoing(d: FsmDiagram, stateId: string): Transition[] {
     .map(({ t }) => t);
 }
 
+/**
+ * Whether a transition is always taken: no condition, or a literal 1 in any
+ * Verilog spelling (1, 1'b1, 1'd1, 'b1, 2'b01, 4'h1, (1)).
+ */
 export function isUnconditional(t: Transition): boolean {
-  const c = t.condition.replace(/\s+/g, "");
-  return c === "" || c === "1" || c === "1'b1";
+  let c = t.condition.replace(/\s+/g, "");
+  while (c.startsWith("(") && c.endsWith(")")) c = c.slice(1, -1);
+  return c === "" || /^(0*1|\d*'[sS]?([bBoOdDhH])0*1)$/.test(c);
 }
 
 /** Runs one entry's add, naming the entry (e.g. "states[2]") in any error it throws. */
