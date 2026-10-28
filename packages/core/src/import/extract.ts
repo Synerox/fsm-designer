@@ -744,8 +744,16 @@ function feasible(p: Path, c: Ctx, ctx: EvalCtx): boolean {
     const w = c.widths.get(id);
     if (w === undefined || w > 12) continue; // (an undeclared name's width is unknown)
     const tests = as.map((a) => valueTest(a.atom, id, w, c.signed.has(id), ctx));
+    // An atom that does not fold to a constant even with id known (par(d),
+    // $onehot(d), d === 4'bxx01) cannot be decided here: such a signal is
+    // left alone (counted as feasible, nothing cached), never pruned.
+    let undecided = false;
     const holds = (x: number, from: number) => {
-      for (let i = from; i < as.length; i++) if (tests[i](x) !== as[i].val) return false;
+      for (let i = from; i < as.length; i++) {
+        const r = tests[i](x);
+        if (r === undefined) { undecided = true; return true; }
+        if (r !== as[i].val) return false;
+      }
       return true;
     };
     const sig = as.map((a) => `${a.val ? "" : "!"}${printExpr(a.atom)}`);
@@ -759,12 +767,13 @@ function feasible(p: Path, c: Ctx, ctx: EvalCtx): boolean {
       // Just look for one value (no list to keep for later assumptions).
       let ok = false;
       for (let x = 0; x < 1 << w && !ok; x++) ok = holds(x, 0);
-      if (!ok) return false;
+      if (!ok && !undecided) return false;
       continue;
     } else {
       vals = [];
-      for (let x = 0; x < 1 << w; x++) if (holds(x, 0)) vals.push(x);
+      for (let x = 0; x < 1 << w && !undecided; x++) if (holds(x, 0)) vals.push(x);
     }
+    if (undecided) { p.dom?.delete(id); continue; }
     if (!vals.length) return false;
     p.dom!.set(id, { sig, vals });
   }

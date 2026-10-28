@@ -60,7 +60,9 @@ files with several FSMs (the editor shows it as a drop-down).
    over. An `if`/`case`/`?:` on a signal that is still unknown
    splits the run in two (one per truth value of the smallest sub-condition),
    and impossible combinations (`sel == 1` and `sel == 2`, or `cnt > 4'd15`
-   on a 4-bit `cnt`) are pruned by checking each signal's values; signed
+   on a 4-bit `cnt`) are pruned by checking each signal's values (a
+   condition those values cannot decide, such as `$onehot(d)` or a
+   compare with x bits, is never pruned); signed
    signals, `'s` literals and `$signed()` compare as two's complement, as in
    Verilog. Every finished run is a set of input
    conditions with a next state and output values. New states found this way

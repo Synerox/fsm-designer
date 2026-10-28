@@ -31,6 +31,34 @@ endmodule`);
   assert.deepEqual(edges(r.diagram).filter((e) => e.startsWith("S0->")), ["S0->S1: cnt > 4'd3", "S0->S0: cnt <= 4'd3"]);
 });
 
+test("a condition that cannot be decided from one input's values (a function, x bits) keeps both branches", () => {
+  const r = importVerilog(`
+module f(input clk, input rst, input [3:0] d, output reg y);
+  localparam S0 = 2'd0, S1 = 2'd1, S2 = 2'd2;
+  reg [1:0] state, next;
+  function par; input [3:0] x; par = ^x; endfunction
+  always @(posedge clk) if (rst) state <= S0; else state <= next;
+  always @* begin
+    next = state; y = 0;
+    case (state)
+      S0: if (par(d)) next = S1;
+      S1: begin y = 1; if ($onehot(d)) next = S2; end
+      S2: if (d === 4'bxx01) next = S0; else if (d > 4'd3) next = S1;
+    endcase
+  end
+endmodule`);
+  assert.deepEqual(edges(r.diagram), [
+    "S0->S1: par(d)",
+    "S0->S0: !par(d)",
+    "S1->S2: $onehot(d)",
+    "S1->S1: !$onehot(d)",
+    "S2->S0: d === 4'bxx01",
+    "S2->S1: d !== 4'bxx01 && d > 4'd3",
+    "S2->S2: d !== 4'bxx01 && d <= 4'd3",
+  ]);
+  assert.deepEqual(stateOutputs(r.diagram), { S0: { y: 0 }, S1: { y: 1 }, S2: { y: 0 } });
+});
+
 test("a case with many labels on one input lists each label once, not every earlier one again", () => {
   const labels = Array.from({ length: 11 }, (_, i) => `      8'd${i}: nx = ${["EXEC", "MEM", "HALT", "FETCH"][i % 4]};`).join("\n");
   const r = importVerilog(`
