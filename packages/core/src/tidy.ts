@@ -14,8 +14,9 @@
 //      annealing on a cost kept up to date move by move, single states and
 //      whole rows or columns at a time, then settled move by move, near
 //      cells only when trying every cell would cost much more than annealing;
-//      of a grid and the same grid turned over its diagonal, the one whose
-//      flow leaves the reset state to the right);
+//      turned upside down when more states sit above the reset state than
+//      below it; of a grid and the same grid turned over its diagonal, the one
+//      whose flow leaves the reset state to the right);
 //    - layers, left to right and top to bottom (Sugiyama style): loops set
 //      aside, each state one layer past its furthest predecessor, the reset
 //      state in the first layer, each layer ordered to reduce crossings and
@@ -47,7 +48,8 @@
 //    the triangle's states slide sideways instead.
 // 4. Finishing, each candidate from scratch (arcs, loop sides and the start
 //    arrow's side an earlier layout or the user left are dropped; the arrow
-//    comes from the left unless blocked). A dense drawing finishes only the 8
+//    comes from the left unless blocked; but for hub shapes, a drawing with
+//    more states above the reset state than below it is turned upside down). A dense drawing finishes only the 8
 //    candidates with the fewest crossings and lines through states when
 //    drawn straight. Centres on a 20 px grid; a line that would cross a state
 //    becomes an arc (back edges bow below a row, forward jumps above),
@@ -194,6 +196,24 @@ function forget(d: FsmDiagram) {
   for (const s of d.states) delete s.initialAngle;
 }
 
+/**
+ * Turn the drawing upside down when more states sit above the reset state
+ * than below it. The lines are the same, mirrored, but the reading starts at
+ * the top: a grid whose triangles point up from the reset state's row, or a
+ * polish move that took the reset state down (traffic's square drew it at the
+ * bottom left, as good as the grid but for the tie-break), would otherwise
+ * put the reset state low with the machine above it (gen14_4, e2e check).
+ * A reset state in the middle row stays: a diamond or fan from the left (the
+ * user's picks p01, p20) reads well. Applied to every candidate as it is
+ * finished, so the score never has to choose between the two.
+ */
+function upright(d: FsmDiagram, init: string) {
+  const o = d.states.find((s) => s.id === init)!.y!;
+  let above = 0, below = 0;
+  for (const s of d.states) { if (s.y! < o - GRID) above++; else if (s.y! > o + GRID) below++; }
+  if (above > below) for (const s of d.states) s.y = -s.y!;
+}
+
 /** Positions, arcs, loop sides and start-arrow side from `from` onto `to`, shifted by (dx, dy). */
 function copyLayout(from: FsmDiagram, to: FsmDiagram, dx = 0, dy = 0) {
   const byId = new Map(from.states.map((s) => [s.id, s]));
@@ -235,9 +255,13 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
 
   const triangles = trianglesOf(g);
   const tried: Tried[] = [];
-  // Every candidate is finished from scratch: no arcs or loop sides, the start arrow from the left.
-  const finish = (c: FsmDiagram, sx: number) => {
+  // Every candidate is finished from scratch: no arcs or loop sides, the start
+  // arrow from the left, the reset state not low down (hub shapes are drawn as
+  // made: each already puts the reset state where it wants it, and turned over
+  // one would only repeat another hub's shape).
+  const finish = (c: FsmDiagram, sx: number, arrangement: string) => {
     forget(c);
+    if (!arrangement.startsWith("hub-")) upright(c, g.init);
     clearStartArrow(c, sx);
     clearStartArrow(c, sx, routeEdges(c));
     placeLoops(c);
@@ -319,7 +343,7 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
     const cost = new Map(drafts.map((t) => [t, straightCost(t.d, lines)]));
     keep = new Set([...drafts].sort((a, b) => cost.get(a)! - cost.get(b)!).slice(0, 8));
   }
-  for (const t of drafts) if (keep.has(t)) tried.push({ ...t, score: finish(t.d, t.sx) });
+  for (const t of drafts) if (keep.has(t)) tried.push({ ...t, score: finish(t.d, t.sx, t.arrangement) });
   tried.sort(byScore);
 
   // Repair and polish add a drawing only if no candidate has its positions already
@@ -339,7 +363,7 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
       if (!bad(cur.score)) break;
       const c = structuredClone(cand.d);
       for (const s of c.states) { s.x = Math.round((s.x! * k) / GRID) * GRID; s.y = Math.round((s.y! * k) / GRID) * GRID; }
-      const sc = finish(c, cand.sx * k); // measured in its own (spread) step, like every other candidate
+      const sc = finish(c, cand.sx * k, cand.arrangement); // measured in its own (spread) step, like every other candidate
       if (bad(sc) < bad(cur.score)) cur = { score: sc, arrangement: `${cand.arrangement} (spread)`, d: c, sx: cand.sx * k, sy: cand.sy * k };
     }
     if (cur !== cand) add(cur);
@@ -392,7 +416,7 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
           const c = structuredClone(cur.d);
           const s = c.states.find((x) => x.id === id)!;
           s.x = Math.round(p.x / GRID) * GRID; s.y = Math.round(p.y / GRID) * GRID;
-          const sc = finish(c, cur.sx);
+          const sc = finish(c, cur.sx, cand.arrangement);
           if (sc.total < (next ?? cur).score.total - 1e-6) next = { ...cur, score: sc, d: c, arrangement: cand.arrangement.endsWith("(polished)") ? cand.arrangement : `${cand.arrangement} (polished)` };
         }
         if (next) break;
@@ -1249,6 +1273,19 @@ function improveGrid(g: Graph, starts: Array<[string[], boolean]>, cols: number,
     }
     gc.reset(best);
     let cost = settle(bestCost);
+    // The grid upside down draws the same lines (same lengths, crossings and
+    // lines through states), but no single or row move reaches it, and the
+    // reset state's pull towards the top is too weak to climb there move by
+    // move: annealing can end with the reset state low in the left column
+    // and most of the machine above it (gen14_4: 10 of 13). With more states
+    // above the reset state than below it, turn it over here, before the
+    // diagonal turn below, which needs the reset state in the top left
+    // corner (finishing would turn the drawing over anyway, see upright()),
+    // even if the reset state then sits a row lower (empty cells at the bottom).
+    const row = (k: number) => Math.floor(k / cols), home = row(gc.slot[0]);
+    let above = 0, below = 0;
+    for (const k of gc.slot) { if (row(k) < home) above++; else if (row(k) > home) below++; }
+    if (above > below) cost = gc.reset(Int32Array.from(gc.slot, (k) => (rows - 1 - row(k)) * cols + (k % cols)));
     // The grid turned over its diagonal (rows for columns), when it still
     // fits, costs the same if the reset state is in the top left corner;
     // keep the way round whose flow leaves the reset state further to the

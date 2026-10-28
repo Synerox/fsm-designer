@@ -244,6 +244,37 @@ test("four states all linked, labels shown: the reset state still at the top lef
   assert.ok(level[0].x! > s0.x!, "its first line runs right");
 });
 
+// The e2e check's machines: n states, each going to the next on a and to one
+// other state (from a fixed random sequence) on b, reset ST_0.
+function generated(n: number, seed: number) {
+  const name = `gen${n}_${seed}`;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const w = Math.max(1, Math.ceil(Math.log2(n)));
+  const st = (i: number) => `ST_${i}`;
+  let v = `module ${name}(input clk, input rst, input a, input b, output reg y);\n  localparam ${Array.from({ length: n }, (_, i) => `${st(i)} = ${w}'d${i}`).join(", ")};\n  reg [${w - 1}:0] st, nx;\n  always @(posedge clk) if (rst) st <= ST_0; else st <= nx;\n  always @(*) begin\n    nx = st; y = 0;\n    case (st)\n`;
+  for (let i = 0; i < n; i++) {
+    const next = (i + 1) % n;
+    let other = Math.floor(rnd() * n);
+    if (other === next) other = (other + 2) % n;
+    v += `      ${st(i)}: begin ${i % 3 === 0 ? "y = 1; " : ""}if (a) nx = ${st(next)}; else if (b) nx = ${st(other)}; end\n`;
+  }
+  return importVerilog(v + "    endcase\n  end\nendmodule\n").diagram!;
+}
+
+test("the reset state is never low down with the machine above it (e2e: gen14_4, gen16_11 drew it at the bottom left)", async () => {
+  // gen14_4 and gen16_11: grids annealed with the reset state in the bottom
+  // row. gen10_9: a grid whose triangles pointed up from the reset state's row.
+  for (const [n, seed, top] of [[14, 4, true], [16, 11, true], [10, 9, false]] as const) {
+    const d = generated(n, seed);
+    await autoLayout(d);
+    const s0 = d.states.find((s) => s.isInitial)!;
+    const above = d.states.filter((s) => s.y! < s0.y! - GRID).length, below = d.states.filter((s) => s.y! > s0.y! + GRID).length;
+    assert.ok(above <= below, `gen${n}_${seed}: ${above} states above the reset state, ${below} below`);
+    if (top) assert.equal(above, 0, `gen${n}_${seed}: the reset state in the top row`);
+    assert.ok(d.states.every((s) => s.x! >= s0.x!), `gen${n}_${seed}: nothing left of the reset state`);
+  }
+});
+
 test("four states all linked: each hub shape is made once, not once per hub with the states only named differently", () => {
   const d = machine(4, [[0, 1], [1, 0], [0, 2], [2, 0], [0, 3], [3, 0], [1, 2], [2, 1], [1, 3], [3, 1], [2, 3], [3, 2]]);
   const hubs = layoutCandidates(d, { plan: { labels: "none" } }).filter((c) => /^hub-[a-z]+$/.test(c.arrangement));
