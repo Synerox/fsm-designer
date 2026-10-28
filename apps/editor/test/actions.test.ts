@@ -2,7 +2,7 @@
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import { autoLayout } from "@fsm/core";
-import { importVerilogText, loadText, serialize, startAutosave, tidyUp } from "../src/actions.ts";
+import { importVerilogText, loadText, restoreSession, serialize, startAutosave, tidyUp } from "../src/actions.ts";
 import { createState, createTransition, drawOptions, newDiagram, setInitial, useEditor } from "../src/store.ts";
 
 // Node has no localStorage; a Map stands in for the browser's.
@@ -41,6 +41,10 @@ test("autosave keeps the unsaved flag of an import, and clears it after a save t
     assert.equal(useEditor.getState().dirty, true);
     mock.timers.tick(300);
     assert.equal(autosaved()?.dirty, true, "a reload must not see a never-saved import as clean");
+    // Undo back to the import as loaded: still never saved.
+    useEditor.getState().edit((d) => { createState(d, 0, 0); });
+    useEditor.getState().undo();
+    assert.equal(useEditor.getState().dirty, true, "an import undone to its start is still unsaved");
 
     useEditor.getState().markSaved("m.fsm.json");
     mock.timers.tick(300);
@@ -104,4 +108,15 @@ test("Auto Layout applies the start-arrow side the layout chose", async () => {
   const got = useEditor.getState().doc;
   assert.deepEqual(got.states.map((s) => [s.x, s.y, s.initialAngle]), expected.states.map((s) => [s.x, s.y, s.initialAngle]));
   assert.equal((await tidyUp()).moved, false, "a second run changes nothing");
+});
+
+test("a restored unsaved session stays unsaved after an edit and its undo", async () => {
+  const d = newDiagram();
+  createState(d, 100, 100);
+  storage.set("fsm-designer:autosave", JSON.stringify({ doc: JSON.parse(serialize(d)), filePath: "m.fsm.json", dirty: true }));
+  await restoreSession();
+  assert.equal(useEditor.getState().dirty, true);
+  useEditor.getState().edit((d) => { d.states[0].x = 140; });
+  useEditor.getState().undo();
+  assert.equal(useEditor.getState().dirty, true, "the restored doc was never written to m.fsm.json");
 });
