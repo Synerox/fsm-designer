@@ -106,6 +106,45 @@ test("copy and paste: states with the transitions between them, fresh names, off
   assert.equal(new Set(d.states.map((s) => s.id)).size, d.states.length, "ids stay unique");
 });
 
+test("paste into a diagram without the copy's signals declares them, so the file opens again", async () => {
+  const { copySelection, pasteClipboard, selectAll } = await import("../src/store.ts");
+  const { addState, addTransition, createDiagram, parseDiagram } = await import("@fsm/core");
+  // Moore: state outputs, pasted after File > New.
+  const moore = createDiagram({ name: "lights", inputs: ["go", "car"], outputs: [{ name: "light", width: 2, default: 0 }] });
+  const g = addState(moore, { name: "GREEN", outputs: { light: 2 }, x: 0, y: 0 });
+  const y = addState(moore, { name: "YELLOW", outputs: { light: 1 }, x: 100, y: 0 });
+  addTransition(moore, { from: g.id, to: y.id, condition: "go && !car && other" });
+  copySelection(moore, selectAll(moore));
+  const d = newDiagram();
+  pasteClipboard(d);
+  const back = parseDiagram(JSON.parse(JSON.stringify(d)));
+  assert.deepEqual(back.outputs, [{ name: "light", width: 2, default: 0 }], "the output is declared as in the source");
+  assert.deepEqual(back.inputs.map((s) => s.name), ["go", "car"], "the inputs the condition uses; 'other' was never an input");
+  assert.deepEqual(back.states.map((s) => s.outputs), [{ light: 2 }, { light: 1 }]);
+
+  // Mealy: an empty diagram takes the kind, so the transition outputs stay drawn.
+  const mealy = createDiagram({ name: "det", type: "mealy", inputs: ["x"], outputs: ["z"] });
+  const a = addState(mealy, { name: "A", x: 0, y: 0 }), b = addState(mealy, { name: "B", x: 100, y: 0 });
+  addTransition(mealy, { from: a.id, to: b.id, condition: "x", outputs: { z: 1 } });
+  copySelection(mealy, selectAll(mealy));
+  const e = newDiagram();
+  pasteClipboard(e);
+  assert.equal(e.type, "mealy");
+  assert.deepEqual(parseDiagram(JSON.parse(JSON.stringify(e))).transitions[0].outputs, { z: 1 });
+
+  // Into a Moore machine with states, where "z" is already an input: the
+  // Mealy output can be neither drawn nor declared, so it is dropped.
+  const f = newDiagram();
+  createState(f, 0, 0);
+  f.inputs.push({ name: "z", width: 1 });
+  pasteClipboard(f);
+  assert.equal(f.type, "moore");
+  assert.deepEqual(f.outputs, []);
+  assert.ok(f.transitions.every((t) => Object.keys(t.outputs).length === 0));
+  assert.deepEqual(f.inputs.map((s) => s.name), ["z", "x"]);
+  parseDiagram(JSON.parse(JSON.stringify(f)));
+});
+
 test("align and spread states", async () => {
   const { alignStates } = await import("../src/store.ts");
   const d = newDiagram();

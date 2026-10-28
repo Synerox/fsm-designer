@@ -4,7 +4,7 @@
 import { create } from "zustand";
 import { current, isDraft, produce } from "immer";
 import { addState, addTransition, asciiText, createDiagram, planDiagram, removeState, stateText } from "@fsm/core";
-import type { FsmDiagram, PlanOptions, State, Transition } from "@fsm/core";
+import type { FsmDiagram, MachineType, PlanOptions, Signal, State, Transition } from "@fsm/core";
 
 export type Selection =
   | { kind: "state"; id: string }
@@ -317,6 +317,10 @@ export function setInitial(d: FsmDiagram, id: string, angle: number): void {
 export interface Clip {
   states: State[];
   transitions: Transition[];
+  /** The source diagram's kind and signals, so a paste elsewhere can declare what the copy uses. */
+  type: MachineType;
+  inputs: Signal[];
+  outputs: Signal[];
 }
 
 let clipboard: Clip | null = null;
@@ -334,6 +338,9 @@ export function copySelection(d: FsmDiagram, sel: Selection): number {
   clipboard = {
     states: structuredClone(d.states.filter((s) => ids.has(s.id))),
     transitions: structuredClone(d.transitions.filter((t) => ids.has(t.from) && ids.has(t.to))),
+    type: d.type,
+    inputs: structuredClone(d.inputs),
+    outputs: structuredClone(d.outputs),
   };
   pasteCount = 0;
   return clipboard.states.length + new Set(clipboard.transitions.map((t) => `${t.from} ${t.to}`)).size;
@@ -347,9 +354,28 @@ export function hasClipboard(): boolean {
  * Paste the clipboard into `d`, offset down-right a little more each time,
  * with fresh ids and names (S0 -> S0_1 when S0 exists). Pasted states are
  * never initial. Returns the selection of what was pasted.
+ *
+ * The clipboard outlives File > New and Open, so the target may not declare
+ * the signals the copy uses. A file whose outputs are undeclared cannot be
+ * opened again (parseDiagram rejects it), so each output and input the copy
+ * uses is declared as it was in the source; one that cannot be (its name is
+ * already taken for something else) is dropped. An empty diagram takes the
+ * source's machine kind, and Mealy outputs pasted into a Moore machine are
+ * dropped, since nothing there draws or edits them.
  */
 export function pasteClipboard(d: FsmDiagram): Selection {
   if (!clipboard) return null;
+  const clip = clipboard;
+  if (!d.states.length && !d.inputs.length && !d.outputs.length) d.type = clip.type;
+  const reserved = [d.clock.name, d.reset.name, "state", "next_state"];
+  const declared = (kind: "inputs" | "outputs", name: string): boolean => {
+    if (d[kind].some((s) => s.name === name)) return true;
+    const src = clip[kind].find((s) => s.name === name);
+    if (!src || reserved.includes(name) || [...d.inputs, ...d.outputs].some((s) => s.name === name)) return false;
+    d[kind].push(structuredClone(src));
+    return true;
+  };
+  const keepDeclared = (outs: Record<string, unknown>) => { for (const k of Object.keys(outs)) if (!declared("outputs", k)) delete outs[k]; };
   const off = 40 * ++pasteCount; // two grid cells, so grid-aligned states stay aligned
   const names = new Set(d.states.map((s) => s.name));
   const ids = new Set(d.states.map((s) => s.id));
@@ -367,6 +393,7 @@ export function pasteClipboard(d: FsmDiagram): Selection {
     s.x = (src.x ?? 0) + off;
     s.y = (src.y ?? 0) + off;
     s.isInitial = false;
+    keepDeclared(s.outputs);
     ids.add(s.id);
     names.add(s.name);
     idMap.set(src.id, s.id);
@@ -379,6 +406,10 @@ export function pasteClipboard(d: FsmDiagram): Selection {
     t.id = fresh(`t${d.transitions.length}`, tids);
     t.from = idMap.get(src.from)!;
     t.to = idMap.get(src.to)!;
+    if (d.type === "moore") t.outputs = {};
+    keepDeclared(t.outputs);
+    // Names in the condition that were the source's inputs (the rest are left as typed).
+    for (const name of t.condition.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) if (clip.inputs.some((x) => x.name === name)) declared("inputs", name);
     tids.add(t.id);
     d.transitions.push(t);
     if (!edges.some((e) => e.from === t.from && e.to === t.to)) edges.push({ from: t.from, to: t.to });
