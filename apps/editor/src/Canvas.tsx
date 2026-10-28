@@ -22,7 +22,7 @@ import { SMALL_SIZE, SUB_LINE_H, drawnSubLines, stateDisplay, stateFontSize, unr
 import type { DiagramPlan, EdgePlan } from "@fsm/core";
 import { canvasOptions, caretSpot, editedTransition, mergeSelections, createState, createTransition, edgeTransitions, isEdgeSelected, isStateSelected, lineOwners, multiSelection, selectionParts, setInitial, toggleInSelection, useEditor, viewPlan } from "./store.ts";
 import type { Selection } from "./store.ts";
-import { GRID, SNAP_PX, angleOf, boxOf, circleHitsBox, edgePoints, inBox, segmentHitsBox, borderPoint, curveThrough, edgeMidpoint, loopPath, snapAngle, snapPoint, snapToGrid, stateAt } from "./geometry.ts";
+import { GRID, MAX_ZOOM, MIN_ZOOM, SNAP_PX, angleOf, boxOf, circleHitsBox, edgePoints, inBox, segmentHitsBox, borderPoint, curveThrough, edgeMidpoint, loopPath, snapAngle, snapPoint, snapToGrid, stateAt } from "./geometry.ts";
 import type { Guide, Pt } from "./geometry.ts";
 import { tr } from "./i18n.ts";
 
@@ -31,6 +31,7 @@ const ACCENT = "#2563eb";
 const SELECT = "#2383e2";
 const CROSSING = "#3fa34d"; // right-to-left box: selects whatever it touches
 const FONT = "Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif";
+const DRAG_PX = 4; // screen pixels the pointer must travel before a press on a state or a box drag starts dragging
 
 export interface View {
   x: number;
@@ -45,8 +46,6 @@ export interface GridOptions {
   snap: boolean;
 }
 
-export const MIN_ZOOM = 0.1;
-export const MAX_ZOOM = 8;
 
 /** Zoom by `factor` keeping screen point (mx, my) still. */
 export function zoomAround(v: View, factor: number, mx: number, my: number): View {
@@ -55,14 +54,14 @@ export function zoomAround(v: View, factor: number, mx: number, my: number): Vie
 }
 
 type Gesture =
-  | { kind: "move"; id: string; dx: number; dy: number; key: string }
+  | { kind: "move"; id: string; dx: number; dy: number; start: Pt; moved: boolean; key: string }
   | { kind: "curve"; from: string; to: string; key: string }
   | { kind: "loop"; id: string; key: string }
   | { kind: "initial"; id: string; key: string }
   | { kind: "resize"; id: string; key: string }
   | { kind: "link"; from: string | null; start: Pt }
   | { kind: "pan"; sx: number; sy: number; vx: number; vy: number }
-  | { kind: "moveMany"; start: Pt; anchor: Pt; orig: Array<{ id: string; x: number; y: number }>; key: string }
+  | { kind: "moveMany"; start: Pt; moved: boolean; anchor: Pt; orig: Array<{ id: string; x: number; y: number }>; key: string }
   | { kind: "box"; start: Pt; item: SingleItem | null; moved: boolean };
 
 type SingleItem = Exclude<Selection, null | { kind: "multi" }>;
@@ -175,11 +174,11 @@ export function Canvas({ view, setView, grid }: { view: View; setView: Dispatch<
     if (stateId && selection?.kind === "multi" && isStateSelected(selection, stateId)) {
       const orig = selection.states.map((id) => byId.get(id)!.state).map((v) => ({ id: v.id, x: v.x!, y: v.y! }));
       const a = byId.get(stateId)!.state;
-      gesture.current = { kind: "moveMany", start: p, anchor: { x: a.x!, y: a.y! }, orig, key };
+      gesture.current = { kind: "moveMany", start: p, moved: false, anchor: { x: a.x!, y: a.y! }, orig, key };
     } else if (stateId) {
       const s = byId.get(stateId)!.state;
       select({ kind: "state", id: stateId });
-      gesture.current = { kind: "move", id: stateId, dx: s.x! - p.x, dy: s.y! - p.y, key };
+      gesture.current = { kind: "move", id: stateId, dx: s.x! - p.x, dy: s.y! - p.y, start: p, moved: false, key };
     } else if (edgeEl) {
       const [from, to] = edgeEl.getAttribute("data-edge")!.split(" ");
       // A click on one of the stacked label lines picks that transition for
@@ -211,6 +210,13 @@ export function Canvas({ view, setView, grid }: { view: View; setView: Dispatch<
       return;
     }
     const p = toWorld(e);
+    // A click wobbles by a pixel or so: a state only starts moving (and
+    // snapping to the grid, which would shift an off-grid one) once the
+    // pointer has really left the spot it was pressed at.
+    if (g.kind === "box" || g.kind === "move" || g.kind === "moveMany") {
+      if (!g.moved && Math.hypot(p.x - g.start.x, p.y - g.start.y) * view.k < DRAG_PX) return;
+      g.moved = true;
+    }
     switch (g.kind) {
       case "pan":
         setView((v) => ({ ...v, x: g.vx + e.clientX - g.sx, y: g.vy + e.clientY - g.sy }));
@@ -219,8 +225,6 @@ export function Canvas({ view, setView, grid }: { view: View; setView: Dispatch<
         setLink({ from: g.from, start: g.start, at: p });
         break;
       case "box":
-        if (!g.moved && Math.hypot(p.x - g.start.x, p.y - g.start.y) * view.k < 4) break;
-        g.moved = true;
         setBox({ a: g.start, b: p });
         break;
       case "moveMany": {

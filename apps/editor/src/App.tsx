@@ -1,6 +1,8 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import type { MouseEvent as RMouseEvent } from "react";
 import { expandShortcut, planDiagram } from "@fsm/core";
-import { Canvas, MAX_ZOOM, zoomAround } from "./Canvas.tsx";
+import { Canvas, zoomAround } from "./Canvas.tsx";
+import { fitView } from "./geometry.ts";
 import type { GridOptions, GridStyle, View } from "./Canvas.tsx";
 import { Hints } from "./Hints.tsx";
 import { Inspector } from "./Inspector.tsx";
@@ -82,10 +84,7 @@ export function App() {
     const el = document.querySelector<SVGSVGElement>("[data-testid=canvas]");
     const { doc } = useEditor.getState();
     if (!el || !doc.states.length) return setView({ x: 0, y: 0, k: 1 });
-    const { minX, minY, maxX, maxY } = planDiagram(doc, drawOptions()).bounds;
-    const pad = 40, w = el.clientWidth, h = el.clientHeight;
-    const k = Math.min(2, MAX_ZOOM, (w - 2 * pad) / (maxX - minX), (h - 2 * pad) / (maxY - minY));
-    setView({ k, x: (w - (maxX - minX) * k) / 2 - minX * k, y: (h - (maxY - minY) * k) / 2 - minY * k });
+    setView(fitView(planDiagram(doc, drawOptions()).bounds, el.clientWidth, el.clientHeight));
   };
   useEffect(() => { if (loadSeq) fit(); }, [loadSeq]);
   // The import report belongs to the diagram it describes.
