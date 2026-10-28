@@ -636,7 +636,7 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
   if (!cand) {
     // A syntax error drops the always block it is in, which is the likely
     // reason nothing was found: say where it is rather than only that no FSM is there.
-    const errors = m.skipped.filter((s) => /^line \d+:/.test(s));
+    const errors = m.errors;
     if (errors.length) throw new VerilogImportError(`${errors[0]}${errors.length > 1 ? ` (and ${errors.length - 1} more syntax error${errors.length > 2 ? "s" : ""})` : ""}; the code there could not be read, so no state machine was found in module ${m.name}`);
     throw new VerilogImportError(`No state machine found in module ${m.name}: no register written in a clocked always block takes two or more constant state values`);
   }

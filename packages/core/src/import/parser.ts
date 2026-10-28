@@ -84,6 +84,8 @@ export interface Module {
   assigns: ContAssign[];
   /** Constructs that were skipped, for warnings. */
   skipped: string[];
+  /** Syntax errors that made the parser skip code (they are in skipped too). */
+  errors: string[];
 }
 
 export interface SourceFile {
@@ -337,12 +339,19 @@ class Parser {
 
   private items(m: Module, end: string) {
     while (!this.done() && !this.is(end)) {
+      // The next module starts before this one ended: stop here, or the next
+      // module's blocks would be read as this one's.
+      if (this.is("module") || this.is("macromodule") || this.is("package")) {
+        m.skipped.push(`line ${this.peek().line}: "${this.peek().text}" before "${end}" of ${m.name}`);
+        return;
+      }
       const at = this.i;
       try {
         this.item(m);
       } catch (e) {
         if (!(e instanceof VerilogSyntaxError)) throw e;
         m.skipped.push(e.message);
+        m.errors.push(e.message);
         this.i = at;
         // A broken always block holds statements of its own: resyncing at the
         // next `;` would land inside it and read the rest of it as module
@@ -352,6 +361,7 @@ class Parser {
       }
       if (this.i === at) this.i++;
     }
+    if (this.done()) m.skipped.push(`line ${this.peek().line}: "${end}" of ${m.name} missing at the end of the file`);
     this.accept(end);
     if (this.accept(":")) this.i++;
   }
@@ -824,5 +834,5 @@ function insideMatch(x: Expr, item: Expr | ValueRange): Expr {
 }
 
 function emptyModule(name: string, line: number): Module {
-  return { name, line, ports: [], decls: new Map(), params: [], enums: new Map(), always: [], assigns: [], skipped: [] };
+  return { name, line, ports: [], decls: new Map(), params: [], enums: new Map(), always: [], assigns: [], skipped: [], errors: [] };
 }

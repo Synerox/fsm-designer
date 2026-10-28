@@ -2,7 +2,7 @@
 // always blocks without saying so.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { importVerilog } from "../../src/import/index.ts";
+import { importVerilog, listStateMachines } from "../../src/import/index.ts";
 import type { FsmDiagram } from "../../src/model.ts";
 
 const edges = (d: FsmDiagram) => {
@@ -159,4 +159,28 @@ endmodule`);
     "LOW->LOW: d > 4'd9 || (d != 4'd1 && d < 4'd8)",
     "HIGH->IDLE: ",
   ]);
+});
+
+test("a missing endmodule does not merge the next module into this one", () => {
+  const src = `module first(input clk, input rst, input a, output reg y);
+  localparam S0 = 0, S1 = 1;
+  reg s;
+  always @(posedge clk) if (rst) s <= S0; else case (s) S0: if (a) s <= S1; S1: s <= S0; endcase
+  always @* y = s;
+
+module second(input clk, input rst, input b, output reg z);
+  localparam T0 = 2'd0, T1 = 2'd1, T2 = 2'd2;
+  reg [1:0] t;
+  always @(posedge clk) if (rst) t <= T0; else case (t) T0: if (b) t <= T1; T1: t <= T2; T2: t <= T0; endcase
+  always @* z = (t == T2);
+endmodule`;
+  assert.deepEqual(listStateMachines(src), [{ module: "first", stateVar: "s" }, { module: "second", stateVar: "t" }]);
+  const r = importVerilog(src);
+  assert.equal(r.stateVar, "s");
+  assert.deepEqual(r.diagram.outputs.map((s) => s.name), ["y"]);
+  assert.ok(r.warnings.includes('Skipped line 7: "module" before "endmodule" of first'), r.warnings.join("\n"));
+  assert.deepEqual(importVerilog(src, { module: "second" }).stateCodes, { T0: "2'b00", T1: "2'b01", T2: "2'b10" });
+  // At the end of the file it is only a warning.
+  const last = importVerilog(src.replace(/endmodule$/, ""), { module: "second" });
+  assert.ok(last.warnings.includes('Skipped line 11: "endmodule" of second missing at the end of the file'), last.warnings.join("\n"));
 });
