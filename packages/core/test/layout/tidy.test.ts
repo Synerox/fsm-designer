@@ -36,6 +36,8 @@ function checkTidy(d: FsmDiagram, what: string) {
   const arrow = plan.initialArrow!;
   const cut = plan.edges.filter((e) => e.points.some((p, i) => i > 0 && crosses(arrow.from, arrow.to, e.points[i - 1], p)));
   assert.equal(cut.length, 0, `${what}: a line cuts across the start arrow`);
+  const onArrow = d.transitions.filter((t) => t.from === init.id && t.to === init.id && Math.abs(Math.atan2(Math.sin((t.loopAngle ?? 0) - a), Math.cos((t.loopAngle ?? 0) - a))) < Math.PI / 4 - 0.01);
+  assert.equal(onArrow.length, 0, `${what}: the reset state's self loop sits on the start arrow`);
   const b = plan.bounds;
   assert.ok(b.minX >= 0 && b.minY >= 0, `${what}: drawing starts off the page`);
   return sc;

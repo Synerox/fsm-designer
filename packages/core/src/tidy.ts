@@ -45,9 +45,9 @@
 //    fewer lines (the most tangled lines first, a few passes; the start
 //    arrow counts as a line, so an arc bows round it); each self loop points
 //    to its state's emptiest side, kept clear of lines (a pair drawn as two
-//    parallel lines is wider than its centre line); the start arrow comes in
-//    from a side free of states and lines (lines first bow round it, and
-//    only if one still cuts it does it move).
+//    parallel lines is wider than its centre line) and of the start arrow;
+//    the start arrow comes in from a side free of states and lines (lines
+//    first bow round it, and only if one still cuts it does it move).
 // 5. Scoring (see layout-score.ts): crossings (the start arrow counts as a
 //    line) weigh most, then lines through states
 //    and overlapping labels, then triangles that are not equilateral,
@@ -1495,7 +1495,7 @@ function uncross(
   }
 }
 
-/** Each self loop points to its state's widest free side, preferring outward and straight up/down/left/right. */
+/** Each self loop points to its state's widest free side, preferring outward and straight up/down/left/right, never onto the start arrow. */
 function placeLoops(d: FsmDiagram) {
   const at = new Map(d.states.map((s) => [s.id, { x: s.x!, y: s.y!, r: stateRadius(d, s) }]));
   const cx = d.states.reduce((s, p) => s + p.x!, 0) / d.states.length;
@@ -1519,6 +1519,7 @@ function placeLoops(d: FsmDiagram) {
     busy.get(to)!.push(Math.atan2(pts[18].y - b.y, pts[18].x - b.x));
   }
   const loops: Pt[] = [];
+  const arrow = startArrow(d);
   for (const ts of groups) {
     const id = ts[0].from;
     if (id !== ts[0].to) continue;
@@ -1542,6 +1543,8 @@ function placeLoops(d: FsmDiagram) {
       if (k === 4 && s.y > cy + 20) sc += 0.15;
       for (const [oid, o] of at) if (oid !== id && Math.hypot(c.x - o.x, c.y - o.y) < rl + o.r + 16) sc -= 5;
       for (const l of loops) if (Math.hypot(c.x - l.x, c.y - l.y) < 2 * rl + 30) sc -= 5;
+      // Never on the start arrow (its direction is only one of the busy ones above).
+      if (arrow && segDist(c, arrow[0], arrow[1]) < rl + 8) sc -= 5;
       for (const l of near) {
         const m = rl + 8 + l.pad;
         if (c.x + m > l.x0 && c.x - m < l.x1 && c.y + m > l.y0 && c.y - m < l.y1 && l.pts.some((p) => Math.hypot(p.x - c.x, p.y - c.y) < m)) sc -= 1.5;
