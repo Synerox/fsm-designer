@@ -106,15 +106,13 @@ const SKIP_BLOCKS: Record<string, string> = {
 };
 
 export function parseVerilog(source: string): SourceFile {
-  const pre = preprocess(source);
+  // Only a body that parses as a whole expression keeps its name; anything
+  // else is expanded as text where it is used, as a Verilog compiler would.
+  const isExpr = (body: string) => { try { parseExpression(body); return true; } catch { return false; } };
+  const pre = preprocess(source, isExpr);
   const p = new Parser(tokenize(pre.text));
   const globals: Param[] = [];
-  for (const [name, body] of pre.constants) {
-    try {
-      const value = new Parser(tokenize(body)).expr();
-      globals.push({ name, value, local: true, line: 0, origin: "define" });
-    } catch { /* not an expression after all */ }
-  }
+  for (const [name, body] of pre.constants) globals.push({ name, value: parseExpression(body), local: true, line: 0, origin: "define" });
   return p.file(globals);
 }
 
