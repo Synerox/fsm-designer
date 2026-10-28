@@ -28,9 +28,12 @@
 //      as its own small shape, an equilateral triangle, square or rectangle,
 //      pointing away from the state it hangs off.
 //    - hub: a state linked to every other state, in the middle of the others
-//      when they make a loop round it (a wheel; four states all linked
-//      become an equilateral triangle round the fourth), or, being the reset
-//      state, on the left with the others above, right of and below it (a fan).
+//      when they make a loop round it (a wheel; four round it also as a square
+//      on the diagonal corners; four states all linked become an equilateral
+//      triangle round the fourth, the reset state, when on a corner, at the
+//      top left: the triangle points down, its level top running right from
+//      the reset state, or right), or, being the reset state, on the left
+//      with the others above, right of and below it (a fan).
 //      Drawn as shaped (no local shapes); a shape that is the same drawing
 //      as one already made from another hub, the states only named
 //      differently, is made once.
@@ -138,7 +141,11 @@ export interface LayoutCandidate {
   step: number;
 }
 
-/** Lay out d in place: positions, arcs (Transition.curve), self-loop sides (Transition.loopAngle) and, if blocked, the start arrow's side. */
+/**
+ * Lay out d in place: positions, arcs (Transition.curve), self-loop sides
+ * (Transition.loopAngle) and, if blocked, the start arrow's side (a side left
+ * there before is dropped; the arrow comes from the left unless blocked).
+ */
 export function tidyLayout(d: FsmDiagram, opts: TidyOptions = {}): TidyResult {
   const margin = opts.margin ?? 60;
   forget(d);
@@ -180,11 +187,10 @@ export function layoutCandidates(d: FsmDiagram, opts: TidyOptions = {}): LayoutC
  */
 function forget(d: FsmDiagram) {
   const ids = new Set(d.states.map((s) => s.id));
-  for (const t of d.transitions) {
-    // A diagram built by hand, never checked by parseDiagram: say what is wrong instead of failing somewhere inside.
-    for (const end of [t.from, t.to]) if (!ids.has(end)) throw new FsmError(`Transition ${t.id} refers to no state: "${end}"`);
-    delete t.curve; delete t.loopAngle;
-  }
+  // A diagram built by hand, never checked by parseDiagram: say what is wrong
+  // instead of failing somewhere inside, before anything is changed.
+  for (const t of d.transitions) for (const end of [t.from, t.to]) if (!ids.has(end)) throw new FsmError(`Transition ${t.id} refers to no state: "${end}"`);
+  for (const t of d.transitions) { delete t.curve; delete t.loopAngle; }
   for (const s of d.states) delete s.initialAngle;
 }
 
@@ -353,7 +359,7 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
   // move can clear what spreading out could not. (cle_locked with labels
   // shown: the snake spread from the narrow spacing keeps one crossing and
   // ranks fourth; polished, it is the clean winner.)
-  let budget = Math.min(48, Math.round(4e4 / Math.max(1, edgePairs(g).length) ** 2));
+  let budget = Math.min(48, Math.round(4e4 / Math.max(1, lines.length) ** 2));
   const fixable = tried.filter((t) => bad(t.score) && t.score.total - must(t.score) < tried[0].score.total + 10).slice(0, 2);
   const polish = [...new Set([...fixable, ...tried.slice(0, 2).filter((c) => c.score.total <= 1.5 * tried[0].score.total)])];
   for (const cand of polish) {
@@ -831,10 +837,11 @@ function rings(g: Graph, sx: number, sy: number): Array<[string, Pos]> {
  * linked to each other) drawn in the middle of the others, so its lines are
  * short and stay clear of the lines between the others: the others go round
  * it in the order of their own loop, on the eight cells around it (the four
- * level and upright ones first) or, for three, as an equilateral triangle
- * with the hub at its centre. A hub that is the reset state, which should be
- * the leftmost, is also tried as a fan: on the left, the others above, right
- * of and below it. Each shape is turned so the lines between the others and
+ * level and upright ones first; four also on the diagonal corners, a
+ * square) or, for three, as an equilateral triangle with the hub at its
+ * centre, the reset state (when it is a corner) at the top left. A hub that
+ * is the reset state, which should be the leftmost, is also tried as a fan:
+ * on the left, the others above, right of and below it. Each shape is turned so the lines between the others and
  * the reset state's place cost least (a quick measure, as for the grid); the
  * score then decides between these and every other arrangement.
  */
@@ -863,6 +870,10 @@ function hubs(g: Graph, sx: number, sy: number, R: number, drawn: (a: string, b:
   const L = { x: -1, y: 0 }, UL = { x: -1, y: -1 }, U = { x: 0, y: -1 }, UR = { x: 1, y: -1 }, Rt = { x: 1, y: 0 }, DR = { x: 1, y: 1 }, D = { x: 0, y: 1 }, DL = { x: -1, y: 1 };
   const subsets = <T,>(xs: T[], k: number): T[][] => (k === 0 ? [[]] : xs.length < k ? [] : [...subsets(xs.slice(1), k - 1).map((s) => [xs[0], ...s]), ...subsets(xs.slice(1), k)]);
   const clockwise = (cs: Pt[]) => [...cs].sort((a, b) => Math.atan2(-a.y, a.x) - Math.atan2(-b.y, b.x)).reverse();
+  const topLeft = (pos: Pos) => {
+    const o = pos.get(g.init)!;
+    return [...pos.values()].every((p) => p.x >= o.x - 1 && p.y >= o.y - 1);
+  };
   const out: Array<[string, Pos]> = [];
   const shapes = new Set<string>();
   for (const hub of g.ids.filter((id) => g.nb.get(id)!.size === n - 1).slice(0, 4)) {
@@ -892,6 +903,12 @@ function hubs(g: Graph, sx: number, sy: number, R: number, drawn: (a: string, b:
       for (const cs of sets) for (let k = 0; k < m; k++) for (const dir of [1, -1]) {
         const pos: Pos = new Map([[hub, { x: 0, y: 0 }]]);
         order.forEach((id, i) => pos.set(id, cs[(((k + dir * i) % m) + m) % m]));
+        // A triangle with the reset state on a corner: that corner is the top
+        // left, so the triangle points down (its level top runs right from the
+        // reset state) or right, never up or left with the reset state at the
+        // bottom or the middle. With labels shown, one label touching a line
+        // more used to turn k4 and vending upside down.
+        if (name === "hub-triangle" && hub !== g.init && !topLeft(pos)) continue;
         const c = quick(pos);
         if (c < bestCost - 1e-9) { bestCost = c; best = pos; }
       }

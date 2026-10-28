@@ -231,6 +231,19 @@ test("four states all linked: an equilateral triangle round the fourth, no cross
   assert.ok(Math.max(...sides) - Math.min(...sides) <= 2 * GRID, `${sides}`);
 });
 
+test("four states all linked, labels shown: the reset state still at the top left of the triangle, its first line running right", () => {
+  const d = machine(4, [[0, 1], [1, 0], [0, 2], [2, 0], [0, 3], [3, 0], [1, 2], [2, 1], [1, 3], [3, 1], [2, 3], [3, 2]]);
+  for (const t of d.transitions) t.condition = ""; // every line labelled "else": one label touching a line used to turn the triangle upside down
+  const r = tidyLayout(d, { plan: { labels: "all" } });
+  assert.equal(r.arrangement, "hub-triangle");
+  const s0 = d.states[0];
+  assert.ok(d.states.every((s) => s.y! >= s0.y!), "S0 in the top row");
+  assert.ok(d.states.every((s) => s.x! >= s0.x!), "nothing left of S0");
+  const level = d.states.filter((s) => s !== s0 && s.y === s0.y);
+  assert.equal(level.length, 1, "a level top side");
+  assert.ok(level[0].x! > s0.x!, "its first line runs right");
+});
+
 test("four states all linked: each hub shape is made once, not once per hub with the states only named differently", () => {
   const d = machine(4, [[0, 1], [1, 0], [0, 2], [2, 0], [0, 3], [3, 0], [1, 2], [2, 1], [1, 3], [3, 1], [2, 3], [3, 2]]);
   const hubs = layoutCandidates(d, { plan: { labels: "none" } }).filter((c) => /^hub-[a-z]+$/.test(c.arrangement));

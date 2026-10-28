@@ -113,7 +113,12 @@ test("a transition to a state that does not exist: a clear error, not a TypeErro
     const d = machine(2, [[0, 1]]);
     const end = (e: number | string) => (typeof e === "number" ? d.states[e].id : e);
     d.transitions.push({ ...d.transitions[0], id: "bad", from: end(from), to: end(to) });
+    // What the layout would clear (an arc, a start-arrow side) stays as it was: a diagram that throws is left untouched.
+    d.transitions[0].curve = 40;
+    d.states[0].initialAngle = Math.PI / 2;
+    const before = structuredClone(d);
     assert.throws(() => tidyLayout(d), (e: unknown) => e instanceof FsmError && /nope/.test((e as Error).message));
+    assert.deepEqual(d, before, "tidyLayout changed the diagram before throwing");
     assert.throws(() => layoutCandidates(d), FsmError);
   }
 });
