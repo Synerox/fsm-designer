@@ -36,7 +36,8 @@ function upgradeLabels(d: FsmDiagram): FsmDiagram {
 }
 
 export async function loadText(text: string, path: string | null): Promise<void> {
-  const d = upgradeLabels(parseDiagram(JSON.parse(text)));
+  // A byte order mark (from an editor that writes one) is not JSON; File.text() drops it, so drop it here too.
+  const d = upgradeLabels(parseDiagram(JSON.parse(text.replace(/^\uFEFF/, ""))));
   // A file whose states are all placed (everything the editor saves) opens as
   // it was saved: in the editor text never resizes a state, so its circles and
   // positions are the user's. Files made elsewhere (agents) can come without
@@ -180,7 +181,8 @@ export async function pngBytes(scale = 2): Promise<Uint8Array> {
 }
 
 export async function exportPng(scale = 2): Promise<void> {
-  await saveFile(await pngBytes(scale), { suggestedName: `${stem()}.png`, filters: [{ name: tr("PNG image", "PNG 圖片", "PNG 画像"), extensions: ["png"] }], mime: "image/png" });
+  // The function form renders after the save dialog, not before it (desktop).
+  await saveFile(() => pngBytes(scale), { suggestedName: `${stem()}.png`, filters: [{ name: tr("PNG image", "PNG 圖片", "PNG 画像"), extensions: ["png"] }], mime: "image/png" });
 }
 
 // ---- Autosave: the open diagram survives a reload or crash, like Evan's editor ----
