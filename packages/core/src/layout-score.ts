@@ -36,7 +36,7 @@ export interface LayoutScore {
   floating: number;
   /** Triangles of linked states, two of them linked both ways, that are not about equilateral (not counting the slices round a state centred in an equilateral triangle of the three states it links to, and to nothing else). */
   uneven: number;
-  /** How far lines between states run past one and a half times the shortest line, summed (in shortest lines). */
+  /** How far lines between states run past one and a half times the shortest line (or the grid step, if shorter), summed (in those units). */
   long: number;
   asymmetry: number;
   length: number;
@@ -74,6 +74,7 @@ export function emptyScore(): LayoutScore {
 
 /** Readability of a drawn diagram; lower is better. `step` is the grid step used for distances. */
 export function score(d: FsmDiagram, plan: DiagramPlan = planDiagram(d), step = 200): LayoutScore {
+  if (d.states.length === 0) return emptyScore();
   const at = new Map(d.states.map((s) => [s.id, { x: s.x!, y: s.y!, r: stateRadius(d, s) }]));
   const st = [...at.values()];
   const edges = plan.edges;
@@ -102,7 +103,9 @@ export function score(d: FsmDiagram, plan: DiagramPlan = planDiagram(d), step = 
     for (const f of edges) {
       if (f === e) continue;
       const b = box(f.points); // a line whose box misses the label is not under it
-      if (b.x1 > r.x - r.w / 2 && b.x0 < r.x + r.w / 2 && b.y1 > r.y - r.h / 2 && b.y0 < r.y + r.h / 2 && f.points.some((p) => Math.abs(p.x - r.x) < r.w / 2 && Math.abs(p.y - r.y) < r.h / 2)) s.labelOnEdges++;
+      const x0 = r.x - r.w / 2, x1 = r.x + r.w / 2, y0 = r.y - r.h / 2, y1 = r.y + r.h / 2;
+      // Any piece of the line through the label, not only its sample points (on a long arc they are further apart than a label is tall).
+      if (b.x1 > x0 && b.x0 < x1 && b.y1 > y0 && b.y0 < y1 && f.points.some((p, k) => k > 0 && segInBox(f.points[k - 1], p, x0, y0, x1, y1))) s.labelOnEdges++;
     }
   }
   for (let i = 0; i < st.length; i++)
@@ -126,9 +129,11 @@ export function score(d: FsmDiagram, plan: DiagramPlan = planDiagram(d), step = 
     linked.get(t.from)!.add(t.to); linked.get(t.to)!.add(t.from);
     if (d.transitions.some((u) => u.from === t.to && u.to === t.from)) both.add(`${t.from}\u0000${t.to}`);
   }
-  // Long lines: measured against the shortest line in the drawing.
+  // Long lines: measured against the shortest line in the drawing, or the
+  // grid step if that is shorter (at least one grid cell, so two linked
+  // states on the same spot do not make every line infinitely long).
   const span = (a: string, b: string) => Math.hypot(at.get(a)!.x - at.get(b)!.x, at.get(a)!.y - at.get(b)!.y);
-  const unitLen = Math.min(step, ...[...linked].flatMap(([a, na]) => [...na].map((b) => span(a, b))));
+  const unitLen = Math.max(GRID, Math.min(step, ...[...linked].flatMap(([a, na]) => [...na].map((b) => span(a, b)))));
   for (const [a, na] of linked) for (const b of na) if (a < b) {
     s.long += Math.max(0, span(a, b) / unitLen - 1.5);
     // Three states linked to each other, two of them both ways: should be
@@ -174,6 +179,19 @@ function centred(p: Pt, t: Pt[]): boolean {
   const sides = t.map((q, i) => Math.hypot(q.x - t[(i + 1) % 3].x, q.y - t[(i + 1) % 3].y));
   const cx = (t[0].x + t[1].x + t[2].x) / 3, cy = (t[0].y + t[1].y + t[2].y) / 3;
   return Math.max(...sides) <= 1.15 * Math.min(...sides) && Math.hypot(p.x - cx, p.y - cy) < 0.2 * Math.min(...sides);
+}
+
+/** Whether segment a-b runs through the inside of the box x0..x1 × y0..y1 (Liang-Barsky clipping). */
+function segInBox(a: Pt, b: Pt, x0: number, y0: number, x1: number, y1: number): boolean {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  let t0 = 0, t1 = 1;
+  for (const [p, q] of [[-dx, a.x - x0], [dx, x1 - a.x], [-dy, a.y - y0], [dy, y1 - a.y]]) {
+    if (p === 0) { if (q <= 0) return false; continue; }
+    const t = q / p;
+    if (p < 0) t0 = Math.max(t0, t); else t1 = Math.min(t1, t);
+    if (t0 >= t1) return false;
+  }
+  return true;
 }
 
 export function segDist(p: Pt, a: Pt, b: Pt): number {

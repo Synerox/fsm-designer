@@ -68,6 +68,7 @@
 //    neighbours and moves to the one that improves the score most (the
 //    reset state never moves right of another).
 
+import { FsmError } from "./model.ts";
 import type { FsmDiagram } from "./model.ts";
 import { PARALLEL_GAP, labelLines, planDiagram, transitionLabel } from "./export/svg.ts";
 import type { PlanOptions } from "./export/svg.ts";
@@ -130,7 +131,7 @@ export interface LayoutCandidate {
 /** Lay out d in place: positions, arcs (Transition.curve), self-loop sides (Transition.loopAngle) and, if blocked, the start arrow's side. */
 export function tidyLayout(d: FsmDiagram, opts: TidyOptions = {}): TidyResult {
   const margin = opts.margin ?? 60;
-  for (const t of d.transitions) { delete t.curve; delete t.loopAngle; }
+  forget(d);
   if (d.states.length === 0) return { score: emptyScore(), arrangement: "empty", triangles: [], candidates: [], issues: [] };
 
   const islands = islandsOf(d);
@@ -154,11 +155,27 @@ export function tidyLayout(d: FsmDiagram, opts: TidyOptions = {}): TidyResult {
  */
 export function layoutCandidates(d: FsmDiagram, opts: TidyOptions = {}): LayoutCandidate[] {
   const c = structuredClone(d);
-  for (const t of c.transitions) { delete t.curve; delete t.loopAngle; }
+  forget(c);
   if (c.states.length === 0) return [];
   const islands = islandsOf(c);
   const laid = islands.length > 1 ? packIslands(c, islands, opts) : layoutIsland(c, opts);
   return laid.tried.map((t) => ({ arrangement: t.arrangement, score: t.score, diagram: t.d, step: t.sx }));
+}
+
+/**
+ * Drop what the layout decides besides positions: arcs, self-loop sides and
+ * the start arrow's side. The layout is then the same whatever an earlier
+ * one (or the user) left there, and the start arrow comes in from the left
+ * unless the drawing blocks it.
+ */
+function forget(d: FsmDiagram) {
+  const ids = new Set(d.states.map((s) => s.id));
+  for (const t of d.transitions) {
+    // A diagram built by hand, never checked by parseDiagram: say what is wrong instead of failing somewhere inside.
+    for (const end of [t.from, t.to]) if (!ids.has(end)) throw new FsmError(`Transition ${t.id} refers to no state: "${end}"`);
+    delete t.curve; delete t.loopAngle;
+  }
+  for (const s of d.states) delete s.initialAngle;
 }
 
 /** Positions, arcs, loop sides and start-arrow side from `from` onto `to`, shifted by (dx, dy). */
@@ -168,7 +185,9 @@ function copyLayout(from: FsmDiagram, to: FsmDiagram, dx = 0, dy = 0) {
     const t = byId.get(s.id);
     if (!t) continue;
     s.x = t.x! + dx; s.y = t.y! + dy;
+    // The side the layout was checked with, from the left when it set none.
     if (t.initialAngle !== undefined) s.initialAngle = t.initialAngle;
+    else delete s.initialAngle;
   }
   const tr = new Map(from.transitions.map((t) => [t.id, t]));
   for (const t of to.transitions) {
@@ -200,7 +219,9 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
 
   const triangles = trianglesOf(g);
   const tried: Tried[] = [];
+  // Every candidate is finished from scratch: no arcs or loop sides, the start arrow from the left.
   const finish = (c: FsmDiagram, sx: number) => {
+    forget(c);
     clearStartArrow(c, sx);
     clearStartArrow(c, sx, routeEdges(c));
     placeLoops(c);
@@ -269,9 +290,14 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
   }
   tried.sort(byScore);
 
+  // Repair and polish add a drawing only if no candidate has its positions already
+  // (two leading candidates can spread out to the same drawing).
+  const where = (t: Tried) => `${t.sx} ` + t.d.states.map((s) => `${s.x},${s.y}`).join(" ");
+  const have = new Set(tried.map(where));
+  const add = (t: Tried) => { const k = where(t); if (!have.has(k)) { have.add(k); tried.push(t); } };
+
   // Repair: spread the leading candidates out a little where that clears crossings, overlaps or lines through states.
   const bad = (sc: LayoutScore) => sc.crossings + sc.throughStates + sc.labelOverlaps + sc.tooClose;
-  const step = Math.min(...[...scales.values()].map(([sx]) => sx));
   // Only candidates that would lead with their problems gone are worth it (at most five).
   const must = (sc: LayoutScore) => WEIGHTS.crossings * sc.crossings + WEIGHTS.throughStates * sc.throughStates + WEIGHTS.labelOverlaps * sc.labelOverlaps + WEIGHTS.tooClose * sc.tooClose;
   const lead = tried[0].score.total;
@@ -280,12 +306,11 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
     for (const k of [1.25, 1.5]) {
       if (!bad(cur.score)) break;
       const c = structuredClone(cand.d);
-      for (const t of c.transitions) { delete t.curve; delete t.loopAngle; }
       for (const s of c.states) { s.x = Math.round((s.x! * k) / GRID) * GRID; s.y = Math.round((s.y! * k) / GRID) * GRID; }
-      const sc = finish(c, step * k);
+      const sc = finish(c, cand.sx * k); // measured in its own (spread) step, like every other candidate
       if (bad(sc) < bad(cur.score)) cur = { score: sc, arrangement: `${cand.arrangement} (spread)`, d: c, sx: cand.sx * k, sy: cand.sy * k };
     }
-    if (cur !== cand) tried.push(cur);
+    if (cur !== cand) add(cur);
   }
   tried.sort(byScore);
 
@@ -296,9 +321,16 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
   // only those near the best: polish fixes a drawing, it should not make a
   // new one. (Polishing the best four turned traffic_three_block, labels
   // shown, from the clockwise square into new shapes with the reset state
-  // at the bottom left or a state below the middle.)
+  // at the bottom left or a state below the middle.) Besides those, the two
+  // best that still have a crossing, an overlap or a line through a state
+  // and would lead with it gone (as in repair) are polished, and first: a
+  // move can clear what spreading out could not. (cle_locked with labels
+  // shown: the snake spread from the narrow spacing keeps one crossing and
+  // ranks fourth; polished, it is the clean winner.)
   let budget = Math.min(48, Math.round(4e4 / Math.max(1, edgePairs(g).length) ** 2));
-  for (const cand of tried.slice(0, 2).filter((c) => c.score.total <= 1.5 * tried[0].score.total)) {
+  const fixable = tried.filter((t) => bad(t.score) && t.score.total - must(t.score) < tried[0].score.total + 10).slice(0, 2);
+  const polish = [...new Set([...fixable, ...tried.slice(0, 2).filter((c) => c.score.total <= 1.5 * tried[0].score.total)])];
+  for (const cand of polish) {
     let cur = cand;
     const gap = 2 * R + 40;
     for (let round = 0; round < 3 && budget > 0; round++) {
@@ -326,8 +358,6 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
         for (const { p } of spots.sort((a, b) => a.r - b.r).slice(0, 3)) {
           if (budget-- <= 0) break;
           const c = structuredClone(cur.d);
-          for (const t of c.transitions) { delete t.curve; delete t.loopAngle; }
-          for (const s of c.states) delete s.initialAngle;
           const s = c.states.find((x) => x.id === id)!;
           s.x = Math.round(p.x / GRID) * GRID; s.y = Math.round(p.y / GRID) * GRID;
           const sc = finish(c, cur.sx);
@@ -338,7 +368,7 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
       if (!next) break;
       cur = next;
     }
-    if (cur !== cand) tried.push(cur);
+    if (cur !== cand) add(cur);
   }
   tried.sort(byScore);
   const best = tried[0];
@@ -387,8 +417,9 @@ function packIslands(d: FsmDiagram, islands: string[][], opts: TidyOptions): Lai
     x += w + gap;
     rowH = Math.max(rowH, h);
   }
-  const sc = score(out, planDiagram(out, popts));
+  // Scored in the step it reports (the islands' smallest), so score(d, plan, step) gives the same again.
   const step = Math.min(...parts.map((p) => p.laid.tried[0]?.sx ?? 200));
+  const sc = score(out, planDiagram(out, popts), step);
   return { score: sc, arrangement: "islands", triangles: parts.flatMap((p) => p.laid.triangles), candidates: [sc], d: out, tried: [{ score: sc, arrangement: "islands", d: out, sx: step, sy: step }] };
 }
 
@@ -724,7 +755,7 @@ function rings(g: Graph, sx: number, sy: number): Array<[string, Pos]> {
   }));
   const centroid = (ps: Pt[]) => ({ x: ps.reduce((s, p) => s + p.x, 0) / ps.length, y: ps.reduce((s, p) => s + p.y, 0) / ps.length });
   const out: Array<[string, Pos]> = [];
-  for (const [c, r] of ringSizes(blocks[rootIdx].length).slice(0, 3)) {
+  sizes: for (const [c, r] of ringSizes(blocks[rootIdx].length).slice(0, 3)) {
     const pos: Pos = new Map();
     const rootLoop = loops.get(rootIdx)!;
     const side = Math.min(sx, sy);
@@ -754,6 +785,9 @@ function rings(g: Graph, sx: number, sy: number): Array<[string, Pos]> {
           if (home > 0) cost += (0.3 * (ps[home].x - at.x)) / side; // the reset state towards the left
           if (cost < bestCost - 1e-9) { bestCost = cost; best = ps; }
         }
+        // A hub with more hanging pieces than free sides has no room: some
+        // would land on states already placed. No drawing for this size.
+        if (best.slice(1).some((p) => [...pos.values()].some((q) => Math.hypot(p.x - q.x, p.y - q.y) < GRID))) continue sizes;
         loop.forEach((s, i) => { if (i > 0) pos.set(s, best[i]); });
         centre.set(k, centroid(best));
         todo.push(k);
@@ -1295,8 +1329,12 @@ function levelClusters(g: Graph, pos: Pos, triangles: number[][], gap: number, s
         if ((n > bestLevel || (n === bestLevel && n > 0 && Math.abs(ang) < Math.abs(bestTurn) - 1e-9)) && clear(m)) { best = m; bestLevel = n; bestTurn = ang; }
       }
     }
-    // Shrink back towards one grid step per side, as far as it stays clear.
-    for (const k of [step / mean, (1 + step / mean) / 2]) {
+    // Shrink back towards one grid step per side, as far as it stays clear,
+    // of the other states and within itself: a cluster with long and short
+    // sides stops shrinking when its two closest states are a gap apart.
+    const ps = [...best.values()];
+    const closest = Math.min(...ps.flatMap((p, i) => ps.slice(i + 1).map((q) => Math.hypot(p.x - q.x, p.y - q.y))));
+    for (const k of [step / mean, (1 + step / mean) / 2].map((k) => Math.max(k, gap / closest))) {
       if (k >= 1) break;
       const m = new Map([...best].map(([id, p]) => [id, { x: cx + (p.x - cx) * k, y: cy + (p.y - cy) * k }]));
       if (clear(m)) { best = m; break; }
