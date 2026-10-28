@@ -251,6 +251,26 @@ test("a file or autosave with huge coordinates, curves or radii is refused, not 
   assert.equal(storage.has("fsm-designer:autosave"), false, "set aside");
 });
 
+test("a reload brings labels back exactly as typed, shortcut syntax and all", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  const stop = startAutosave();
+  try {
+    const d = newDiagram();
+    // Typed with no space after them, so never converted: not identifiers, so they are labels.
+    createState(d, 100, 100).label = "S_0'";
+    createState(d, 300, 100).label = "a\\beta!";
+    useEditor.getState().load(d, "m.fsm.json");
+    mock.timers.tick(300);
+  } finally {
+    stop();
+    mock.timers.reset();
+  }
+  useEditor.getState().load(newDiagram(), null);
+  await restoreSession();
+  assert.deepEqual(useEditor.getState().doc.states.map((s) => s.label), ["S_0'", "a\\beta!"], "came back as S₀' and aβ!, marked clean");
+  assert.equal(useEditor.getState().dirty, false);
+});
+
 test("discarding on close leaves the last saved diagram in the autosave, not the discarded changes", () => {
   const d = newDiagram();
   createState(d, 100, 100);

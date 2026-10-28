@@ -31,8 +31,10 @@ async function confirmDiscard(): Promise<boolean> {
 
 /**
  * Earlier versions stored labels as "S_0" / "\beta" and drew them converted;
- * labels now hold the characters themselves, so convert old ones on load.
- * Conditions only get greek converted (data_0 is a Verilog name).
+ * labels now hold the characters themselves, so convert old ones when a file
+ * is opened. Conditions only get greek converted (data_0 is a Verilog name).
+ * A file cannot say which version wrote it, so this also rewrites a label
+ * typed in this one without the space that converts it ("S_0'").
  */
 function upgradeLabels(d: FsmDiagram): FsmDiagram {
   for (const s of d.states) if (s.label !== undefined) s.label = prettyText(s.label);
@@ -362,7 +364,10 @@ async function parseSession(raw: string): Promise<Session> {
     throw new Error(tr("it is not valid JSON", "不是有效的 JSON", "有効な JSON ではありません"));
   }
   if (typeof saved !== "object" || saved === null) throw new Error(tr("not a saved diagram", "不是存下來的圖", "保存された図ではありません"));
-  const d = upgradeLabels(readDiagram(saved.doc));
+  // Not upgradeLabels: every build since labels hold Unicode writes the slot,
+  // and a label typed without the space that converts it ("S_0'", "a\beta!")
+  // is what the user typed; the upgrade changed it on every reload.
+  const d = readDiagram(saved.doc);
   // Only this editor writes the slot, but an older build, or a hand edit, can leave anything in it.
   const filePath = typeof saved.filePath === "string" ? saved.filePath : null;
   // Older versions opened an example under its own name; an unsaved copy takes the default.
