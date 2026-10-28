@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { expandShortcut, planDiagram } from "@fsm/core";
 import { Canvas, MAX_ZOOM, zoomAround } from "./Canvas.tsx";
 import type { GridOptions, GridStyle, View } from "./Canvas.tsx";
@@ -8,6 +8,7 @@ import { Menu } from "./Menu.tsx";
 import { ImportReport, VerilogImportDialog } from "./VerilogImport.tsx";
 import { discardMessage, exportLatex, exportPng, exportSvg, latexText, newFile, openFile, restoreSession, saveDoc, startAutosave, tidyUp } from "./actions.ts";
 import { baseName, copyText, guardWindowClose, isDesktop, setWindowTitle } from "./platform.ts";
+import { modalOpen, useModal } from "./dialog.ts";
 import { drawOptions, selectionParts, copySelection, deleteSelection, edgeTransitions, getStateText, hasClipboard, pasteClipboard, selectAll, setEdgeText, setStateText, useEditor } from "./store.ts";
 import type { Selection } from "./store.ts";
 import type { FsmDiagram, ImportResult, LayoutIssue } from "@fsm/core";
@@ -100,7 +101,9 @@ export function App() {
       const inField = (e.target as Element).closest("input, textarea, select");
       const k = e.key.toLowerCase();
       if (mod && k === "s") { e.preventDefault(); run(() => saveDoc(e.shiftKey))(); return; }
-      if (inField) return;
+      // An open dialog (LaTeX, Import, Discard changes?) owns the keyboard; it
+      // handles Escape and Tab itself, and nothing may change the diagram behind it.
+      if (inField || modalOpen()) return;
       if (mod && k === "o") { e.preventDefault(); run(openFile)(); return; }
       if (mod && k === "n") { e.preventDefault(); run(newFile)(); return; }
       if (mod && k === "i") { e.preventDefault(); setImporting(true); return; }
@@ -275,29 +278,7 @@ export function App() {
           </span>
         </div>
       </footer>
-      {latex !== null && (
-        <div className="modal-backdrop" onClick={() => setLatex(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>LaTeX (TikZ)</h3>
-            <textarea readOnly value={latex} spellCheck={false} />
-            <div className="row">
-              <button
-                onClick={(e) => {
-                  const area = (e.currentTarget.closest(".modal") as HTMLElement).querySelector("textarea")!;
-                  copyText(latex).then(
-                    () => setNotice(tr("LaTeX copied", "已複製 LaTeX")),
-                    () => { area.focus(); area.select(); setNotice(tr("All text selected; press Ctrl+C to copy", "已選取全部文字，請按 Ctrl+C 複製")); },
-                  );
-                }}
-              >
-                {tr("Copy", "複製")}
-              </button>
-              <button onClick={run(exportLatex)}>{tr("Save as .tex", "存成 .tex")}</button>
-              <button onClick={() => setLatex(null)}>{tr("Close", "關閉")}</button>
-            </div>
-          </div>
-        </div>
-      )}
+      {latex !== null && <LatexDialog latex={latex} onClose={() => setLatex(null)} onSave={run(exportLatex)} setNotice={setNotice} />}
       {importing && (
         <VerilogImportDialog
           onClose={() => setImporting(false)}
@@ -315,6 +296,35 @@ export function App() {
       {notice && (
         <div className="toast ok" onClick={() => setNotice(null)}>{notice}</div>
       )}
+    </div>
+  );
+}
+
+/** File > Export > LaTeX: the TikZ code, to copy or save. */
+function LatexDialog({ latex, onClose, onSave, setNotice }: { latex: string; onClose: () => void; onSave: () => void; setNotice: (s: string) => void }) {
+  const box = useModal<HTMLDivElement>(onClose);
+  const titleId = useId();
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" ref={box} role="dialog" aria-modal="true" aria-labelledby={titleId} onClick={(e) => e.stopPropagation()}>
+        <h3 id={titleId}>LaTeX (TikZ)</h3>
+        <textarea readOnly value={latex} spellCheck={false} aria-labelledby={titleId} />
+        <div className="row">
+          <button
+            onClick={() => {
+              const area = box.current!.querySelector("textarea")!;
+              copyText(latex).then(
+                () => setNotice(tr("LaTeX copied", "已複製 LaTeX")),
+                () => { area.focus(); area.select(); setNotice(tr("All text selected; press Ctrl+C to copy", "已選取全部文字，請按 Ctrl+C 複製")); },
+              );
+            }}
+          >
+            {tr("Copy", "複製")}
+          </button>
+          <button onClick={onSave}>{tr("Save as .tex", "存成 .tex")}</button>
+          <button onClick={onClose}>{tr("Close", "關閉")}</button>
+        </div>
+      </div>
     </div>
   );
 }

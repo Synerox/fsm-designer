@@ -2,10 +2,11 @@
 // FSM in it is extracted (by @fsm/core's importer, no guessing) and drawn as a
 // new diagram. A small report says what was found.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { listStateMachines } from "@fsm/core";
 import type { ImportResult } from "@fsm/core";
 import { importVerilogText } from "./actions.ts";
+import { useModal } from "./dialog.ts";
 import { VERILOG_FILTER, openTextFile } from "./platform.ts";
 import { tr, useLang } from "./i18n.ts";
 
@@ -48,8 +49,11 @@ export function VerilogImportDialog({ onClose, onImported }: { onClose: () => vo
   // Every FSM in the code (several modules, or several state registers in one).
   const machines = useMemo(() => listStateMachines(code), [code]);
   const choice = machines[Math.min(picked, machines.length - 1)];
-  const area = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => { area.current?.focus(); }, []);
+  // Focus starts in the code box (the dialog's first control). Escape, Tab and
+  // focus return are handled by useModal, so they keep working after a
+  // cancelled "Discard changes?" confirm.
+  const box = useModal<HTMLDivElement>(onClose);
+  const titleId = useId();
   useEffect(() => { try { localStorage.setItem(DRAFT_KEY, code); } catch { /* storage off */ } }, [code]);
 
   const openFile = async () => {
@@ -71,14 +75,13 @@ export function VerilogImportDialog({ onClose, onImported }: { onClose: () => vo
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal verilog-import" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => { if (e.key === "Escape") onClose(); if ((e.ctrlKey || e.metaKey) && e.key === "Enter") void run(); }}>
-        <h3>{tr("Import Verilog", "匯入 Verilog")}</h3>
+      <div className="modal verilog-import" ref={box} role="dialog" aria-modal="true" aria-labelledby={titleId} onClick={(e) => e.stopPropagation()} onKeyDown={(e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") void run(); }}>
+        <h3 id={titleId}>{tr("Import Verilog", "匯入 Verilog")}</h3>
         <p className="hint">
           {tr("Paste or open Verilog / SystemVerilog code with a state machine. The state register, reset state, and each transition's condition and outputs are found and drawn as a state diagram. ", "貼上或開啟含有狀態機的 Verilog / SystemVerilog 程式碼，會自動找出狀態暫存器、reset 狀態、每條轉移的條件與輸出並畫成狀態圖。")}
           {tr("Outputs that depend only on the state are drawn in the states (Moore); outputs that also depend on inputs go on the transitions (Mealy).", "只跟狀態有關的輸出畫在狀態裡（Moore），跟輸入也有關的輸出畫在轉移上（Mealy）。")}
         </p>
         <textarea
-          ref={area}
           value={code}
           spellCheck={false}
           placeholder={"module my_fsm (input clk, input rst_n, ...);\n  ...\nendmodule"}
