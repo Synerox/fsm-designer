@@ -48,9 +48,15 @@ export function stateSubLines(_d: FsmDiagram, s: State): string[] {
 
 export const SUB_LINE_H = SMALL_SIZE * 1.2;
 
-/** A state's radius: its own size if set, else the default. Text never changes it. */
+/**
+ * A state's radius: its own size if set, else the default. Text never changes
+ * it. A hand-edited file can hold 0, a negative size or null, which would draw
+ * an invalid circle and NaN self loops: those get the default, and tiny sizes
+ * the editor's minimum of 10.
+ */
 export function stateRadius(_d: FsmDiagram, s: State): number {
-  return s.radius ?? STATE_RADIUS;
+  const r = s.radius;
+  return r === undefined || !Number.isFinite(r) || r <= 0 ? STATE_RADIUS : Math.max(r, 10);
 }
 
 /**

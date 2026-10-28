@@ -179,8 +179,12 @@ export function drawnSubLines(d: FsmDiagram, s: State, opts: PlanOptions = {}): 
   return opts.labels === "none" ? [] : stateSubLines(d, s);
 }
 
+/** A number set by hand, or undefined when it is unset or not a finite number (null, NaN or 1e999 from a hand-edited file). */
+const given = (v: number | undefined) => (Number.isFinite(v) ? v : undefined);
+
 export function planDiagram(d: FsmDiagram, opts: PlanOptions = {}): DiagramPlan {
-  const missing = d.states.filter((s) => s.x === undefined || s.y === undefined);
+  // A null or NaN coordinate (JSON writes NaN as null) is as good as none: drawing it at 0 would hide the problem.
+  const missing = d.states.filter((s) => !Number.isFinite(s.x) || !Number.isFinite(s.y));
   if (missing.length) throw new Error(`States without positions: ${missing.map((s) => s.name).join(", ")}. Run auto layout first.`);
   const byId = new Map(d.states.map((s) => [s.id, s]));
   const R = new Map(d.states.map((s) => [s.id, stateRadius(d, s)]));
@@ -197,7 +201,7 @@ export function planDiagram(d: FsmDiagram, opts: PlanOptions = {}): DiagramPlan 
   // self loops and the initial arrow.
   const busy = new Map<string, number[]>(d.states.map((s) => [s.id, []]));
   const initial = d.states.find((s) => s.isInitial);
-  const initialAngle = initial?.initialAngle ?? Math.PI; // initial arrow comes from the left by default
+  const initialAngle = given(initial?.initialAngle) ?? Math.PI; // initial arrow comes from the left by default
   if (initial) busy.get(initial.id)!.push(initialAngle);
 
   // Sampled polylines of every edge drawn so far, for label collision checks.
@@ -217,14 +221,14 @@ export function planDiagram(d: FsmDiagram, opts: PlanOptions = {}): DiagramPlan 
     const n = { x: dir.y, y: -dir.x }; // left of travel (screen)
     const mid = { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 };
     const reverse = groups.has(`${b.id}\u0000${a.id}`);
-    const manual = ts.find((t) => t.curve !== undefined)?.curve;
+    const manual = ts.map((t) => given(t.curve)).find((c) => c !== undefined);
 
     // Straight lines both ways would sit on top of each other: shift each to
     // the left of its own travel, which puts them on opposite sides.
     const back = groups.get(`${b.id}\u0000${a.id}`);
     const reverseStraight = back?.some((t) => t.curve === 0) ?? false;
     // Half the distance between the two lines (either direction may carry it), kept inside the smaller circle.
-    const gap = ts.find((t) => t.gap !== undefined)?.gap ?? back?.find((t) => t.gap !== undefined)?.gap ?? PARALLEL_GAP;
+    const gap = [...ts, ...(back ?? [])].map((t) => given(t.gap)).find((g) => g !== undefined) ?? PARALLEL_GAP;
     const half = Math.min(gap / 2, Math.min(ra, rb) * 0.8);
     const straightPair = (curve: number) => curve === 0 && reverseStraight;
     // When the circles touch or overlap, border to border would run from B
@@ -306,7 +310,7 @@ export function planDiagram(d: FsmDiagram, opts: PlanOptions = {}): DiagramPlan 
     if (a.id !== ts[0].to) continue;
     const ra = R.get(a.id)!;
     const used = busy.get(a.id)!;
-    const manual = ts.find((t) => t.loopAngle !== undefined)?.loopAngle;
+    const manual = ts.map((t) => given(t.loopAngle)).find((v) => v !== undefined);
     let best = manual ?? -Math.PI / 2, bestGap = -1;
     for (let k = 0; k < 16 && manual === undefined; k++) {
       // Prefer straight up/down/left/right on ties.

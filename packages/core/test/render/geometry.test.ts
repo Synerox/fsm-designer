@@ -3,7 +3,7 @@
 // well-formed whatever the labels contain.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { addState, addTransition, createDiagram, planDiagram, renderSvg } from "../../src/index.ts";
+import { addState, addTransition, createDiagram, ensureLayout, planDiagram, renderLatex, renderSvg } from "../../src/index.ts";
 
 type Pt = { x: number; y: number };
 /** Does the segment a-b pass through the label rect (centre + size)? */
@@ -58,4 +58,37 @@ test("control characters pasted into labels do not break the SVG", () => {
   const svg = renderSvg(d);
   assert.doesNotMatch(svg, /[\u0000-\u0008\u000B\u000C\u000E-\u001F￾￿]/);
   assert.ok(svg.includes(">ctrl chars<") && svg.includes(">ab<") && svg.includes("<title>m</title>"));
+});
+
+// Numbers a hand-edited file can hold that the editor and the agent tools never write.
+test("a null or NaN position counts as missing, and ensureLayout places it", async () => {
+  const d = createDiagram({ name: "m" });
+  addState(d, { name: "A", x: 100, y: 100 });
+  const b = addState(d, { name: "B", x: 300, y: 100 });
+  (b as { x: unknown }).x = null; // JSON.stringify writes NaN as null
+  assert.throws(() => planDiagram(d), /States without positions: B/);
+  assert.throws(() => renderLatex(d), /States without positions: B/);
+  await ensureLayout(d);
+  assert.ok(Number.isFinite(b.x) && Number.isFinite(b.y));
+  assert.ok(!renderSvg(d).includes("NaN"));
+});
+
+test("zero, negative and non-finite sizes and angles draw valid geometry", () => {
+  for (const [radius, loopAngle, curve, initialAngle] of [[0, Infinity, Infinity, NaN], [-20, NaN, null, Infinity], [3, -Infinity, NaN, null]]) {
+    const d = createDiagram({ name: "m" });
+    addState(d, { name: "A", x: 100, y: 100, isInitial: true, isAccepting: true });
+    addState(d, { name: "B", x: 300, y: 100 });
+    addTransition(d, { from: "A", to: "A", condition: "x" });
+    addTransition(d, { from: "A", to: "B", condition: "y" });
+    Object.assign(d.states[0], { radius, initialAngle });
+    Object.assign(d.transitions[0], { loopAngle });
+    Object.assign(d.transitions[1], { curve, gap: NaN });
+    const what = JSON.stringify([radius, loopAngle, curve, initialAngle]);
+    const plan = planDiagram(d);
+    assert.ok(plan.states[0].r >= 10, what);
+    assert.ok(Number.isFinite(plan.edges.find((e) => e.loopAngle !== undefined)!.loopAngle), what);
+    const svg = renderSvg(d);
+    assert.doesNotMatch(svg, /NaN|Infinity|r="-/, what);
+    assert.doesNotMatch(renderLatex(d), /NaN|Infinity|size=-/, what);
+  }
 });
