@@ -42,8 +42,8 @@ export function stateRadius(_d: FsmDiagram, s: State): number {
  * Imported or agent-built names and outputs are often longer than a
  * hand-drawn "S0": grow every state to one size, big enough for its text (up
  * to a limit, past which the name's font shrinks instead). Never shrinks a
- * state that is already bigger. The editor does not call this; there, text
- * never resizes a state.
+ * state that is already bigger. The editor calls this only on opened files
+ * that come without coordinates; there, text never resizes a drawn state.
  */
 export function fitStateSizes(d: FsmDiagram): void {
   const MAX = 64;

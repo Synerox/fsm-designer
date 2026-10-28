@@ -44,6 +44,7 @@ export function App() {
   const selection = useEditor((s) => s.selection);
   const [latex, setLatex] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
+  const [layingOut, setLayingOut] = useState(false);
   const [report, setReport] = useState<{ result: ImportResult; seq: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -52,7 +53,9 @@ export function App() {
   useEffect(() => {
     if (!notice) { setHoldNotice(false); return; }
     if (holdNotice) return;
-    const t = setTimeout(() => setNotice(null), 2500 + 50 * notice.length);
+    // Clear only this notice: after a long layout an expired timer can run
+    // after the next notice was set but before this effect is cleaned up.
+    const t = setTimeout(() => setNotice((n) => (n === notice ? null : n)), 2500 + 50 * notice.length);
     return () => clearTimeout(t);
   }, [notice, holdNotice]);
   const filePath = useEditor((s) => s.filePath);
@@ -255,16 +258,18 @@ export function App() {
         <div className="menu">
           <button
             className="menu-trigger"
-            disabled={!hasStates}
+            disabled={!hasStates || layingOut}
+            aria-busy={layingOut}
             data-testid="tidy"
             onClick={run(async () => {
-              const { moved, issues } = await tidyUp();
+              setLayingOut(true); // tidyUp lets this paint before the layout holds the page
+              const { moved, issues } = await tidyUp().finally(() => setLayingOut(false));
               if (issues.length) setNotice(tr(`Laid out; could not fix: ${issueText(issues)}`, `已排版，仍無法解決：${issueText(issues)}`, `レイアウト済み。解決できなかった問題：${issueText(issues)}`));
               else if (!moved) setNotice(tr("Already laid out", "目前已經是自動排版的結果"));
               fit();
             })}
           >
-            {tr("Auto Layout", "自動排版")}
+            {layingOut ? tr("Laying out…", "排版中…", "レイアウト中…") : tr("Auto Layout", "自動排版")}
           </button>
         </div>
         <span className="sep" />

@@ -2,7 +2,7 @@
 // FSM in it is extracted (by @fsm/core's importer, no guessing) and drawn as a
 // new diagram. A small report says what was found.
 
-import { useEffect, useId, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useId, useMemo, useRef, useState } from "react";
 import { listStateMachines } from "@fsm/core";
 import type { ImportResult } from "@fsm/core";
 import { importVerilogText } from "./actions.ts";
@@ -40,6 +40,11 @@ endmodule
 
 const DRAFT_KEY = "fsm-designer:verilog-draft";
 
+/** A draft too big to store is dropped rather than leaving an older one to come back next time. */
+function saveDraft(code: string) {
+  try { localStorage.setItem(DRAFT_KEY, code); } catch { try { localStorage.removeItem(DRAFT_KEY); } catch { /* storage off */ } }
+}
+
 export function VerilogImportDialog({ onClose, onImported }: { onClose: () => void; onImported: (r: ImportResult) => void }) {
   const [code, setCode] = useState(() => { try { return localStorage.getItem(DRAFT_KEY) ?? ""; } catch { return ""; } });
   const [selfLoops, setSelfLoops] = useState(true);
@@ -47,14 +52,22 @@ export function VerilogImportDialog({ onClose, onImported }: { onClose: () => vo
   const [busy, setBusy] = useState(false);
   const [picked, setPicked] = useState(0);
   // Every FSM in the code (several modules, or several state registers in one).
-  const machines = useMemo(() => listStateMachines(code), [code]);
-  const choice = machines[Math.min(picked, machines.length - 1)];
+  // Parsed from a deferred copy, so typing in a long source stays responsive.
+  const parsed = useDeferredValue(code);
+  const machines = useMemo(() => listStateMachines(parsed), [parsed]);
   // Focus starts in the code box (the dialog's first control). Escape, Tab and
   // focus return are handled by useModal, so they keep working after a
   // cancelled "Discard changes?" confirm.
   const box = useModal<HTMLDivElement>(onClose);
   const titleId = useId();
-  useEffect(() => { try { localStorage.setItem(DRAFT_KEY, code); } catch { /* storage off */ } }, [code]);
+  // The draft is saved once typing pauses, and when the dialog closes.
+  const latest = useRef(code);
+  latest.current = code;
+  useEffect(() => {
+    const t = setTimeout(() => saveDraft(code), 300);
+    return () => clearTimeout(t);
+  }, [code]);
+  useEffect(() => () => saveDraft(latest.current), []);
 
   const openFile = async () => {
     const f = await openTextFile([VERILOG_FILTER]);
@@ -64,7 +77,10 @@ export function VerilogImportDialog({ onClose, onImported }: { onClose: () => vo
     setBusy(true);
     setError(null);
     try {
-      const r = await importVerilogText(code, { selfLoops, ...(machines.length > 1 && choice ? choice : {}) });
+      // The machine list may still be catching up with the last keystroke.
+      const list = parsed === code ? machines : listStateMachines(code);
+      const pick = list[Math.min(picked, list.length - 1)];
+      const r = await importVerilogText(code, { selfLoops, ...(list.length > 1 && pick ? pick : {}) });
       if (r) onImported(r);
     } catch (e) {
       setError(importErrorText(e instanceof Error ? e.message : String(e)));
@@ -84,6 +100,7 @@ export function VerilogImportDialog({ onClose, onImported }: { onClose: () => vo
         <textarea
           value={code}
           spellCheck={false}
+          aria-label={tr("Verilog source", "Verilog 程式碼", "Verilog ソース")}
           placeholder={"module my_fsm (input clk, input rst_n, ...);\n  ...\nendmodule"}
           onChange={(e) => { setCode(e.target.value); setError(null); }}
           data-testid="verilog-source"
@@ -106,7 +123,7 @@ export function VerilogImportDialog({ onClose, onImported }: { onClose: () => vo
           <button onClick={() => { setCode(SAMPLE); setError(null); }}>{tr("Example", "範例")}</button>
           <button onClick={() => void openFile()}>{tr("Open file…", "開啟檔案…")}</button>
           <button onClick={onClose}>{tr("Cancel", "取消")}</button>
-          <button className="primary" disabled={!code.trim() || busy} onClick={() => void run()} title="Ctrl+Enter" data-testid="verilog-import">{tr("Import", "匯入")}</button>
+          <button className="primary" disabled={!code.trim() || busy} onClick={() => void run()} title="Ctrl+Enter" data-testid="verilog-import" aria-busy={busy}>{busy ? tr("Importing…", "匯入中…", "読み込み中…") : tr("Import", "匯入")}</button>
         </div>
       </div>
     </div>

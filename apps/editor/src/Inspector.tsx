@@ -4,7 +4,7 @@
 import { LABEL_SIZE, NAME_SIZE, STATE_RADIUS, expandShortcut } from "@fsm/core";
 import { PARALLEL_GAP, planDiagram } from "@fsm/core";
 import type { FsmDiagram } from "@fsm/core";
-import { useState } from "react";
+import { useId, useLayoutEffect, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { DRAW, alignStates, deleteSelection, edgeTransitions, setEdgeShape, getStateText, setEdgeText, setStateText, useEditor } from "./store.ts";
 
@@ -34,6 +34,8 @@ function SizeField({ label, value, fallback, min, max, onChange }: {
 }) {
   // Keep what is typed while it is incomplete (e.g. "1" on the way to "12").
   const [draft, setDraft] = useState<string | null>(null);
+  // Named by the label text alone; the wrapping <label> would add the arrow buttons' names.
+  const labelId = useId();
   // Arrows and the up/down keys step from the shown value, or from the default when empty.
   const step = (dir: 1 | -1) => {
     setDraft(null);
@@ -41,10 +43,11 @@ function SizeField({ label, value, fallback, min, max, onChange }: {
   };
   return (
     <label>
-      {label}
+      <span id={labelId}>{label}</span>
       <span className="stepper">
         <input
           type="number"
+          aria-labelledby={labelId}
           min={min}
           max={max}
           value={draft ?? value ?? ""}
@@ -58,11 +61,17 @@ function SizeField({ label, value, fallback, min, max, onChange }: {
           onChange={(e) => {
             const raw = e.target.value;
             setDraft(raw);
-            if (raw === "") return onChange(undefined);
+            // A number box reports "" for unfinished input such as "-" or "1e"
+            // too; only a really empty box means "back to the default".
+            if (raw === "") { if (!e.target.validity.badInput) onChange(undefined); return; }
             const v = Number(raw);
             if (Number.isFinite(v) && v >= min && v <= max) onChange(v);
           }}
-          onBlur={() => setDraft(null)}
+          onBlur={(e) => {
+            // Unfinished input erased again ("-", then Backspace) fires no change: "" to "".
+            if (draft === "" && e.target.value === "" && !e.target.validity.badInput) onChange(undefined);
+            setDraft(null);
+          }}
         />
         <span className="arrows">
           <button type="button" tabIndex={-1} aria-label={tr("Increase", "加 1")} onClick={(e) => { e.preventDefault(); step(1); }}>
@@ -152,6 +161,39 @@ function ShapeControls({ doc, edges, edit }: {
         <button title={tr("Back to the default curve (drag a line to adjust it)", "回到預設的彎曲程度（拖曳線條可以自己調整）")} onClick={() => apply(curved, "curve")}>{tr("Reset curve", "重設彎曲")}</button>
       )}
     </>
+  );
+}
+
+/** Rename to a typed identifier, or put the current name back. */
+function commitName(el: HTMLInputElement) {
+  const { doc, edit } = useEditor.getState();
+  const v = el.value.trim();
+  if (!IDENT.test(v)) { el.value = doc.name; return; }
+  if (v !== doc.name) edit((d) => { d.name = v; });
+}
+
+/**
+ * The diagram's name, kept on blur or Enter. Clicking a state swaps this
+ * panel out in the pointerdown, before the browser blurs the field, so a name
+ * still being typed is also kept when the field goes away (unless the
+ * diagram itself was renamed or replaced meanwhile).
+ */
+function DiagramName({ name }: { name: string }) {
+  const ref = useRef<HTMLInputElement>(null);
+  useLayoutEffect(() => {
+    const el = ref.current!;
+    return () => { if (el.value !== name && useEditor.getState().doc.name === name) commitName(el); };
+  }, [name]);
+  return (
+    <label>
+      {tr("Name", "名稱")}
+      <input
+        ref={ref}
+        defaultValue={name}
+        onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+        onBlur={(e) => commitName(e.currentTarget)}
+      />
+    </label>
   );
 }
 
@@ -265,18 +307,7 @@ export function Inspector({ snap }: { snap: boolean }) {
   return (
     <aside className="inspector">
       <h3>{tr("State diagram", "狀態轉移圖")}</h3>
-      <label>
-        {tr("Name", "名稱")}
-        <input
-          defaultValue={doc.name}
-          key={doc.name}
-          onBlur={(e) => {
-            const v = e.target.value.trim();
-            if (!IDENT.test(v)) { e.target.value = doc.name; return; }
-            if (v !== doc.name) edit((d) => { d.name = v; });
-          }}
-        />
-      </label>
+      <DiagramName key={doc.name} name={doc.name} />
       <p className="hint">{tr(`${doc.states.length} states, ${doc.transitions.length} transitions`, `${doc.states.length} 個狀態，${doc.transitions.length} 條轉移`, `状態 ${doc.states.length} 個、遷移 ${doc.transitions.length} 本`)}</p>
     </aside>
   );

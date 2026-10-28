@@ -37,13 +37,18 @@ function upgradeLabels(d: FsmDiagram): FsmDiagram {
 
 export async function loadText(text: string, path: string | null): Promise<void> {
   const d = upgradeLabels(parseDiagram(JSON.parse(text)));
-  // Files made elsewhere (agents, older versions) can have names and outputs
-  // too big for their circles: grow the circles, and re-lay out if they now crowd.
-  const before = d.states.map((s) => s.radius);
-  fitStateSizes(d);
-  const grown = d.states.some((s, i) => s.radius !== before[i]);
-  if (grown && crowded(d)) await autoLayout(d, { draw: drawOptions() });
-  else await ensureLayout(d); // agent-made files may come without coordinates
+  // A file whose states are all placed (everything the editor saves) opens as
+  // it was saved: in the editor text never resizes a state, so its circles and
+  // positions are the user's. Files made elsewhere (agents) can come without
+  // coordinates and with names and outputs too big for their circles: grow
+  // the circles, and re-lay out if they now crowd.
+  if (d.states.some((s) => s.x === undefined || s.y === undefined)) {
+    const before = d.states.map((s) => s.radius);
+    fitStateSizes(d);
+    const grown = d.states.some((s, i) => s.radius !== before[i]);
+    if (grown && crowded(d)) await autoLayout(d, { draw: drawOptions() });
+    else await ensureLayout(d);
+  }
   useEditor.getState().load(d, path);
 }
 
@@ -66,30 +71,51 @@ export async function openFile(): Promise<void> {
 }
 
 /**
+ * Resolves once the browser has painted. The layout is synchronous and can
+ * hold the page for seconds on a big machine, so callers wait for this first
+ * to let their busy state show. (Outside a browser it resolves at once.)
+ */
+export function afterPaint(): Promise<void> {
+  if (typeof requestAnimationFrame !== "function") return Promise.resolve();
+  return new Promise((done) => {
+    const fallback = setTimeout(done, 100); // a hidden tab gets no frames
+    requestAnimationFrame(() => setTimeout(() => { clearTimeout(fallback); done(); }, 0));
+  });
+}
+
+/**
  * Draw the FSM found in Verilog source as a new, unsaved diagram.
  * Returns null if the user kept the current unsaved diagram.
  */
 export async function importVerilogText(source: string, opts: ImportOptions = {}): Promise<ImportResult | null> {
+  await afterPaint();
   const r = await importVerilogLaidOut(source, { ...opts, layout: { draw: drawOptions() } }); // throws before anything is replaced
   if (!(await confirmDiscard())) return null;
   useEditor.getState().load(r.diagram, null);
-  useEditor.setState({ dirty: true });
+  useEditor.setState({ dirty: true, savedDoc: null }); // never saved: undoing back to it is not clean either
   return r;
 }
 
 /** Re-place every state with the auto layout, as one undoable edit. moved is false if nothing moved; issues are what the layout could not fix. */
 export async function tidyUp(): Promise<{ moved: boolean; issues: LayoutIssue[] }> {
+  await afterPaint();
   const { doc } = useEditor.getState();
   if (!doc.states.length) return { moved: false, issues: [] };
   const d = structuredClone(doc);
   const issues = (await autoLayout(d, { draw: drawOptions() }))?.issues ?? [];
   const pos = new Map(d.states.map((s) => [s.id, s]));
   const tr = new Map(d.transitions.map((t) => [t.id, t]));
-  const same = doc.states.every((s) => s.x === pos.get(s.id)!.x && s.y === pos.get(s.id)!.y)
+  // The layout also picks the start arrow's side (away from the lines), so it comes back too.
+  const same = doc.states.every((s) => s.x === pos.get(s.id)!.x && s.y === pos.get(s.id)!.y && s.initialAngle === pos.get(s.id)!.initialAngle)
     && doc.transitions.every((t) => t.curve === tr.get(t.id)!.curve && t.loopAngle === tr.get(t.id)!.loopAngle);
   if (same) return { moved: false, issues };
   useEditor.getState().edit((draft) => {
-    for (const s of draft.states) { s.x = pos.get(s.id)!.x; s.y = pos.get(s.id)!.y; }
+    for (const s of draft.states) {
+      const u = pos.get(s.id)!;
+      s.x = u.x; s.y = u.y;
+      delete s.initialAngle;
+      if (u.initialAngle !== undefined) s.initialAngle = u.initialAngle;
+    }
     for (const t of draft.transitions) {
       const u = tr.get(t.id)!;
       delete t.curve; delete t.loopAngle;
@@ -108,7 +134,7 @@ export async function saveDoc(saveAs = false): Promise<void> {
     filters: [FSM_FILTER],
     mime: "application/json",
   });
-  if (path) markSaved(path);
+  if (path) markSaved(path, doc);
 }
 
 export function svgText(): string {
@@ -159,11 +185,15 @@ export async function exportPng(scale = 2): Promise<void> {
 export function startAutosave(): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const unsub = useEditor.subscribe((s, prev) => {
-    if (s.doc === prev.doc && s.filePath === prev.filePath) return;
+    // dirty counts too: an import or restore sets it in a second update after
+    // load(), and a save to the same path changes nothing else.
+    if (s.doc === prev.doc && s.filePath === prev.filePath && s.dirty === prev.dirty) return;
     clearTimeout(timer);
     timer = setTimeout(() => {
+      // Write the state as it is now, not as it was when the timer started.
+      const { doc, filePath, dirty } = useEditor.getState();
       try {
-        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({ doc: s.doc, filePath: s.filePath, dirty: s.dirty }));
+        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({ doc, filePath, dirty }));
       } catch { /* storage full or unavailable */ }
     }, 300);
   });
@@ -183,6 +213,6 @@ export async function restoreSession(): Promise<void> {
     if (!saved.filePath && d.name === "seq_detector_1011") d.name = DEFAULT_NAME;
     await ensureLayout(d);
     useEditor.getState().load(d, saved.filePath);
-    if (saved.dirty) useEditor.setState({ dirty: true });
+    if (saved.dirty) useEditor.setState({ dirty: true, savedDoc: null });
   } catch { /* ignore a corrupt autosave */ }
 }

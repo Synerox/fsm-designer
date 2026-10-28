@@ -47,7 +47,7 @@ export function Hints({ onClose }: { onClose: () => void }) {
     <section className="hints" data-testid="hints" aria-label={tr("Shortcuts", "快捷鍵", "ショートカット")}>
       <header>
         <h4>{tr("Shortcuts", "快捷鍵與操作", "ショートカット")}</h4>
-        <button className="ghost small" onClick={onClose} title={tr("Close", "關閉")}>{tr("Hints", "提示")} ✕</button>
+        <button className="ghost small" onClick={onClose} title={tr("Close", "關閉")} aria-label={tr("Close hints", "關閉提示", "ヒントを閉じる")}>{tr("Hints", "提示")} <span aria-hidden="true">✕</span></button>
       </header>
       <ul>
         {hints().map(([keys, what], i) => (

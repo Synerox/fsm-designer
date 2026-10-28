@@ -16,7 +16,7 @@
 // snapping is on; hold Alt to place freely.
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { ReactElement, SVGProps } from "react";
+import type { Dispatch, ReactElement, SVGProps, SetStateAction } from "react";
 import type { PointerEvent as RPointerEvent } from "react";
 import { SMALL_SIZE, SUB_LINE_H, drawnSubLines, planDiagram, stateDisplay, stateFontSize, unreachableStates } from "@fsm/core";
 import type { DiagramPlan, EdgePlan } from "@fsm/core";
@@ -69,7 +69,7 @@ type SingleItem = Exclude<Selection, null | { kind: "multi" }>;
 
 let gestureSeq = 0;
 
-export function Canvas({ view, setView, grid }: { view: View; setView: (v: View) => void; grid: GridOptions }) {
+export function Canvas({ view, setView, grid }: { view: View; setView: Dispatch<SetStateAction<View>>; grid: GridOptions }) {
   const doc = useEditor((s) => s.doc);
   const selection = useEditor((s) => s.selection);
   const edit = useEditor((s) => s.edit);
@@ -108,6 +108,8 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
   };
 
   // Wheel: scroll, or zoom around the cursor with ctrl/cmd (also trackpad pinch).
+  // Updates build on the latest view: several wheel events can arrive before
+  // React re-renders, and each must add to the one before.
   useEffect(() => {
     const el = svgRef.current!;
     const onWheel = (e: WheelEvent) => {
@@ -118,16 +120,21 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
         // A mouse wheel notch (deltaY around 100) zooms 10%; small trackpad
         // pinch deltas zoom smoothly in proportion.
         const factor = Math.abs(dy) >= 50 ? (dy > 0 ? 1 / 1.1 : 1.1) : Math.exp(-dy * 0.01);
-        setView(zoomAround(view, factor, e.clientX - r.left, e.clientY - r.top));
+        const mx = e.clientX - r.left, my = e.clientY - r.top;
+        setView((v) => zoomAround(v, factor, mx, my));
       } else {
-        setView({ ...view, x: view.x - e.deltaX, y: view.y - e.deltaY });
+        const { deltaX, deltaY } = e;
+        setView((v) => ({ ...v, x: v.x - deltaX, y: v.y - deltaY }));
       }
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, [view, setView]);
+  }, [setView]);
 
   const onPointerDown = (e: RPointerEvent<SVGSVGElement>) => {
+    // Focus that came from the mouse shows no ring, even once keys are typed
+    // (Chrome turns :focus-visible on at the first key press); onBlur clears it.
+    svgRef.current!.dataset.pointer = "";
     if (e.button !== 0 && e.button !== 1) return;
     svgRef.current!.setPointerCapture(e.pointerId);
     const p = toWorld(e);
@@ -188,10 +195,19 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
   const onPointerMove = (e: RPointerEvent<SVGSVGElement>) => {
     const g = gesture.current;
     if (!g) return;
+    // An undo or redo while the button is held can take away what is being
+    // dragged: the gesture ends there.
+    const held = g.kind === "curve" ? [g.from, g.to] : g.kind === "move" || g.kind === "loop" || g.kind === "resize" || g.kind === "initial" ? [g.id] : g.kind === "link" && g.from ? [g.from] : [];
+    if (held.some((id) => !byId.has(id))) {
+      gesture.current = null;
+      setLink(null);
+      setGuides([]);
+      return;
+    }
     const p = toWorld(e);
     switch (g.kind) {
       case "pan":
-        setView({ ...view, x: g.vx + e.clientX - g.sx, y: g.vy + e.clientY - g.sy });
+        setView((v) => ({ ...v, x: g.vx + e.clientX - g.sx, y: g.vy + e.clientY - g.sy }));
         break;
       case "link":
         setLink({ from: g.from, start: g.start, at: p });
@@ -222,9 +238,8 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
         const snapped = snapPoint({ x: p.x + g.dx, y: p.y + g.dy }, others, e.altKey ? 0 : SNAP_PX / view.k, grid.snap && !e.altKey);
         setGuides(snapped.guides);
         edit((d) => {
-          const s = d.states.find((v) => v.id === g.id)!;
-          s.x = snapped.p.x;
-          s.y = snapped.p.y;
+          const s = d.states.find((v) => v.id === g.id);
+          if (s) { s.x = snapped.p.x; s.y = snapped.p.y; }
         }, g.key);
         break;
       }
@@ -243,13 +258,13 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
       case "resize": {
         const s = byId.get(g.id)!.state;
         const radius = Math.min(200, Math.max(10, Math.round(Math.hypot(p.x - s.x!, p.y - s.y!))));
-        edit((d) => { d.states.find((v) => v.id === g.id)!.radius = radius; }, g.key);
+        edit((d) => { const s = d.states.find((v) => v.id === g.id); if (s) s.radius = radius; }, g.key);
         break;
       }
       case "initial": {
         const s = byId.get(g.id)!.state;
         const angle = snapAngle(angleOf({ x: s.x!, y: s.y! }, p));
-        edit((d) => { d.states.find((v) => v.id === g.id)!.initialAngle = angle; }, g.key);
+        edit((d) => { const s = d.states.find((v) => v.id === g.id); if (s) s.initialAngle = angle; }, g.key);
         break;
       }
     }
@@ -270,6 +285,7 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
     }
     if (!g || g.kind !== "link") return;
     setLink(null);
+    if (g.from && !byId.has(g.from)) return; // undone while dragging
     const p = toWorld(e);
     const target = linkTarget(plan, g.from, p);
     if (!target) return;
@@ -298,7 +314,8 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
       select({ kind: "state", id: stateId });
       return;
     }
-    if (document.elementFromPoint(e.clientX, e.clientY)?.closest("[data-edge],[data-initial]")) return;
+    // Lines, the start arrow and the resize handle (half of it lies outside the circle) are not empty space.
+    if (document.elementFromPoint(e.clientX, e.clientY)?.closest("[data-edge],[data-initial],[data-resize]")) return;
     let id = "";
     const at = grid.snap && !e.altKey ? { x: snapToGrid(p.x), y: snapToGrid(p.y) } : p;
     edit((d) => { id = createState(d, at.x, at.y).id; });
@@ -310,10 +327,16 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
       ref={svgRef}
       className="canvas"
       data-testid="canvas"
+      // A named, focusable surface; keys typed with it focused go to the
+      // window handler like anywhere else (editing the selection's text).
+      role="application"
+      aria-label={tr("State diagram canvas", "狀態圖畫布", "状態遷移図のキャンバス")}
+      tabIndex={0}
+      onBlur={(e) => { delete e.currentTarget.dataset.pointer; }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      onPointerCancel={() => { gesture.current = null; setLink(null); setGuides([]); }}
+      onPointerCancel={() => { gesture.current = null; setLink(null); setBox(null); setGuides([]); }}
       onDoubleClick={onDoubleClick}
       fontFamily={FONT}
     >
@@ -468,8 +491,9 @@ function GridDots({ view }: { view: View }) {
  */
 function linkTarget(plan: DiagramPlan, from: string | null, p: Pt): string | null {
   const hit = stateAt(plan, p);
-  if (hit || !from) return hit;
-  const { state: s, r } = plan.states.find((v) => v.state.id === from)!;
+  const src = from ? plan.states.find((v) => v.state.id === from) : undefined;
+  if (hit || !src) return hit;
+  const { state: s, r } = src;
   return Math.hypot(p.x - s.x!, p.y - s.y!) < r * 3.5 ? from : null;
 }
 
@@ -577,6 +601,9 @@ function InitialArrow({ a, selected }: { a: NonNullable<DiagramPlan["initialArro
 
 function LinkPreview({ link, plan }: { link: { from: string | null; start: Pt; at: Pt }; plan: DiagramPlan }) {
   const find = (id: string) => plan.states.find((p) => p.state.id === id)!;
+  // The source can be undone away mid-drag; this renders before the next
+  // pointer move ends the gesture.
+  if (link.from && !plan.states.some((p) => p.state.id === link.from)) return null;
   const over = linkTarget(plan, link.from, link.at);
   let d: string;
   if (link.from) {
