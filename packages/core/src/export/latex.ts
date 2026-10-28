@@ -98,7 +98,9 @@ export function renderLatex(d: FsmDiagram, opts: LatexOptions = {}): string {
     const pt = (x: number, y: number) => `(${(x / k).toFixed(2)}, ${(-y / k).toFixed(2)})`;
     let shape = "";
     if (e.loopAngle !== undefined) {
-      const deg = Math.round((-e.loopAngle * 180) / Math.PI); // TikZ y axis points up
+      // TikZ y axis points up. Kept within ±180 so out/in stay small angles
+      // whatever the stored loopAngle (pgfmath overflows near ±16384).
+      const deg = ((Math.round((-e.loopAngle * 180) / Math.PI) % 360) + 540) % 360 - 180;
       shape = `loop, out=${deg + 30}, in=${deg - 30}, looseness=6`;
     } else if (e.offset) {
       // Straight lines both ways, side by side: the plan's segment, from the

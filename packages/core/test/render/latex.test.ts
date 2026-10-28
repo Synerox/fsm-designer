@@ -72,3 +72,19 @@ test("an edge label sized 13 px by hand prints like the default size, not smalle
   assert.match(tex, /\\fontsize\{7pt\}\{8\.4pt\}\\selectfont\\ttfamily[^\n]*\{x\}/, "13 px = \\scriptsize = 7 pt");
   assert.match(tex, /\\fontsize\{8\.1pt\}[^\n]*\{y\}/, "bigger in the editor, bigger in TeX");
 });
+
+test("latex loop angles stay within one turn whatever loopAngle holds", () => {
+  const d = createDiagram({ name: "m" });
+  addState(d, { name: "A", x: 0, y: 0, isInitial: true });
+  addState(d, { name: "B", x: 200, y: 0 });
+  addState(d, { name: "C", x: 400, y: 0 });
+  addTransition(d, { from: "A", to: "A", loopAngle: 1000 });
+  addTransition(d, { from: "B", to: "B", loopAngle: -7.5 });
+  addTransition(d, { from: "C", to: "C", loopAngle: -Math.PI / 2 }); // straight up
+  const loops = [...renderLatex(d).matchAll(/loop, out=(-?\d+), in=(-?\d+)/g)].map((m) => [Number(m[1]), Number(m[2])]);
+  assert.equal(loops.length, 3);
+  for (const [out, inn] of loops) assert.ok(Math.abs(out) <= 210 && Math.abs(inn) <= 210, `out=${out}, in=${inn}`);
+  // Same direction as before, only wrapped: -7.5 rad is 430 deg, i.e. 70 deg.
+  assert.deepEqual(loops[1], [100, 40]);
+  assert.deepEqual(loops[2], [120, 60]);
+});
