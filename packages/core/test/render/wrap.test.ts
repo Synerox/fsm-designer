@@ -29,3 +29,15 @@ test("short labels and plain long ones wrap as before", () => {
   assert.deepEqual(linesOf("mealy", "(aaaaaaaa && bbbbbbbbbb) || (cccccccccc && dddddddd)", { z: 1 }), ["(aaaaaaaa && bbbbbbbbbb) ||", "(cccccccccc && dddddddd)", "/ z=1"]);
   assert.deepEqual(linesOf("mealy", "", { zzzzzzzzzz: 1, yyyyyyyyyy: 2, xxxxxxxxxx: 3 }), ["/ zzzzzzzzzz=1, yyyyyyyyyy=2, xxxxxxxxxx=3"]);
 });
+
+test("transitionLines gives each transition's drawn lines, a division in a long Moore condition kept on one line", async () => {
+  const { transitionLines } = await import("../../src/index.ts");
+  const d = createDiagram({ name: "m", type: "moore" });
+  addState(d, { name: "A", x: 0, y: 0 });
+  addState(d, { name: "B", x: 300, y: 0 });
+  const long = addTransition(d, { from: "A", to: "B", condition: "counter_value == LIMIT / 2 + OFFSET_VALUE" });
+  const go = addTransition(d, { from: "A", to: "B", condition: "go" });
+  assert.deepEqual(transitionLines(d, long), ["counter_value == LIMIT / 2 + OFFSET_VALUE"], "no || or && to break at");
+  assert.deepEqual(planDiagram(d).edges[0].lines, [...transitionLines(d, long), ...transitionLines(d, go)]);
+  assert.notDeepEqual(labelLines("counter_value == LIMIT / 2 + OFFSET_VALUE"), transitionLines(d, long), "the joined form cannot tell");
+});
