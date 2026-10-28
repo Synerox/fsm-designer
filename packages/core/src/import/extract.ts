@@ -13,8 +13,9 @@
 //     input conditions with a next state and output values.
 //  4. Outputs that are the same in every run of a state depend on the state
 //     only (Moore); outputs that vary with inputs, or whose value reads an
-//     input (q = data), are Mealy and go on the transitions. Registered outputs that always take the same value when
-//     entering a state are that state's Moore outputs.
+//     input (q = data), are Mealy and go on the transitions. Registered
+//     outputs that always take the same value when entering a state are that
+//     state's Moore outputs.
 //  5. Runs are grouped by (next state, Mealy outputs) and each group's
 //     condition is minimised with Quine-McCluskey.
 
@@ -540,6 +541,7 @@ class Engine {
     const width = (n: string) => this.c.widths.get(n);
     const assumed = (k: string) => p.assume.get(k)?.val;
     const outer = (n: string) => p.subst.get(n) ?? this.fixed.get(n) ?? this.c.params.get(n);
+    const signed = (n: string) => this.c.signed.has(n);
     return {
       // A stored value (t = a & b, or a state-dependent wire) was simplified
       // when it was written; what this run has assumed since (a = 1) must
@@ -549,10 +551,11 @@ class Engine {
       lookup: (n) => {
         const e = p.env.get(n);
         if (e === undefined) return outer(n);
-        return isNum(e) || !p.assume.size ? e : simplify(e, { lookup: outer, width, assumed });
+        return isNum(e) || !p.assume.size ? e : simplify(e, { lookup: outer, width, assumed, signed });
       },
       width,
       assumed,
+      signed,
     };
   }
 

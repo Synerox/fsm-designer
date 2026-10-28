@@ -24,6 +24,11 @@ export type Num = Extract<Expr, { k: "num" }>;
 // than its operands, or is stored in a variable, `w` on the node records the
 // width it is evaluated at, so simplifying it again anywhere (a stored value
 // read in another expression) computes the same value.
+//
+// Signedness follows Verilog too: an operand is sign-extended to the context
+// width only when every operand of the expression is signed (y = ~s and
+// y = -s for a signed s, but not d == ~s for an unsigned d). simplify passes
+// "the context is unsigned" down beside the width.
 
 export interface EvalCtx {
   /** Value of a name if it is known (a constant or a symbolic expression), else undefined. */
@@ -32,6 +37,8 @@ export interface EvalCtx {
   width(name: string): number | undefined;
   /** Truth value assumed for a boolean sub-expression, by its printed form. */
   assumed?(key: string): boolean | undefined;
+  /** Declared signed (for a name whose value is not known). */
+  signed?(name: string): boolean;
 }
 
 const ONES = (w: number) => (1n << BigInt(w)) - 1n;
@@ -130,15 +137,38 @@ export function widthOf(e: Expr, ctx: EvalCtx): number {
   }
 }
 
+/** Is e a signed expression (all its context-determined operands are signed)? */
+function signedOf(e: Expr, ctx: EvalCtx): boolean {
+  switch (e.k) {
+    case "num": return !!e.signed;
+    case "id": {
+      const v = ctx.lookup(e.name);
+      return v && isNum(v) ? !!v.signed : ctx.signed?.(e.name) ?? false;
+    }
+    case "un": return e.op === "~" || e.op === "-" || e.op === "+" ? signedOf(e.a, ctx) : false;
+    case "bin":
+      if (COMPARE.has(e.op)) return false;
+      return SHIFT.has(e.op) ? signedOf(e.a, ctx) : signedOf(e.a, ctx) && signedOf(e.b, ctx);
+    case "tern": return signedOf(e.a, ctx) && signedOf(e.b, ctx);
+    case "call": return e.name === "$signed";
+    default: return false; // selects and concatenations are unsigned
+  }
+}
+
 /** v (w bits) read as two's complement. */
 export function toSigned(v: bigint, w: number): bigint {
   return w > 0 && (v >> BigInt(w - 1)) & 1n ? v - (1n << BigInt(w)) : v;
 }
 
-/** a op, with ~ - + evaluated at w bits (their context's width) and the rest at a's own width. */
-function foldUnary(op: string, a: Num, w: number): Num {
-  const v = mask(a.v, w);
-  const signed = a.signed ? { signed: true } : {};
+/**
+ * a op, with ~ - + evaluated at w bits (their context's width) and the rest at
+ * a's own width. A signed a is sign-extended to w first unless the context is
+ * unsigned (cu): y = ~4'sb1110 is 1 in an 8-bit y, not 241.
+ */
+function foldUnary(op: string, a: Num, w: number, cu = false): Num {
+  const sx = !!a.signed && !cu;
+  const v = sx ? mask(toSigned(mask(a.v, a.w ?? 32), a.w ?? 32), w) : mask(a.v, w);
+  const signed = sx ? { signed: true } : {};
   switch (op) {
     case "!": return bool(v === 0n);
     case "~": return num(~v, w, signed);
@@ -165,11 +195,12 @@ function popcount(v: bigint): number {
  * they are in, never less than the wider operand's (an unsized literal counts
  * as 32 bits, so cnt < 300 is not cnt < 44 for an 8-bit cnt).
  */
-function foldBinary(op: string, a: Num, b: Num, w: number): Num | undefined {
+function foldBinary(op: string, a: Num, b: Num, w: number, cu = false): Num | undefined {
   // Verilog compares and computes in two's complement only when both operands
-  // are signed (signed declarations, 8'sd30, plain decimals, $signed(x));
-  // the narrower one is then sign-extended.
-  const both = !!a.signed && !!b.signed;
+  // are signed (signed declarations, 8'sd30, plain decimals, $signed(x)) and
+  // so is the rest of the expression (cu: it is not); the narrower one is
+  // then sign-extended.
+  const both = !!a.signed && !!b.signed && !cu;
   const signed = both ? { signed: true } : {};
   const x = both ? mask(toSigned(mask(a.v, a.w ?? 32), a.w ?? 32), w) : mask(a.v, w);
   const y = both ? mask(toSigned(mask(b.v, b.w ?? 32), b.w ?? 32), w) : mask(b.v, w);
@@ -191,10 +222,11 @@ function foldBinary(op: string, a: Num, b: Num, w: number): Num | undefined {
     // signed. (A shift by w or more leaves only zeros or sign bits.)
     case "<<": case "<<<": case ">>": case ">>>": {
       const aw = a.w ?? 32;
-      const v = a.signed ? mask(toSigned(mask(a.v, aw), aw), w) : mask(a.v, aw);
+      const sa = !!a.signed && !cu;
+      const v = sa ? mask(toSigned(mask(a.v, aw), aw), w) : mask(a.v, aw);
       const n = b.v < BigInt(w) ? b.v : BigInt(w);
-      const r = op === "<<" || op === "<<<" ? v << n : op === ">>>" && a.signed ? toSigned(v, w) >> n : v >> n;
-      return num(r, w, a.signed ? { signed: true } : {});
+      const r = op === "<<" || op === "<<<" ? v << n : op === ">>>" && sa ? toSigned(v, w) >> n : v >> n;
+      return num(r, w, sa ? { signed: true } : {});
     }
     case "==": case "===": return bool(x === y);
     case "!=": case "!==": return bool(x !== y);
@@ -233,10 +265,11 @@ function not(a: Expr, ctx: EvalCtx): Expr {
 /**
  * Fold everything that is known. Names are replaced by ctx.lookup when it has
  * a value; what remains unknown stays as an expression. cw is the width of the
- * context e is evaluated in (see the note at the top), when wider than e's own.
+ * context e is evaluated in (see the note at the top), when wider than e's own,
+ * and cu says that context is unsigned (its operands are zero-extended).
  */
-export function simplify(e: Expr, ctx: EvalCtx, cw?: number): Expr {
-  const r = simplify1(e, ctx, cw);
+export function simplify(e: Expr, ctx: EvalCtx, cw?: number, cu = false): Expr {
+  const r = simplify1(e, ctx, cw, cu);
   // An assumption is about the truth of what was assumed, which is its value
   // only when it is 1 bit wide: after if (cnt) a 4-bit cnt is still unknown,
   // and cnt < 5 or cnt[3] must not read it as 1 (see simplifyCond).
@@ -266,7 +299,7 @@ function atWidth<T extends Extract<Expr, { k: "un" | "bin" | "tern" }>>(n: T, ew
   return ew > widthOf(n, ctx) ? { ...n, w: ew } : n;
 }
 
-function simplify1(e: Expr, ctx: EvalCtx, cw?: number): Expr {
+function simplify1(e: Expr, ctx: EvalCtx, cw: number | undefined, cu: boolean): Expr {
   switch (e.k) {
     case "num": return e;
     case "id": return ctx.lookup(e.name) ?? e;
@@ -280,8 +313,8 @@ function simplify1(e: Expr, ctx: EvalCtx, cw?: number): Expr {
       }
       // ~ - +: at the context's width, so ~go is !go only where that is 1 bit.
       const ew = e.w ?? Math.max(widthOf(e.a, ctx), cw ?? 0);
-      const a = simplify(e.a, ctx, ew);
-      if (isConst(a)) return foldUnary(e.op, a, ew);
+      const a = simplify(e.a, ctx, ew, cu);
+      if (isConst(a)) return foldUnary(e.op, a, ew, cu);
       if (e.op === "~" && ew === 1 && isBoolean(a, ctx)) return not(a, ctx);
       return atWidth({ ...e, a }, ew, ctx);
     }
@@ -299,12 +332,30 @@ function simplify1(e: Expr, ctx: EvalCtx, cw?: number): Expr {
       }
       if (COMPARE.has(e.op)) {
         // Both sides are extended to the wider one: go + go == 2'd2 adds in 2 bits.
+        // And signed only when both are: d == ~s zero-extends s for an unsigned d.
         const ow = Math.max(widthOf(e.a, ctx), widthOf(e.b, ctx));
-        const a = simplify(e.a, ctx, ow);
-        const b = simplify(e.b, ctx, ow);
+        const ou = !(signedOf(e.a, ctx) && signedOf(e.b, ctx));
+        const a = simplify(e.a, ctx, ow, ou);
+        const b = simplify(e.b, ctx, ow, ou);
         if (isConst(a) && isConst(b)) {
-          const f = foldBinary(e.op, a, b, Math.max(ow, widthOf(a, ctx), widthOf(b, ctx)));
+          const f = foldBinary(e.op, a, b, Math.max(ow, widthOf(a, ctx), widthOf(b, ctx)), ou);
           if (f) return f;
+        }
+        // A truth assumption about a multi-bit x is the constraint x != 0, so
+        // after if (a & b), (a & b) == 0 is false (and != 0, > 0 true when unsigned).
+        if (ctx.assumed && (isConst(a) || isConst(b))) {
+          const c = (isConst(a) ? a : b) as Num;
+          const o = isConst(a) ? b : a;
+          const v = c.v === 0n && !isBoolean(o, ctx) ? ctx.assumed(printExpr(o)) : undefined;
+          if (v !== undefined) {
+            // (The op as if the constant were on the right: 0 < x is x > 0.)
+            const flip: Record<string, string> = { "<": ">", ">": "<", "<=": ">=", ">=": "<=" };
+            const op = isConst(a) ? flip[e.op] ?? e.op : e.op;
+            if (op === "==" || op === "===") return bool(!v);
+            if (op === "!=" || op === "!==") return bool(v);
+            if (ou && op === ">") return bool(v);
+            if (ou && op === "<=") return bool(!v);
+          }
         }
         // x == 1 -> x, x == 0 -> !x for a 1-bit x (and the != forms).
         if ((e.op === "==" || e.op === "!=" || e.op === "===" || e.op === "!==") && (isConst(a) || isConst(b))) {
@@ -322,10 +373,11 @@ function simplify1(e: Expr, ctx: EvalCtx, cw?: number): Expr {
       // amount and a power's exponent stand alone).
       const shift = SHIFT.has(e.op);
       const ew = e.w ?? Math.max(shift ? widthOf(e.a, ctx) : Math.max(widthOf(e.a, ctx), widthOf(e.b, ctx)), cw ?? 0);
-      const a = simplify(e.a, ctx, ew);
-      const b = shift ? simplify(e.b, ctx) : simplify(e.b, ctx, ew);
+      const eu = cu || !signedOf(shift ? e.a : e, ctx);
+      const a = simplify(e.a, ctx, ew, eu);
+      const b = shift ? simplify(e.b, ctx) : simplify(e.b, ctx, ew, eu);
       if (isConst(a) && isConst(b)) {
-        const f = foldBinary(e.op, a, b, ew);
+        const f = foldBinary(e.op, a, b, ew, eu);
         if (f) return f;
       }
       // A constant that decides a 1-bit operand: x & 0 -> 0, x & 1 -> x,
@@ -347,8 +399,9 @@ function simplify1(e: Expr, ctx: EvalCtx, cw?: number): Expr {
     case "tern": {
       const c = simplifyCond(e.c, ctx);
       const ew = e.w ?? Math.max(widthOf(e.a, ctx), widthOf(e.b, ctx), cw ?? 0);
-      if (isConst(c)) return simplify(c.v !== 0n ? e.a : e.b, ctx, ew);
-      return atWidth({ ...e, c, a: simplify(e.a, ctx, ew), b: simplify(e.b, ctx, ew) }, ew, ctx);
+      const eu = cu || !signedOf(e, ctx);
+      if (isConst(c)) return simplify(c.v !== 0n ? e.a : e.b, ctx, ew, eu);
+      return atWidth({ ...e, c, a: simplify(e.a, ctx, ew, eu), b: simplify(e.b, ctx, ew, eu) }, ew, ctx);
     }
     case "idx": {
       const a = simplify(e.a, ctx);

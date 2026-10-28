@@ -73,6 +73,37 @@ test("+ << and ~ work at the width of the comparison or assignment they are in",
   assert.deepEqual(edges(f.diagram).filter((x) => x.startsWith("S0->")), ["S0->S0: go", "S0->S1: !go"]);
 });
 
+test("a signed operand of ~ or - is sign-extended to the width it is evaluated at, unless the rest is unsigned", () => {
+  // ~4'sb1110 and -4'sd15 are 1 in an 8-bit y (sign-extended first), not 241.
+  const a = fsm("input go, output reg [7:0] y", "begin y = ~4'sb1110; next = S1; end", "y = 0;");
+  assert.deepEqual(stateOutputs(a.diagram), { S0: { y: 1 }, S1: { y: 0 } });
+  const b = fsm("input go, output reg [7:0] y", "begin y = -(4'sd15); next = S1; end", "y = 0;");
+  assert.deepEqual(stateOutputs(b.diagram), { S0: { y: 1 }, S1: { y: 0 } });
+  // The same for a signed input known from the branch it is in.
+  const c = fsm("input signed [3:0] s, output reg [7:0] y", "if (s == -4'sd1) begin y = -s; next = S1; end", "y = 0;");
+  assert.deepEqual(edges(c.diagram).filter((e) => e.startsWith("S0->")), ["S0->S1: s == 4'd15 / y=1", "S0->S0: s != 4'd15 / y=0"]);
+  const d = fsm("input signed [3:0] s, output reg [7:0] y", "if (s == -4'sd2) begin y = ~s; next = S1; end", "y = 0;");
+  assert.deepEqual(edges(d.diagram).filter((e) => e.startsWith("S0->")), ["S0->S1: s == 4'd14 / y=1", "S0->S0: s != 4'd14 / y=0"]);
+  // Compared with a signed d, ~s is sign-extended; with an unsigned d it is not.
+  const e = fsm("input signed [3:0] s, input signed [7:0] d", "if (s == -4'sd2) begin if (d == ~s) next = S1; end");
+  assert.deepEqual(edges(e.diagram).filter((x) => x.startsWith("S0->S1")), ["S0->S1: s == 4'd14 && d == 8'd1"]);
+  const f = fsm("input signed [3:0] s, input [7:0] d", "if (s == -4'sd2) begin if (d == ~s) next = S1; end");
+  assert.deepEqual(edges(f.diagram).filter((x) => x.startsWith("S0->S1")), ["S0->S1: s == 4'd14 && d == 8'd241"]);
+});
+
+test("after if (a & b) on multi-bit a and b, (a & b) == 0 is false", () => {
+  // A truth assumption about a multi-bit value is the constraint value != 0:
+  // the branch where it is 0 can never be taken, so z = 1 is never reached.
+  for (const cmp of ["(a & b) == 4'd0", "!((a & b) != 0)", "(a & b) <= 0", "0 >= (a & b)"]) {
+    const r = fsm("input [3:0] a, input [3:0] b, output reg z", `if (a & b) begin if (${cmp}) z = 1; else next = S1; end`, "z = 0;");
+    assert.deepEqual(edges(r.diagram).filter((e) => e.startsWith("S0->")), ["S0->S1: a & b", "S0->S0: !(a & b)"], cmp);
+    assert.deepEqual(stateOutputs(r.diagram), { S0: { z: 0 }, S1: { z: 0 } }, cmp);
+  }
+  // After if (!(a ^ b)) it is 0.
+  const x = fsm("input [3:0] a, input [3:0] b", "if (!(a ^ b)) begin if ((a ^ b) == 0) next = S1; end");
+  assert.deepEqual(edges(x.diagram).filter((e) => e.startsWith("S0->")), ["S0->S0: a ^ b", "S0->S1: !(a ^ b)"]);
+});
+
 test("x | C and x ^ C keep the upper bits of C for a 1-bit x", () => {
   const a = fsm("input go", "if ((go | 2'b10) == 2'b11) next = S1;");
   assert.deepEqual(edges(a.diagram).filter((e) => e.startsWith("S0->")), ["S0->S1: (go | 2'b10) == 2'b11", "S0->S0: (go | 2'b10) != 2'b11"]);
