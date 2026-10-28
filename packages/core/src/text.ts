@@ -90,9 +90,19 @@ export function texEscape(s: string): string {
   })[c]!);
 }
 
+// Greek in LaTeX, by the name pieces() gives each letter. Unicode ε and φ are
+// the shapes TeX calls \varepsilon and \varphi (TeX's \epsilon and \phi are
+// the lunate ϵ and the closed ϕ), and capitals that look like Latin letters
+// have no macro at all (there is no \Alpha or \omicron), so they are written
+// as that letter: upright like \Gamma, italic like the other lowercase.
+const TEX_GREEK: Record<string, string> = {
+  epsilon: "$\\varepsilon$", phi: "$\\varphi$", omicron: "$o$",
+  Alpha: "A", Beta: "B", Epsilon: "E", Zeta: "Z", Eta: "H", Iota: "I", Kappa: "K", Mu: "M", Nu: "N", Omicron: "O", Rho: "P", Tau: "T", Chi: "X",
+};
+
 /** Label text for LaTeX text mode: β becomes $\beta$, S₀ becomes S$_{0}$, everything else is escaped as typed. */
 export function latexText(raw: string): string {
-  return pieces(raw, false).map((p) => (p.kind === "greek" ? `$\\${p.value}$` : p.kind === "sub" ? `$_{${p.value}}$` : texEscape(p.value))).join("");
+  return pieces(raw, false).map((p) => (p.kind === "greek" ? TEX_GREEK[p.value] ?? `$\\${p.value}$` : p.kind === "sub" ? `$_{${p.value}}$` : texEscape(p.value))).join("");
 }
 
 /** The raw text a state shows: its free-form label if set, else its identifier. */

@@ -88,3 +88,12 @@ test("latex loop angles stay within one turn whatever loopAngle holds", () => {
   assert.deepEqual(loops[1], [100, 40]);
   assert.deepEqual(loops[2], [120, 60]);
 });
+
+test("latexText writes Greek with the TeX letter that looks like the screen", () => {
+  // Unicode ε and φ are TeX's \varepsilon and \varphi; ϵ and ϕ are \epsilon and \phi.
+  assert.equal(latexText("ε φ"), "$\\varepsilon$ $\\varphi$");
+  // Capitals that look like Latin letters (and omicron) have no macro: \Alpha would not compile.
+  assert.equal(latexText("Α Β Ο ο Χ"), "A B O $o$ X");
+  assert.equal(latexText("Γ Σ Ω β"), "$\\Gamma$ $\\Sigma$ $\\Omega$ $\\beta$");
+  assert.equal(asciiText("ε φ"), "epsilon phi", "identifiers keep the plain names");
+});
