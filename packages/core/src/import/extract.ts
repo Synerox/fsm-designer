@@ -12,9 +12,10 @@
 //     on an unknown signal forks the run; every finished run is one cube of
 //     input conditions with a next state and output values.
 //  4. Outputs that are the same in every run of a state depend on the state
-//     only (Moore); outputs that vary with inputs are Mealy and go on the
-//     transitions. Registered outputs that always take the same value when
-//     entering a state are that state's Moore outputs.
+//     only (Moore); outputs that vary with inputs, or whose value reads an
+//     input (q = data), are Mealy and go on the transitions. Registered
+//     outputs that always take the same value when entering a state are that
+//     state's Moore outputs.
 //  5. Runs are grouped by (next state, Mealy outputs) and each group's
 //     condition is minimised with Quine-McCluskey.
 
@@ -22,7 +23,7 @@ import { addSignal, addState, addTransition, createDiagram, DEFAULT_RESET } from
 import { fitStateSizes } from "../metrics.ts";
 import type { FsmDiagram, OutputValue } from "../model.ts";
 import { minimize } from "./boolmin.ts";
-import { caseMatch, FALSE, formatNum, freeIds, isConst, isNum, mask, num, printExpr, simplify, TRUE, widthOf, wildcardBits } from "./expr.ts";
+import { caseMatch, FALSE, fitWidth, formatNum, freeIds, isConst, isNum, lowBits, mask, num, printExpr, simplify, simplifyCond, TRUE, widthOf, wildcardBits } from "./expr.ts";
 import type { EvalCtx, Expr, Num } from "./expr.ts";
 import type { Always, Module, Stmt } from "./parser.ts";
 
@@ -540,6 +541,7 @@ class Engine {
     const width = (n: string) => this.c.widths.get(n);
     const assumed = (k: string) => p.assume.get(k)?.val;
     const outer = (n: string) => p.subst.get(n) ?? this.fixed.get(n) ?? this.c.params.get(n);
+    const signed = (n: string) => this.c.signed.has(n);
     return {
       // A stored value (t = a & b, or a state-dependent wire) was simplified
       // when it was written; what this run has assumed since (a = 1) must
@@ -549,10 +551,11 @@ class Engine {
       lookup: (n) => {
         const e = p.env.get(n);
         if (e === undefined) return outer(n);
-        return isNum(e) || !p.assume.size ? e : simplify(e, { lookup: outer, width, assumed });
+        return isNum(e) || !p.assume.size ? e : simplify(e, { lookup: outer, width, assumed, signed });
       },
       width,
       assumed,
+      signed,
     };
   }
 
@@ -575,7 +578,9 @@ class Engine {
           const i = simplify(s.lhs.i, this.ctx(p));
           if (i.k === "tern") { const lhs = s.lhs; return this.branch(p, i.c).flatMap(([q, b]) => this.exec({ ...s, lhs: { ...lhs, i: b ? i.a : i.b } }, q, seq)); }
         }
-        const v = simplify(s.rhs, this.ctx(p));
+        // (Evaluated at the width of what it is assigned to: y = go + 1'b1 is 2 for a 2-bit y.)
+        const ctx = this.ctx(p);
+        const v = simplify(s.rhs, ctx, widthOf(s.lhs, ctx));
         // x ? A : B with an unknown x: fork, so each run assigns a constant.
         if (v.k === "tern") return this.branch(p, v.c).flatMap(([q, b]) => this.exec({ ...s, rhs: b ? v.a : v.b }, q, seq));
         const q = clonePath(p);
@@ -629,7 +634,11 @@ class Engine {
       if (!seq || !nb) q.env.set(name, val);
       if (seq) q.nb.set(name, val);
     };
-    if (lhs.k === "id") return set(lhs.name, v);
+    if (lhs.k === "id") {
+      // Stored at the variable's width: a 1-bit z = data keeps data[0].
+      const w = this.c.widths.get(lhs.name);
+      return set(lhs.name, w === undefined ? v : fitWidth(v, w, ctx, this.c.signed.has(lhs.name)));
+    }
     if ((lhs.k === "idx" || lhs.k === "part") && lhs.a.k === "id") {
       const name = lhs.a.name;
       const w = this.c.widths.get(name) ?? 1;
@@ -690,7 +699,7 @@ class Engine {
     const work = [p];
     while (work.length) {
       const q = work.shift()!;
-      const v = simplify(cond, this.ctx(q));
+      const v = simplifyCond(cond, this.ctx(q));
       if (isConst(v)) { out.push([q, v.v !== 0n]); continue; }
       const atom = this.coarse ? v : pickAtom(v, this.ctx(q));
       for (const val of [true, false]) {
@@ -1008,6 +1017,10 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
   // Registered outputs that take an input's value at the clock edge (dout <=
   // din): the same text on every entry into a state is not the same value.
   const regFromInputs = new Set<string>();
+  // Combinational outputs whose value reads an input (q = data): they follow
+  // the inputs, so they are Mealy even in a state with a single run.
+  const combFromInputs = new Set<string>();
+  const readsInput = (e: Expr) => [...freeIds(e)].some((n) => m.decls.get(n)?.dir === "input");
   for (let i = 0; i < order.length; i++) {
     if (order.length > 256) throw new VerilogImportError(`More than 256 states reached from "${R}"; is it really a state register?`);
     const s = order[i];
@@ -1046,7 +1059,9 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
         forks = forks.flatMap((q) => {
           const v = q[env].get(o);
           if (!v) return [q];
-          const sv = simplify(v, eng.ctx(q));
+          // (Bit 0 only: assigning data[3:0] to a 1-bit z keeps data[0], not data != 0.)
+          const qctx = eng.ctx(q);
+          const sv = lowBits(simplify(v, qctx), 1, qctx);
           if (isConst(sv) || !fromPorts(sv)) return [q];
           return eng.branch(q, sv).map(([r, b]) => { r[env].set(o, num(b ? 1 : 0, 1)); return r; });
         });
@@ -1054,13 +1069,19 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
       for (const q of forks) {
         const qctx = eng.ctx(q);
         const combVals = new Map<string, OutputValue>();
-        for (const o of combOut) { const v = q.env.get(o); if (v) combVals.set(o, outputValue(simplify(v, qctx), c.widths.get(o) ?? 1)); }
+        for (const o of combOut) {
+          const v = q.env.get(o);
+          if (!v) continue;
+          const sv = simplify(v, qctx);
+          combVals.set(o, outputValue(sv, c.widths.get(o) ?? 1));
+          if (!isConst(sv) && readsInput(sv)) combFromInputs.add(o);
+        }
         const regVals = new Map<string, OutputValue | undefined>();
         for (const o of regOut) {
           const v = q.nb.get(o);
           const sv = v && simplify(v, qctx);
           regVals.set(o, sv ? outputValue(sv, c.widths.get(o) ?? 1) : undefined);
-          if (sv && !isConst(sv) && [...freeIds(sv)].some((n) => m.decls.get(n)?.dir === "input")) regFromInputs.add(o);
+          if (sv && !isConst(sv) && readsInput(sv)) regFromInputs.add(o);
         }
         runs.push({ assume: q.assume, next, comb: combVals, reg: regVals });
         enqueue(next);
@@ -1091,7 +1112,7 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
     mooreValue.set(state, mm);
   };
   for (const o of combOut) {
-    let same = true;
+    let same = !combFromInputs.has(o);
     for (const runs of runsByState.values()) {
       const vals = runs.filter((r) => r.comb.has(o)).map((r) => r.comb.get(o));
       if (vals.some((v) => !sameValue(v, vals[0]))) { same = false; break; }
@@ -1283,6 +1304,49 @@ function tryAdd(d: FsmDiagram, kind: "inputs" | "outputs", name: string, width: 
 // ---- conditions ---------------------------------------------------------------------
 
 /**
+ * Which minterms over `atoms` (bit k-1-i is atom i, as in conditions) some
+ * input values can produce: the test feasible() makes for one path, done once
+ * for all 2^k of them. Each input of up to 12 bits that atoms read alone is
+ * run through its values once, collecting the combinations of those atoms'
+ * truth values it gives; a minterm is possible when each input's part of it
+ * is one of them. (Checking every minterm with feasible() took seconds for ten
+ * compares on one 12-bit input: 2^10 minterms times 2^12 values.)
+ */
+function mintermCheck(atoms: Expr[], c: Ctx): (m: number) => boolean {
+  const k = atoms.length;
+  const bit = (i: number) => 1 << (k - 1 - i);
+  const ctx: EvalCtx = { lookup: () => undefined, width: (n) => c.widths.get(n) };
+  let fixedMask = 0, fixedVal = 0;
+  const bySignal = new Map<string, Array<{ i: number; atom: Expr }>>();
+  atoms.forEach((a, i) => {
+    const v = simplify(a, ctx);
+    if (isConst(v)) { fixedMask |= bit(i); if (v.v !== 0n) fixedVal |= bit(i); return; }
+    const ids = [...freeIds(v)];
+    if (ids.length !== 1) return;
+    bySignal.set(ids[0], [...(bySignal.get(ids[0]) ?? []), { i, atom: v }]);
+  });
+  const checks: Array<{ mask: number; seen: Set<number> }> = [];
+  for (const [id, as] of bySignal) {
+    const w = c.widths.get(id);
+    if (w === undefined || w > 12) continue;
+    const tests = as.map((a) => valueTest(a.atom, id, w, c.signed.has(id), ctx));
+    const seen = new Set<number>();
+    let undecided = false;
+    for (let x = 0; x < 1 << w && !undecided; x++) {
+      let pattern = 0;
+      for (let j = 0; j < as.length; j++) {
+        const r = tests[j](x);
+        if (r === undefined) { undecided = true; break; } // (left alone, as in feasible)
+        if (r) pattern |= bit(as[j].i);
+      }
+      seen.add(pattern);
+    }
+    if (!undecided) checks.push({ mask: as.reduce((s, a) => s | bit(a.i), 0), seen });
+  }
+  return (m) => (m & fixedMask) === fixedVal && checks.every((ch) => ch.seen.has(m & ch.mask));
+}
+
+/**
  * One condition string per group. Each group is a set of runs; the runs of a
  * state partition its input space, so the conditions are mutually exclusive.
  * undefined for a group that no input value reaches (all its runs turn out
@@ -1308,15 +1372,19 @@ function conditions(groups: Run[][], all: Run[], c: Ctx, internal: Set<string>):
   };
   const k = keys.length;
   if (k <= 10) {
-    const dummy: Path = { env: new Map(), nb: new Map(), subst: new Map(), assume: new Map() };
-    const ctx: EvalCtx = { lookup: () => undefined, width: (n) => c.widths.get(n) };
+    const possible = mintermCheck(atoms, c);
+    // Each run as a cube over the atoms: the bits it assumes, and their values.
+    const cube = (r: Run) => {
+      let care = 0, val = 0;
+      for (const [key, a] of r.assume) { const b = 1 << (k - 1 - index.get(key)!); care |= b; if (a.val) val |= b; }
+      return { care, val };
+    };
+    const cubes = groups.map((g) => g.map(cube));
     const on: number[][] = groups.map(() => []);
     const dc: number[] = [];
     for (let m = 0; m < 1 << k; m++) {
-      const val = (i: number) => ((m >> (k - 1 - i)) & 1) === 1;
-      const assume = new Map<string, Assumption>(keys.map((key, i) => [key, { atom: atoms[i], val: val(i) }]));
-      if (!feasible({ ...dummy, assume }, c, ctx)) { dc.push(m); continue; }
-      const gi = groups.findIndex((g) => g.some((r) => [...r.assume].every(([key, a]) => assume.get(key)!.val === a.val)));
+      if (!possible(m)) { dc.push(m); continue; }
+      const gi = cubes.findIndex((g) => g.some((r) => (m & r.care) === r.val));
       if (gi < 0) dc.push(m);
       else on[gi].push(m);
     }

@@ -71,15 +71,25 @@ files with several FSMs (the editor shows it as a drop-down).
    condition those values cannot decide, such as `$onehot(d)` or a
    compare with x bits, is never pruned); signed
    signals, `'s` literals and `$signed()` compare as two's complement, as in
-   Verilog. Every finished run is a set of input
-   conditions with a next state and output values. New states found this way
-   are explored too. XOR chains stay whole, and a state whose conditions
-   still have too many parts to enumerate keeps them as written.
+   Verilog. Widths follow Verilog too: an unsized literal is 32 bits,
+   `+ - ~ <<` work at the width of the comparison or assignment they are in
+   (`go + go == 2'd2` holds for `go = 1`, and a 2-bit `y = ~go` is `2'b11` or
+   `2'b10`, not `!go`), a signed operand is sign-extended to that width only
+   when the whole expression is signed (an 8-bit `y = ~4'sb1110` is 1), and a
+   value assigned to a narrower variable keeps its low bits (a 1-bit
+   `z = data` is `data[0]`). After `if (cnt)` on a multi-bit `cnt`, only the
+   truth of `cnt` is known (`cnt != 0`), not its value. Every finished run
+   is a set of input conditions with a next state and output values. New
+   states found this way are explored too. XOR chains stay whole, and a
+   state whose conditions still have too many parts to enumerate keeps them
+   as written.
 6. **Moore or Mealy.** A combinational output that has the same value in every
    run of a state depends on the state only: it is drawn in the state (Moore).
    One that varies with the inputs is drawn on the transitions as
    `condition / output=value` (Mealy); the machine is Mealy if it has any.
-   A value computed from internal data (`tx = shreg[0]`) is shown as written.
+   So is one whose value reads an input (`q = data`), even in a state with a
+   single run. A value computed from internal data (`tx = shreg[0]`) is shown
+   as written.
    A registered output (written in a clocked block, e.g. a one-block FSM) that
    always takes the same value when entering a state is that state's Moore
    output; otherwise it goes on the transitions, with a warning. One that

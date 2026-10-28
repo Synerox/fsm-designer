@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { outgoing } from "../../src/model.ts";
 import type { FsmDiagram, OutputValue } from "../../src/model.ts";
-import { isConst, simplify } from "../../src/import/expr.ts";
+import { isConst, num, simplify } from "../../src/import/expr.ts";
 import type { Expr } from "../../src/import/expr.ts";
 import { parseExpression } from "../../src/import/index.ts";
 import type { ImportResult } from "../../src/import/index.ts";
@@ -23,17 +23,22 @@ export interface Cycle {
   out: Record<string, bigint>;
 }
 
-/** Value of a condition or output value given input values (and named constants). */
-export function evaluate(e: string | OutputValue, inputs: Inputs, constants: Record<string, bigint> = {}): bigint {
+/**
+ * Value of a condition or output value given input values (and named
+ * constants). widths gives the inputs' declared widths, so they evaluate as
+ * Verilog would (valid == 1'b0 compares all 6 bits of valid, &x1 reduces 2
+ * bits); width is the width of what an output value is assigned to.
+ */
+export function evaluate(e: string | OutputValue, inputs: Inputs, constants: Record<string, bigint> = {}, widths: Record<string, number> = {}, width?: number): bigint {
   if (typeof e === "number") return BigInt(e);
   if (typeof e === "boolean") return e ? 1n : 0n;
   if (e.trim() === "") return 1n;
   const ast = parseExpression(e);
   const lookup = (n: string): Expr | undefined => {
-    const v = inputs[n] ?? constants[n];
-    return v === undefined ? undefined : { k: "num", v, w: null, x: 0n, z: 0n };
+    if (n in inputs) return num(inputs[n], widths[n] ?? null);
+    return n in constants ? num(constants[n]) : undefined;
   };
-  const r = simplify(ast, { lookup, width: () => undefined });
+  const r = simplify(ast, { lookup, width: (n) => (n in inputs ? widths[n] : undefined) }, width);
   if (!isConst(r)) throw new Error(`cannot evaluate "${e}" with ${JSON.stringify(Object.keys(inputs))}`);
   return r.v;
 }
@@ -41,9 +46,10 @@ export function evaluate(e: string | OutputValue, inputs: Inputs, constants: Rec
 /** Run a diagram cycle by cycle: outputs before each clock edge, as a Mealy/Moore machine would show them. */
 export function simulate(d: FsmDiagram, seq: Inputs[], constants: Record<string, bigint> = {}): Cycle[] {
   let cur = d.states.find((s) => s.isInitial)!;
+  const widths = Object.fromEntries(d.inputs.map((s) => [s.name, s.width]));
   const out: Cycle[] = [];
   for (const inputs of seq) {
-    const taken = outgoing(d, cur.id).filter((t) => evaluate(t.condition, inputs, constants) !== 0n);
+    const taken = outgoing(d, cur.id).filter((t) => evaluate(t.condition, inputs, constants, widths) !== 0n);
     if (taken.length > 1 && taken.some((t) => t.priority === undefined)) {
       throw new Error(`state ${cur.name}: ${taken.length} transitions are enabled (${taken.map((t) => t.condition).join(" | ")})`);
     }
@@ -51,7 +57,7 @@ export function simulate(d: FsmDiagram, seq: Inputs[], constants: Record<string,
     const vals: Record<string, bigint> = {};
     for (const o of d.outputs) {
       const v = t?.outputs[o.name] ?? cur.outputs[o.name] ?? o.default ?? 0;
-      vals[o.name] = evaluate(v, inputs, constants) & ((1n << BigInt(o.width)) - 1n);
+      vals[o.name] = evaluate(v, inputs, constants, widths, o.width) & ((1n << BigInt(o.width)) - 1n);
     }
     out.push({ state: cur.name, out: vals });
     if (t) cur = d.states.find((s) => s.id === t.to)!;
