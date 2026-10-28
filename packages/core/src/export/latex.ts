@@ -89,9 +89,11 @@ export function renderLatex(d: FsmDiagram, opts: LatexOptions = {}): string {
   for (const e of plan.edges) {
     const { from, to } = e.transitions[0];
     // Labels go where the SVG renderer placed them (it avoids states and other
-    // edges), as separate nodes rather than TikZ's midway edge labels.
+    // edges), as separate nodes rather than TikZ's midway edge labels. Like
+    // states, only sizes set by hand get an explicit font; 13 px (the default)
+    // ~ \scriptsize (7 pt), so a size raised in the editor never prints smaller.
     if (e.label && e.lines.length)
-      labelLines.push(`  \\node[font=${e.transitions[0].fontSize !== undefined ? texFont((e.fontSize * 6) / 13) : "\\scriptsize"}\\ttfamily, align=center, fill=white, inner sep=1pt] at (${(e.label.x / k).toFixed(2)}, ${(-e.label.y / k).toFixed(2)}) {${e.lines.map(latexText).join("\\\\")}};`);
+      labelLines.push(`  \\node[font=${e.transitions[0].fontSize !== undefined ? texFont((e.fontSize * 7) / 13) : "\\scriptsize"}\\ttfamily, align=center, fill=white, inner sep=1pt] at (${(e.label.x / k).toFixed(2)}, ${(-e.label.y / k).toFixed(2)}) {${e.lines.map(latexText).join("\\\\")}};`);
     const v = pathNumbers(d, e.path, from, to);
     const pt = (x: number, y: number) => `(${(x / k).toFixed(2)}, ${(-y / k).toFixed(2)})`;
     let shape = "";

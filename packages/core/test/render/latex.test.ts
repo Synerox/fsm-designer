@@ -60,3 +60,15 @@ test("straight edges both ways keep their ends on the circles in latex, whatever
   const segs = [...tex.matchAll(/\\draw\[->\] \((\w+)\.(-?[\d.]+)\) -- \((\w+)\.(-?[\d.]+)\);/g)].map((m) => [m[1], Number(m[2]), m[3], Number(m[4])]);
   assert.deepEqual(segs, [["s0", 53.1, "s1", 126.9], ["s1", -126.9, "s0", -53.1]]);
 });
+
+test("an edge label sized 13 px by hand prints like the default size, not smaller", () => {
+  const d = createDiagram({ name: "m" });
+  addState(d, { name: "A", x: 0, y: 0, isInitial: true });
+  addState(d, { name: "B", x: 200, y: 0 });
+  addState(d, { name: "C", x: 0, y: 200 });
+  addTransition(d, { from: "A", to: "B", condition: "x", fontSize: 13 });
+  addTransition(d, { from: "A", to: "C", condition: "y", fontSize: 15 });
+  const tex = renderLatex(d);
+  assert.match(tex, /\\fontsize\{7pt\}\{8\.4pt\}\\selectfont\\ttfamily[^\n]*\{x\}/, "13 px = \\scriptsize = 7 pt");
+  assert.match(tex, /\\fontsize\{8\.1pt\}[^\n]*\{y\}/, "bigger in the editor, bigger in TeX");
+});
