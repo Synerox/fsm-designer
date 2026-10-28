@@ -2,11 +2,11 @@
 // (useful for IME input such as Chinese, which canvas typing can't take).
 
 import { LABEL_SIZE, NAME_SIZE, STATE_RADIUS, expandShortcut } from "@fsm/core";
-import { PARALLEL_GAP, planDiagram, transitionLabel } from "@fsm/core";
+import { PARALLEL_GAP, transitionLabel } from "@fsm/core";
 import type { FsmDiagram } from "@fsm/core";
 import { useId, useLayoutEffect, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
-import { DRAW, alignStates, deleteSelection, editedTransition, edgeTransitions, setEdgeShape, getStateText, setEdgeText, setStateText, useEditor } from "./store.ts";
+import { DRAW, alignStates, canvasOptions, deleteSelection, editedTransition, edgeTransitions, setEdgeShape, getStateText, setEdgeText, setStateText, useEditor, viewPlan } from "./store.ts";
 
 import { snapToGrid } from "./geometry.ts";
 import { MOD, tr } from "./i18n.ts";
@@ -131,9 +131,12 @@ function SizeControls({ doc, states, edges, edit, keyPrefix }: {
 function ShapeControls({ doc, edges, edit }: {
   doc: FsmDiagram; edges: Array<{ from: string; to: string }>; edit: (fn: (d: FsmDiagram) => void, key?: string) => void;
 }) {
+  const labels = useEditor((s) => s.labels);
+  const selection = useEditor((s) => s.selection);
   const lines = edges.filter((e) => e.from !== e.to);
   if (!lines.length) return null;
-  const plan = planDiagram(doc, DRAW);
+  // The canvas's plan (one per edit); only the lines' bends and the radii are read here.
+  const plan = viewPlan(doc, canvasOptions(labels, selection));
   const curvedOf = (e: { from: string; to: string }) => plan.edges.find((p) => p.transitions[0].from === e.from && p.transitions[0].to === e.to)?.curve !== 0;
   const curved = lines.filter(curvedOf);
   const allCurved = curved.length === lines.length, allStraight = curved.length === 0;

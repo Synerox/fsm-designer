@@ -4,7 +4,7 @@
 import { create } from "zustand";
 import { current, isDraft, produce } from "immer";
 import { addState, addTransition, asciiText, createDiagram, isUnconditional, labelLines, outgoing, planDiagram, removeState, stateText, transitionLabel } from "@fsm/core";
-import type { FsmDiagram, MachineType, PlanOptions, Signal, State, Transition } from "@fsm/core";
+import type { DiagramPlan, FsmDiagram, MachineType, PlanOptions, Signal, State, Transition } from "@fsm/core";
 
 export type Selection =
   | { kind: "state"; id: string }
@@ -63,6 +63,41 @@ function loadLabels(): LabelMode {
 /** Drawing options with the current label setting. */
 export function drawOptions(labels: LabelMode = useEditor.getState().labels): PlanOptions {
   return { ...DRAW, labels };
+}
+
+/** Canvas drawing options: the label setting, and a selected line shows its own text even when labels are hidden. */
+export function canvasOptions(labels: LabelMode, sel: Selection): PlanOptions {
+  return { ...drawOptions(labels), ...(sel?.kind === "edge" ? { shownEdge: { from: sel.from, to: sel.to } } : {}) };
+}
+
+let lastPlan: { doc: FsmDiagram; key: string; plan: DiagramPlan } | null = null;
+
+/**
+ * planDiagram for the canvas, shared by the canvas and the inspector so an
+ * edit is planned once, not once per panel. An edit that moves nothing (a
+ * state's text, colour, accepting ring or outputs) reuses the last plan:
+ * lines and label places depend only on where the states are, their sizes
+ * and the transitions. The plan's `states[].state` may then be an older
+ * version of the state, so callers take a state's text from the doc (and
+ * its `bounds`, which grow with that text, are not used from here).
+ */
+export function viewPlan(doc: FsmDiagram, opts: PlanOptions): DiagramPlan {
+  const key = JSON.stringify(opts);
+  if (lastPlan && lastPlan.key === key && (lastPlan.doc === doc || sameGeometry(lastPlan.doc, doc))) {
+    lastPlan.doc = doc;
+    return lastPlan.plan;
+  }
+  lastPlan = { doc, key, plan: planDiagram(doc, opts) };
+  return lastPlan.plan;
+}
+
+/** Same lines and states in the same places (immer keeps untouched parts of the doc identical). */
+function sameGeometry(a: FsmDiagram, b: FsmDiagram): boolean {
+  return a.transitions === b.transitions && a.type === b.type && a.states.length === b.states.length
+    && a.states.every((s, i) => {
+      const t = b.states[i];
+      return s === t || (s.id === t.id && s.x === t.x && s.y === t.y && s.radius === t.radius && s.isInitial === t.isInitial && s.initialAngle === t.initialAngle);
+    });
 }
 
 /** Name of a new diagram (also the Verilog module name until changed). */

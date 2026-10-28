@@ -18,9 +18,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, ReactElement, SVGProps, SetStateAction } from "react";
 import type { PointerEvent as RPointerEvent } from "react";
-import { SMALL_SIZE, SUB_LINE_H, drawnSubLines, planDiagram, stateDisplay, stateFontSize, unreachableStates } from "@fsm/core";
+import { SMALL_SIZE, SUB_LINE_H, drawnSubLines, stateDisplay, stateFontSize, unreachableStates } from "@fsm/core";
 import type { DiagramPlan, EdgePlan } from "@fsm/core";
-import { caretSpot, drawOptions, editedTransition, mergeSelections, createState, createTransition, edgeTransitions, isEdgeSelected, isStateSelected, lineOwners, multiSelection, selectionParts, setInitial, toggleInSelection, useEditor } from "./store.ts";
+import { canvasOptions, caretSpot, editedTransition, mergeSelections, createState, createTransition, edgeTransitions, isEdgeSelected, isStateSelected, lineOwners, multiSelection, selectionParts, setInitial, toggleInSelection, useEditor, viewPlan } from "./store.ts";
 import type { Selection } from "./store.ts";
 import { GRID, SNAP_PX, angleOf, boxOf, circleHitsBox, edgePoints, inBox, segmentHitsBox, borderPoint, curveThrough, edgeMidpoint, loopPath, snapAngle, snapPoint, snapToGrid, stateAt } from "./geometry.ts";
 import type { Guide, Pt } from "./geometry.ts";
@@ -93,9 +93,11 @@ export function Canvas({ view, setView, grid }: { view: View; setView: Dispatch<
   const shownFrom = selection?.kind === "edge" ? selection.from : undefined;
   const shownTo = selection?.kind === "edge" ? selection.to : undefined;
   const plan = useMemo<DiagramPlan>(
-    () => planDiagram(doc, { ...drawOptions(labels), shownEdge: shownFrom && shownTo ? { from: shownFrom, to: shownTo } : undefined }),
+    () => viewPlan(doc, canvasOptions(labels, shownFrom && shownTo ? { kind: "edge", from: shownFrom, to: shownTo } : null)),
     [doc, labels, shownFrom, shownTo],
   );
+  // The plan can be one made before a text-only edit (see viewPlan): states are drawn from the doc.
+  const current = useMemo(() => new Map(doc.states.map((s) => [s.id, s])), [doc]);
   // States the initial state never leads to are drawn dashed.
   const lost = useMemo(() => unreachableStates(doc), [doc]);
   // While box selecting, highlight what the box would add to the selection.
@@ -374,7 +376,8 @@ export function Canvas({ view, setView, grid }: { view: View; setView: Dispatch<
           );
         })}
         {plan.initialArrow && <InitialArrow a={plan.initialArrow} selected={selectionParts(shown).initial} />}
-        {plan.states.map(({ state: s, r }) => {
+        {plan.states.map(({ state: planned, r }) => {
+          const s = current.get(planned.id) ?? planned;
           const selected = isStateSelected(shown, s.id);
           // Hidden outputs come back while the state is selected, like a line's text.
           const sub = drawnSubLines(doc, s, { labels: selected ? "all" : labels });

@@ -241,6 +241,29 @@ test("a pasted state never shows the same text as another; typed text never name
   assert.deepEqual([g.states[0].name, g.states[0].label], ["x1", undefined]);
 });
 
+test("the canvas and inspector share one plan, and an edit that moves nothing reuses it", async () => {
+  const { canvasOptions, viewPlan, drawOptions: draw } = await import("../src/store.ts");
+  const { planDiagram } = await import("@fsm/core");
+  const { edit, load } = useEditor.getState();
+  const d = newDiagram();
+  const a = createState(d, 0, 0), b = createState(d, 200, 0);
+  createTransition(d, a.id, b.id);
+  load(d, null);
+  const opts = canvasOptions("all", { kind: "edge", from: a.id, to: b.id, tid: "t0" });
+  assert.deepEqual(opts, { ...draw("all"), shownEdge: { from: a.id, to: b.id } });
+  const p1 = viewPlan(useEditor.getState().doc, opts);
+  assert.equal(viewPlan(useEditor.getState().doc, canvasOptions("all", { kind: "edge", from: a.id, to: b.id })), p1, "the second panel gets the same plan");
+  edit((x) => { setStateText(x, a.id, "A_LONGER_NAME"); x.states[1].isAccepting = true; x.states[1].color = "#fee"; });
+  assert.equal(viewPlan(useEditor.getState().doc, opts), p1, "text, ring and colour do not move anything");
+  edit((x) => { x.states[1].x = 260; });
+  const p2 = viewPlan(useEditor.getState().doc, opts);
+  assert.notEqual(p2, p1);
+  assert.deepEqual(p2.edges.map((e) => e.path), planDiagram(useEditor.getState().doc, opts).edges.map((e) => e.path));
+  edit((x) => { x.transitions[0].condition = "go"; });
+  assert.notEqual(viewPlan(useEditor.getState().doc, opts), p2, "a transition's text changes its label");
+  assert.notEqual(viewPlan(useEditor.getState().doc, canvasOptions("none", null)), p2, "other options, other plan");
+});
+
 test("align and spread states", async () => {
   const { alignStates } = await import("../src/store.ts");
   const d = newDiagram();
