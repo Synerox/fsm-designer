@@ -10,6 +10,8 @@ export interface MenuItem {
   submenu?: MenuItem[];
   /** Shown with a check mark (a pick-one list such as the language menu). */
   checked?: boolean;
+  /** Language of the label when it differs from the page's (the language names). */
+  lang?: string;
 }
 
 export function Menu({ label, items, disabled, testId, icon, title }: { label: ReactNode; items: MenuItem[]; disabled?: boolean; testId?: string; icon?: boolean; title?: string }) {
@@ -41,7 +43,7 @@ export function Menu({ label, items, disabled, testId, icon, title }: { label: R
             onClick={() => (item.submenu ? setSub(i) : choose(item))}
           >
             {item.checked !== undefined && <span className="check" aria-hidden="true">{item.checked ? "✓" : ""}</span>}
-            <span>{item.label}</span>
+            <span lang={item.lang}>{item.label}</span>
             {item.shortcut && <span className="shortcut">{item.shortcut}</span>}
             {item.submenu && <span className="chevron" aria-hidden="true">›</span>}
           </button>

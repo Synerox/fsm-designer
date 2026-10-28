@@ -29,11 +29,13 @@ const issueText = (issues: LayoutIssue[]) => issues.map(({ kind, count: n }) => 
 })[kind]).join(tr(", ", "、", "、"));
 
 const LANGS: Array<[Lang, string]> = [["en", "English"], ["zh", "中文"], ["ja", "日本語"]];
+/** BCP 47 tag for the page and for each language's own name in the menu. */
+const langTag = (l: Lang) => (l === "zh" ? "zh-Hant" : l);
 
 export function App() {
   const lang = useLang((s) => s.lang);
   const setLang = useLang((s) => s.setLang);
-  useEffect(() => { document.documentElement.lang = lang === "zh" ? "zh-Hant" : lang; }, [lang]);
+  useEffect(() => { document.documentElement.lang = langTag(lang); }, [lang]);
   const [view, setView] = useState<View>({ x: 0, y: 0, k: 1 });
   const [grid, setGrid] = useState<GridOptions>(loadGridOptions);
   useEffect(() => { try { localStorage.setItem(GRID_KEY, JSON.stringify(grid)); } catch { /* storage off */ } }, [grid]);
@@ -240,9 +242,11 @@ export function App() {
         <Menu
           icon
           label={<Globe />}
-          title="Language / 語言"
+          // Names itself in English and in the other UI languages, so it can be
+          // found by someone who cannot read the current one (English is the default).
+          title={tr("Language / 語言 / 言語", "Language / 語言", "Language / 言語")}
           testId="lang"
-          items={LANGS.map(([l, name]) => ({ label: name, checked: lang === l, onSelect: () => setLang(l) }))}
+          items={LANGS.map(([l, name]) => ({ label: name, lang: langTag(l), checked: lang === l, onSelect: () => setLang(l) }))}
         />
       </header>
       <main className="main">
