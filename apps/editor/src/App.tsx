@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { expandShortcut, planDiagram } from "@fsm/core";
 import { Canvas, MAX_ZOOM, zoomAround } from "./Canvas.tsx";
 import type { GridOptions, GridStyle, View } from "./Canvas.tsx";
@@ -8,6 +8,8 @@ import { Menu } from "./Menu.tsx";
 import { ImportReport, VerilogImportDialog } from "./VerilogImport.tsx";
 import { discardMessage, exportLatex, exportPng, exportSvg, latexText, newFile, openFile, restoreSession, saveDoc, startAutosave, tidyUp } from "./actions.ts";
 import { baseName, copyText, guardWindowClose, isDesktop, setWindowTitle } from "./platform.ts";
+import { deleteCopied, deletesSelection, keyPressesButton, typedText } from "./keys.ts";
+import { modalOpen, useModal } from "./dialog.ts";
 import { drawOptions, selectionParts, copySelection, deleteSelection, edgeTransitions, getStateText, hasClipboard, pasteClipboard, selectAll, setEdgeText, setStateText, useEditor } from "./store.ts";
 import type { Selection } from "./store.ts";
 import type { FsmDiagram, ImportResult, LayoutIssue } from "@fsm/core";
@@ -45,11 +47,14 @@ export function App() {
   const [report, setReport] = useState<{ result: ImportResult; seq: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // A notice stays while the pointer is on it, and longer messages stay longer.
+  const [holdNotice, setHoldNotice] = useState(false);
   useEffect(() => {
-    if (!notice) return;
-    const t = setTimeout(() => setNotice(null), 2500);
+    if (!notice) { setHoldNotice(false); return; }
+    if (holdNotice) return;
+    const t = setTimeout(() => setNotice(null), 2500 + 50 * notice.length);
     return () => clearTimeout(t);
-  }, [notice]);
+  }, [notice, holdNotice]);
   const filePath = useEditor((s) => s.filePath);
   const dirty = useEditor((s) => s.dirty);
   const canUndo = useEditor((s) => s.past.length > 0);
@@ -94,19 +99,41 @@ export function App() {
     void setWindowTitle(`${dirty ? "● " : ""}${filePath ? baseName(filePath) : tr("Untitled", "未命名")} — FSM Designer`);
   }, [filePath, dirty, lang]);
 
+  // Selecting in the diagram drops any text selected on the page (the canvas
+  // is user-select: none, so clicking it does not), so Ctrl+C copies whichever
+  // of the two the user picked last.
+  useEffect(() => useEditor.subscribe((s, prev) => {
+    if (s.selection && s.selection !== prev.selection && pageText()) window.getSelection()?.removeAllRanges();
+  }), []);
+
   useEffect(() => {
+    // The last button clicked with the mouse: Chromium leaves focus on it, and
+    // Space after that is typing, not pressing it again (see keyPressesButton).
+    // Forgotten once focus moves anywhere else, so a button reached again by
+    // Tab/Shift+Tab is pressed by Space like any keyboard-focused one.
+    let clicked: Element | null = null;
+    const onPointer = (e: PointerEvent) => { clicked = (e.target as Element).closest?.("button") ?? null; };
+    const onFocus = (e: FocusEvent) => { if (e.target !== clicked) clicked = null; };
     const onKey = (e: KeyboardEvent) => {
+      // A menu that handled the key itself (arrow keys) already prevented it.
+      if (e.defaultPrevented) return;
       const mod = e.ctrlKey || e.metaKey;
-      const inField = (e.target as Element).closest("input, textarea, select");
+      const target = e.target instanceof Element ? e.target : document.body;
+      const inField = target.closest("input, textarea, select, [role=menu]");
       const k = e.key.toLowerCase();
       if (mod && k === "s") { e.preventDefault(); run(() => saveDoc(e.shiftKey))(); return; }
-      if (inField) return;
+      // An open dialog (LaTeX, Import, Discard changes?) owns the keyboard; it
+      // handles Escape and Tab itself, and nothing may change the diagram behind it.
+      if (inField || modalOpen()) return;
       if (mod && k === "o") { e.preventDefault(); run(openFile)(); return; }
       if (mod && k === "n") { e.preventDefault(); run(newFile)(); return; }
       if (mod && k === "i") { e.preventDefault(); setImporting(true); return; }
       if (mod && (k === "y" || (k === "z" && e.shiftKey))) { e.preventDefault(); redo(); return; }
       if (mod && k === "z") { e.preventDefault(); undo(); return; }
       if (mod && (k === "c" || k === "x")) {
+        // Text selected on the page (the import report, the status bar) is
+        // copied the normal way.
+        if (pageText()) return;
         e.preventDefault();
         const st = useEditor.getState();
         const n = copySelection(st.doc, st.selection);
@@ -115,8 +142,10 @@ export function App() {
           return;
         }
         if (k === "x") {
-          st.edit((d) => deleteSelection(d, st.selection));
-          st.select(null);
+          // Only what was copied is deleted; lone lines and the start arrow stay selected.
+          let kept: Selection = null;
+          st.edit((d) => { kept = deleteCopied(d, st.selection); });
+          st.select(kept);
         }
         setNotice(k === "x" ? tr(`Cut ${n} item${n === 1 ? "" : "s"}`, `已剪下 ${n} 個物件`, `${n} 個を切り取りました`) : tr(`Copied ${n} item${n === 1 ? "" : "s"}`, `已複製 ${n} 個物件`, `${n} 個をコピーしました`));
         return;
@@ -136,14 +165,16 @@ export function App() {
         st.select(selectAll(st.doc));
         return;
       }
-      if (mod || e.altKey) return;
+      const typed = typedText(e);
+      if ((mod || e.altKey) && typed === null) return;
+      if (keyPressesButton(e.key, target, clicked)) return;
 
       const { selection, doc, edit, select } = useEditor.getState();
       if (e.key === "Escape") { select(null); return; }
       // F fits the window, unless a state or line is selected (then it is typed).
       if (k === "f" && selection?.kind !== "state" && selection?.kind !== "edge") { e.preventDefault(); fit(); return; }
       if (!selection) return;
-      if (e.key === "Delete") {
+      if (deletesSelection(e.key, selection)) {
         e.preventDefault();
         edit((d) => deleteSelection(d, selection));
         select(null);
@@ -185,12 +216,18 @@ export function App() {
           return;
         }
       }
-      if (e.key.length !== 1) return;
+      if (typed === null) return;
       e.preventDefault();
-      put(cur.slice(0, caret) + e.key + cur.slice(caret), caret + 1);
+      put(cur.slice(0, caret) + typed + cur.slice(caret), caret + 1);
     };
+    window.addEventListener("pointerdown", onPointer, true);
+    window.addEventListener("focusin", onFocus, true);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onPointer, true);
+      window.removeEventListener("focusin", onFocus, true);
+      window.removeEventListener("keydown", onKey);
+    };
   }, [undo, redo]);
 
   return (
@@ -275,29 +312,7 @@ export function App() {
           </span>
         </div>
       </footer>
-      {latex !== null && (
-        <div className="modal-backdrop" onClick={() => setLatex(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>LaTeX (TikZ)</h3>
-            <textarea readOnly value={latex} spellCheck={false} />
-            <div className="row">
-              <button
-                onClick={(e) => {
-                  const area = (e.currentTarget.closest(".modal") as HTMLElement).querySelector("textarea")!;
-                  copyText(latex).then(
-                    () => setNotice(tr("LaTeX copied", "已複製 LaTeX")),
-                    () => { area.focus(); area.select(); setNotice(tr("All text selected; press Ctrl+C to copy", "已選取全部文字，請按 Ctrl+C 複製")); },
-                  );
-                }}
-              >
-                {tr("Copy", "複製")}
-              </button>
-              <button onClick={run(exportLatex)}>{tr("Save as .tex", "存成 .tex")}</button>
-              <button onClick={() => setLatex(null)}>{tr("Close", "關閉")}</button>
-            </div>
-          </div>
-        </div>
-      )}
+      {latex !== null && <LatexDialog latex={latex} onClose={() => setLatex(null)} onSave={run(exportLatex)} setNotice={setNotice} />}
       {importing && (
         <VerilogImportDialog
           onClose={() => setImporting(false)}
@@ -309,17 +324,61 @@ export function App() {
           }}
         />
       )}
-      {error && (
-        <div className="toast" onClick={() => setError(null)}>{error}</div>
-      )}
-      {notice && (
-        <div className="toast ok" onClick={() => setNotice(null)}>{notice}</div>
-      )}
+      {/* Always in the page so screen readers announce what appears in them. */}
+      <div role="alert">
+        {error && (
+          <div className="toast" onClick={() => setError(null)}>
+            {error}
+            <button className="toast-close" onClick={() => setError(null)} aria-label={tr("Close", "關閉")}>×</button>
+          </div>
+        )}
+      </div>
+      <div role="status">
+        {notice && (
+          <div className="toast ok" onClick={() => setNotice(null)} onPointerEnter={() => setHoldNotice(true)} onPointerLeave={() => setHoldNotice(false)}>{notice}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** File > Export > LaTeX: the TikZ code, to copy or save. */
+function LatexDialog({ latex, onClose, onSave, setNotice }: { latex: string; onClose: () => void; onSave: () => void; setNotice: (s: string) => void }) {
+  const box = useModal<HTMLDivElement>(onClose);
+  const titleId = useId();
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" ref={box} role="dialog" aria-modal="true" aria-labelledby={titleId} onClick={(e) => e.stopPropagation()}>
+        <h3 id={titleId}>LaTeX (TikZ)</h3>
+        <textarea readOnly value={latex} spellCheck={false} aria-labelledby={titleId} />
+        <div className="row">
+          <button
+            onClick={() => {
+              const area = box.current!.querySelector("textarea")!;
+              copyText(latex).then(
+                () => setNotice(tr("LaTeX copied", "已複製 LaTeX")),
+                () => { area.focus(); area.select(); setNotice(tr("All text selected; press Ctrl+C to copy", "已選取全部文字，請按 Ctrl+C 複製")); },
+              );
+            }}
+          >
+            {tr("Copy", "複製")}
+          </button>
+          <button onClick={onSave}>{tr("Save as .tex", "存成 .tex")}</button>
+          <button onClick={onClose}>{tr("Close", "關閉")}</button>
+        </div>
+      </div>
     </div>
   );
 }
 
 const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "Cmd" : "Ctrl";
+
+/** Whether the user has selected text on the page (outside the text fields). */
+function pageText(): boolean {
+  if (document.activeElement?.closest("input, textarea")) return false;
+  const sel = window.getSelection();
+  return !!sel && !sel.isCollapsed && sel.toString().trim() !== "";
+}
 const GRID_KEY = "fsm-designer.grid.v2";
 const HINTS_KEY = "fsm-designer.hints.v1";
 

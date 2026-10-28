@@ -125,6 +125,8 @@ kbd {
 
 .toast { position: fixed; z-index: 11; bottom: 48px; left: 50%; transform: translateX(-50%); background: #fdecec; color: #8a1f1f; border: 1px solid #f5c2c2; padding: 8px 14px; border-radius: 8px; cursor: pointer; max-width: 80vw; box-shadow: var(--shadow-md); }
 .toast.ok { background: var(--text); color: #fff; border-color: transparent; }
+.toast .toast-close { margin-left: 10px; padding: 0 4px; height: auto; border: 0; background: transparent; color: inherit; font-size: 15px; line-height: 1; }
+.toast .toast-close:hover:not(:disabled) { background: rgb(0 0 0 / 6%); }
 
 /* Narrow windows (phones, small embeds): panel goes under the canvas. */
 @media (max-width: 760px) {

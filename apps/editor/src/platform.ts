@@ -2,6 +2,7 @@
 // files directly; in a plain browser it falls back to <input type=file> and
 // downloads so the editor still works for development and a future web build.
 
+import { modalKeys } from "./dialog.ts";
 import { tr } from "./i18n.ts";
 
 export interface FileFilter {
@@ -127,14 +128,24 @@ function saveError(e: unknown): Error {
     : tr(`This page can't save files right now (${code ?? String(e)}).`, `這個頁面目前無法儲存檔案（${code ?? String(e)}）。`, `このページは現在ファイルを保存できません（${code ?? String(e)}）。`));
 }
 
-/** Yes/no question drawn inside the page (embedded pages can't show window.confirm). */
+let confirmCount = 0; // gives each confirm's text a unique id for aria-labelledby
+
+/**
+ * Yes/no question drawn inside the page (embedded pages can't show
+ * window.confirm). It is modal for the keyboard too: Escape cancels, Tab
+ * stays in it, and the editor's shortcuts wait until it is answered.
+ */
 function pageConfirm(message: string): Promise<boolean> {
   return new Promise((resolve) => {
     const backdrop = document.createElement("div");
     backdrop.className = "modal-backdrop";
     const box = document.createElement("div");
     box.className = "modal confirm";
+    box.setAttribute("role", "alertdialog");
+    box.setAttribute("aria-modal", "true");
     const text = document.createElement("p");
+    text.id = `confirm-text-${++confirmCount}`;
+    box.setAttribute("aria-labelledby", text.id);
     text.textContent = message;
     const row = document.createElement("div");
     row.className = "row";
@@ -143,7 +154,8 @@ function pageConfirm(message: string): Promise<boolean> {
     const yes = document.createElement("button");
     yes.textContent = tr("Discard changes", "放棄變更");
     yes.className = "danger";
-    const done = (v: boolean) => { backdrop.remove(); resolve(v); };
+    let release = () => {};
+    const done = (v: boolean) => { backdrop.remove(); release(); resolve(v); };
     no.onclick = () => done(false);
     yes.onclick = () => done(true);
     backdrop.onclick = (e) => { if (e.target === backdrop) done(false); };
@@ -151,7 +163,7 @@ function pageConfirm(message: string): Promise<boolean> {
     box.append(text, row);
     backdrop.append(box);
     document.body.append(backdrop);
-    no.focus();
+    release = modalKeys(box, () => done(false)); // focuses Cancel, the first button
   });
 }
 
