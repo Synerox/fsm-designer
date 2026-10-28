@@ -2,10 +2,12 @@
 // them (found by differential fuzzing against a Verilog-accurate simulator).
 // A multi-bit value tested as a condition is not 1, an unsized literal is 32
 // bits, + - ~ << work at the width of their context, an assignment keeps the
-// low bits, and an output that copies an input is Mealy.
+// low bits, and an output that copies an input is Mealy. Also: minimising the
+// conditions of a case on many opcodes stays fast.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { importVerilog } from "../../src/import/index.ts";
+import { minimize } from "../../src/import/boolmin.ts";
 import type { FsmDiagram } from "../../src/model.ts";
 import { evaluate, simulate } from "./helpers.ts";
 
@@ -98,6 +100,47 @@ test("an output that copies an input is Mealy also in a state with a single path
   assert.equal(r.machine, "mealy");
   assert.deepEqual(r.mealyOutputs, ["q"]);
   assert.deepEqual(edges(r.diagram), ["S0->S1:  / q=data", "S1->S0:  / q=0"]);
+});
+
+test("a case on many opcodes of a wide input imports quickly", () => {
+  const arms = (o: number) => Array.from({ length: 10 }, (_, i) => `        12'd${i * 7 + o}: begin n = S${(i + o) % 3}; y = ${i % 4}; end`).join("\n");
+  const src = `
+module m(input clk, input rst_n, input [11:0] op, output reg [1:0] y);
+  localparam S0 = 2'd0, S1 = 2'd1, S2 = 2'd2;
+  reg [1:0] s, n;
+  always @(posedge clk or negedge rst_n) if (!rst_n) s <= S0; else s <= n;
+  always @* begin
+    n = s; y = 0;
+    case (s)
+      S0: case (op)
+${arms(1)}
+      endcase
+      S1: case (op)
+${arms(2)}
+      endcase
+      default: n = S0;
+    endcase
+  end
+endmodule`;
+  const t0 = performance.now();
+  const r = importVerilog(src);
+  const ms = performance.now() - t0;
+  assert.equal(r.diagram.transitions.length, 21);
+  assert.ok(r.diagram.transitions.some((t) => t.condition === "op == 12'd1" && t.outputs.y === 0));
+  // Minimising each condition over the 2^10 combinations of the ten compares took over 5 s.
+  assert.ok(ms < 1500, `took ${ms.toFixed(0)} ms`);
+});
+
+test("minimize with nearly every minterm don't-care gives a correct cover quickly", () => {
+  const n = 10;
+  const possible = [0, ...Array.from({ length: n }, (_, i) => 1 << i)];
+  const dc = Array.from({ length: 1 << n }, (_, m) => m).filter((m) => !possible.includes(m));
+  const t0 = performance.now();
+  for (const m of possible) {
+    const cubes = minimize(n, [m], dc);
+    for (const p of possible) assert.equal(cubes.some((c) => (p & c.care) === c.val), p === m);
+  }
+  assert.ok(performance.now() - t0 < 1000, `took ${(performance.now() - t0).toFixed(0)} ms`);
 });
 
 test("the test simulator evaluates inputs at their declared widths", () => {

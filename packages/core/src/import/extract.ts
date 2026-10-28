@@ -1287,6 +1287,49 @@ function tryAdd(d: FsmDiagram, kind: "inputs" | "outputs", name: string, width: 
 // ---- conditions ---------------------------------------------------------------------
 
 /**
+ * Which minterms over `atoms` (bit k-1-i is atom i, as in conditions) some
+ * input values can produce: the test feasible() makes for one path, done once
+ * for all 2^k of them. Each input of up to 12 bits that atoms read alone is
+ * run through its values once, collecting the combinations of those atoms'
+ * truth values it gives; a minterm is possible when each input's part of it
+ * is one of them. (Checking every minterm with feasible() took seconds for ten
+ * compares on one 12-bit input: 2^10 minterms times 2^12 values.)
+ */
+function mintermCheck(atoms: Expr[], c: Ctx): (m: number) => boolean {
+  const k = atoms.length;
+  const bit = (i: number) => 1 << (k - 1 - i);
+  const ctx: EvalCtx = { lookup: () => undefined, width: (n) => c.widths.get(n) };
+  let fixedMask = 0, fixedVal = 0;
+  const bySignal = new Map<string, Array<{ i: number; atom: Expr }>>();
+  atoms.forEach((a, i) => {
+    const v = simplify(a, ctx);
+    if (isConst(v)) { fixedMask |= bit(i); if (v.v !== 0n) fixedVal |= bit(i); return; }
+    const ids = [...freeIds(v)];
+    if (ids.length !== 1) return;
+    bySignal.set(ids[0], [...(bySignal.get(ids[0]) ?? []), { i, atom: v }]);
+  });
+  const checks: Array<{ mask: number; seen: Set<number> }> = [];
+  for (const [id, as] of bySignal) {
+    const w = c.widths.get(id);
+    if (w === undefined || w > 12) continue;
+    const tests = as.map((a) => valueTest(a.atom, id, w, c.signed.has(id), ctx));
+    const seen = new Set<number>();
+    let undecided = false;
+    for (let x = 0; x < 1 << w && !undecided; x++) {
+      let pattern = 0;
+      for (let j = 0; j < as.length; j++) {
+        const r = tests[j](x);
+        if (r === undefined) { undecided = true; break; } // (left alone, as in feasible)
+        if (r) pattern |= bit(as[j].i);
+      }
+      seen.add(pattern);
+    }
+    if (!undecided) checks.push({ mask: as.reduce((s, a) => s | bit(a.i), 0), seen });
+  }
+  return (m) => (m & fixedMask) === fixedVal && checks.every((ch) => ch.seen.has(m & ch.mask));
+}
+
+/**
  * One condition string per group. Each group is a set of runs; the runs of a
  * state partition its input space, so the conditions are mutually exclusive.
  * undefined for a group that no input value reaches (all its runs turn out
@@ -1312,15 +1355,19 @@ function conditions(groups: Run[][], all: Run[], c: Ctx, internal: Set<string>):
   };
   const k = keys.length;
   if (k <= 10) {
-    const dummy: Path = { env: new Map(), nb: new Map(), subst: new Map(), assume: new Map() };
-    const ctx: EvalCtx = { lookup: () => undefined, width: (n) => c.widths.get(n) };
+    const possible = mintermCheck(atoms, c);
+    // Each run as a cube over the atoms: the bits it assumes, and their values.
+    const cube = (r: Run) => {
+      let care = 0, val = 0;
+      for (const [key, a] of r.assume) { const b = 1 << (k - 1 - index.get(key)!); care |= b; if (a.val) val |= b; }
+      return { care, val };
+    };
+    const cubes = groups.map((g) => g.map(cube));
     const on: number[][] = groups.map(() => []);
     const dc: number[] = [];
     for (let m = 0; m < 1 << k; m++) {
-      const val = (i: number) => ((m >> (k - 1 - i)) & 1) === 1;
-      const assume = new Map<string, Assumption>(keys.map((key, i) => [key, { atom: atoms[i], val: val(i) }]));
-      if (!feasible({ ...dummy, assume }, c, ctx)) { dc.push(m); continue; }
-      const gi = groups.findIndex((g) => g.some((r) => [...r.assume].every(([key, a]) => assume.get(key)!.val === a.val)));
+      if (!possible(m)) { dc.push(m); continue; }
+      const gi = cubes.findIndex((g) => g.some((r) => (m & r.care) === r.val));
       if (gi < 0) dc.push(m);
       else on[gi].push(m);
     }
