@@ -74,11 +74,16 @@ async function guardTarget(workspace: string, file: string, format: keyof typeof
   if (/\.fsm\.json\./i.test(base) && (await inWorkspace(workspace, file)))
     throw new Error(`Refusing to write ${file}: the server uses that file to coordinate edits. Pick another file name`);
   // A diagram linked from the workspace keeps its lock files beside its real file.
+  // The folder is compared by identity (dev/inode), so bind mounts and other aliases count too.
   const realFile = fold(await real(file));
+  const base2 = fold(basename(file));
   for (const d of await diagramFiles(workspace)) {
     const rd = fold(d.real);
-    if (realFile === rd) throw new Error(`Refusing to write ${file}: it is the workspace's diagram file ${d.entry}. Give a path outside the workspace folder`);
-    if (realFile.startsWith(`${rd}.`)) throw new Error(`Refusing to write ${file}: the server uses that file to coordinate edits of ${d.entry}. Pick another file name`);
+    const rb = fold(basename(d.real));
+    const sameName = realFile === rd || ((await sameFolder(dirname(file), dirname(d.real))) && base2 === rb);
+    const coordName = realFile.startsWith(`${rd}.`) || ((await sameFolder(dirname(file), dirname(d.real))) && base2.startsWith(`${rb}.`));
+    if (sameName) throw new Error(`Refusing to write ${file}: it is the workspace's diagram file ${d.entry}. Give a path outside the workspace folder`);
+    if (coordName) throw new Error(`Refusing to write ${file}: the server uses that file to coordinate edits of ${d.entry}. Pick another file name`);
   }
   // A device or pipe (the server's own stdout, /dev/...) is never an export target.
   const existing = await stat(file).catch(() => undefined);
@@ -115,11 +120,15 @@ async function real(p: string): Promise<string> {
 
 /** Whether `file` is directly in the workspace folder, however either path is spelled: the same folder on disk. */
 async function inWorkspace(workspace: string, file: string): Promise<boolean> {
-  const [a, b] = await Promise.all([stat(dirname(file), { bigint: true }).catch(() => undefined), stat(workspace, { bigint: true }).catch(() => undefined)]);
+  return sameFolder(dirname(file), resolve(workspace));
+}
+
+/** Whether two paths name the same folder on disk (dev/inode; real paths where there are no inode numbers). */
+async function sameFolder(x: string, y: string): Promise<boolean> {
+  const [a, b] = await Promise.all([stat(x, { bigint: true }).catch(() => undefined), stat(y, { bigint: true }).catch(() => undefined)]);
   if (!a || !b) return false;
   if (a.ino !== 0n && b.ino !== 0n) return a.dev === b.dev && a.ino === b.ino;
-  // File systems without inode numbers: compare the real paths.
-  return fold(await real(dirname(file))) === fold(await real(resolve(workspace)));
+  return fold(await real(x)) === fold(await real(y));
 }
 
 /** The workspace diagram file that `file` already is (same device and inode), if any. */

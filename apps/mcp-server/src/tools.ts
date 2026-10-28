@@ -393,8 +393,9 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
         // exists(), not load(): a corrupt file must still be deletable.
         if (!(await store.exists(name)) && !(await store.hasEntry?.(name))) throw new Error(`No FSM named "${name}". Existing: ${(await store.list()).join(", ") || "(none)"}.`);
         const link = await store.isLink?.(name);
+        const leadsToFile = link && (await stat(store.resolvePath(`${name}.fsm.json`)).then((x) => x.isFile(), () => false));
         await store.remove(name);
-        return text(link ? `Deleted "${name}", a link; the file it pointed to was kept.` : `Deleted "${name}".`);
+        return text(!link ? `Deleted "${name}".` : leadsToFile ? `Deleted "${name}", a link; the file it pointed to was kept.` : `Deleted "${name}", a broken link.`);
       };
       return store.lock(name, del).catch(async (e) => {
         // A link whose target is in a read-only folder: the lock cannot be made there,

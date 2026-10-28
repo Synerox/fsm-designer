@@ -171,7 +171,7 @@ async function claim(path: string, token: string): Promise<boolean> {
   const dir = dirname(path);
   const prefix = `${basename(path)}.new-${TMP_HOST}-`;
   await clearTemps(dir, prefix);
-  const tmp = join(dir, `${prefix}${process.pid}-${++tmpCounter}`);
+  const tmp = join(dir, `${prefix}${process.pid}-${RUN}-${++tmpCounter}`);
   temps.add(tmp);
   try {
     await writeFile(tmp, body, { flag: "wx" });
@@ -186,8 +186,8 @@ async function claim(path: string, token: string): Promise<boolean> {
         ours.delete(token);
         return false;
       }
-      // Some file systems (FAT, some network shares) have no hard links.
-      if (!["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV", "EMLINK"].includes(code)) throw e;
+      // Any other failure: this file system has no hard links (FAT and exFAT report
+      // EISDIR on Windows, some shares EINVAL or EPERM); use O_EXCL create below.
     }
   } catch (e) {
     fail(e);
@@ -295,7 +295,8 @@ async function withFileLock<T>(lockPath: string, fn: () => Promise<T>, deadline:
         throw new Error(`The diagram is locked by ${who} (${lockPath}); waited ${Math.round((Date.now() - deadline + LOCK_WAIT_MS) / 1000)} s. ` +
           "Another FSM server may be busy with a long auto_layout or many edits of this diagram; try again later, or delete the lock file if that server is gone.");
       }
-      await sleep(Math.min(200, 20 + attempt * 10) * (0.5 + Math.random()));
+      // The ticket holder is the only one allowed to take a free lock, so it looks often.
+      await sleep(waiting ? 15 : Math.min(200, 20 + attempt * 10) * (0.5 + Math.random()));
     }
   } finally {
     if (waiting) await release(waitPath, ticket);
@@ -348,6 +349,10 @@ async function renameRetry(from: string, to: string): Promise<void> {
 }
 
 let tmpCounter = 0;
+/** Tells this process's temp files from those of an earlier process that had the same pid. */
+const RUN = randomUUID().slice(0, 8);
+/** Whether file names are usually case-insensitive here. */
+const CASE_FOLDS = process.platform === "win32" || process.platform === "darwin";
 /** Host name as it appears in temp file names, so only this computer's leftovers are cleared. */
 const TMP_HOST = `${HOST.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 40)}${PID_NS.replace(/\D/g, "") ? `_${PID_NS.replace(/\D/g, "")}` : ""}`;
 
@@ -356,8 +361,12 @@ async function clearTemps(dir: string, prefix: string): Promise<void> {
   const names = await readdir(dir).catch(() => [] as string[]);
   for (const n of names) {
     if (!n.startsWith(prefix)) continue;
-    const pid = Number(n.slice(prefix.length).split("-")[0]);
-    if (Number.isInteger(pid) && pid !== process.pid && !alive(pid)) await unlink(join(dir, n)).catch(() => {});
+    const [pidText, run] = n.slice(prefix.length).split("-");
+    const pid = Number(pidText);
+    if (!Number.isInteger(pid)) continue;
+    // Our own pid but not this run: left by an earlier process that had the same pid.
+    const gone = pid === process.pid ? run !== RUN && !temps.has(join(dir, n)) : !alive(pid);
+    if (gone) await unlink(join(dir, n)).catch(() => {});
   }
 }
 const EXT = ".fsm.json";
@@ -394,7 +403,7 @@ export class FileStore implements DiagramStore {
   }
   private async entries() {
     try {
-      return (await readdir(this.dir, { withFileTypes: true })).filter((e) => e.name.endsWith(EXT));
+      return (await readdir(this.dir, { withFileTypes: true })).filter((e) => e.name.toLowerCase().endsWith(EXT));
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw new Error(`Cannot read the workspace folder ${this.dir}: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`);
@@ -409,11 +418,13 @@ export class FileStore implements DiagramStore {
     const bad: string[] = [];
     for (const e of await this.entries()) {
       let why = "";
-      if (!FileStore.usable(e.name.slice(0, -EXT.length))) why = "not a valid FSM name";
+      // Seq.FSM.JSON is the file Seq.fsm.json where case is ignored (Windows, macOS); elsewhere it is another file.
+      if (!e.name.endsWith(EXT) && !CASE_FOLDS) why = `the extension must be written ${EXT}`;
+      else if (!FileStore.usable(e.name.slice(0, -EXT.length))) why = "not a valid FSM name";
       else if (!e.isFile()) {
         const s = await stat(join(this.dir, e.name)).catch((err: NodeJS.ErrnoException) => err.code ?? "error");
         if (typeof s === "string") why = s === "ENOENT" ? "link to a missing file" : s === "ELOOP" ? "link loop" : `unreadable (${s})`;
-        else if (s.isDirectory()) why = "a folder";
+        else if (s.isDirectory()) why = e.isSymbolicLink() ? "link to a folder" : "a folder";
         else if (!s.isFile()) why = "not a regular file";
       }
       if (why) bad.push(`${e.name} (${why})`);
@@ -429,7 +440,8 @@ export class FileStore implements DiagramStore {
     return (await this.sorted()).bad;
   }
   async exists(name: string) {
-    return (await this.list()).includes(name);
+    // Also anything the OS opens under this name (a case variant where case is ignored).
+    return (await this.list()).includes(name) || (await stat(this.file(name)).then((s) => s.isFile(), () => false));
   }
   /** Whether the diagram's file name is a symbolic link. */
   async isLink(name: string) {
@@ -478,8 +490,8 @@ export class FileStore implements DiagramStore {
     if (await lstat(target).then((l) => l.isSymbolicLink(), () => false)) {
       try {
         target = await realpath(target);
-      } catch {
-        throw new Error(`${target} is a link to a file that does not exist; fix or delete the link`);
+      } catch (e) {
+        throw new Error(`${target} is ${(e as NodeJS.ErrnoException).code === "ELOOP" ? "a link loop" : "a link to a file that does not exist"}; fix or delete the link`);
       }
     }
     const text = JSON.stringify(d, null, 2) + "\n";
@@ -492,7 +504,7 @@ export class FileStore implements DiagramStore {
     // saving would split them. Symbolic links work instead.
     if (old && old.nlink > 1)
       throw new Error(`Cannot save ${target}: the file is hard-linked under ${old.nlink} names. Use a symbolic link or a separate copy instead; nothing was changed`);
-    const tmp = join(dirname(target), `.${d.name}${EXT}.tmp-${TMP_HOST}-${process.pid}-${++tmpCounter}`);
+    const tmp = join(dirname(target), `.${d.name}${EXT}.tmp-${TMP_HOST}-${process.pid}-${RUN}-${++tmpCounter}`);
     await clearTemps(dirname(target), `.${d.name}${EXT}.tmp-${TMP_HOST}-`);
     temps.add(tmp);
     try {

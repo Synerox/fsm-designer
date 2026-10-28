@@ -557,3 +557,12 @@ test("exports through links are checked where they lead; a symlinked workspace k
     await rm(out, { recursive: true, force: true });
   }
 });
+
+test("odd names: an upper-case extension is explained on Linux; deleting a broken link says so", { skip: process.platform !== "linux" }, async () => {
+  const { symlink } = await import("node:fs/promises");
+  await writeFile(join(dir, "Upper.FSM.JSON"), "{}");
+  assert.match(await ok("list_fsms", {}), /Upper\.FSM\.JSON \(the extension must be written \.fsm\.json\)/);
+  await rm(join(dir, "Upper.FSM.JSON"));
+  await symlink(join(dir, "nowhere.fsm.json"), join(dir, "brokenlink.fsm.json"));
+  assert.match(await ok("delete_fsm", { name: "brokenlink" }), /a broken link/);
+});
