@@ -5,7 +5,7 @@
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { addState, addTransition, autoLayout, createDiagram, GRID, layoutScore, planDiagram, renderLatex, renderSvg, tidyLayout } from "../../src/index.ts";
+import { addState, addTransition, autoLayout, createDiagram, GRID, layoutCandidates, layoutScore, planDiagram, renderLatex, renderSvg, tidyLayout } from "../../src/index.ts";
 import type { FsmDiagram } from "../../src/index.ts";
 import { importVerilog } from "../../src/import/index.ts";
 import { fixture } from "../import/helpers.ts";
@@ -229,6 +229,19 @@ test("four states all linked: an equilateral triangle round the fourth, no cross
   const o = d.states.filter((s) => s !== hub).map((s) => d.states.indexOf(s));
   const sides = [dist(d, o[0], o[1]), dist(d, o[1], o[2]), dist(d, o[2], o[0])];
   assert.ok(Math.max(...sides) - Math.min(...sides) <= 2 * GRID, `${sides}`);
+});
+
+test("four states all linked: each hub shape is made once, not once per hub with the states only named differently", () => {
+  const d = machine(4, [[0, 1], [1, 0], [0, 2], [2, 0], [0, 3], [3, 0], [1, 2], [2, 1], [1, 3], [3, 1], [2, 3], [3, 2]]);
+  const hubs = layoutCandidates(d, { plan: { labels: "none" } }).filter((c) => /^hub-[a-z]+$/.test(c.arrangement));
+  assert.ok(hubs.some((c) => c.arrangement === "hub-triangle"), "a triangle round its centre is tried");
+  // The drawing as it looks with the names hidden: where the reset state is, and which cells the lines join.
+  const looks = hubs.map((c) => {
+    const s = c.diagram.states, x0 = Math.min(...s.map((p) => p.x!)), y0 = Math.min(...s.map((p) => p.y!));
+    const cell = (id: string) => { const p = s.find((q) => q.id === id)!; return `${p.x! - x0},${p.y! - y0}`; };
+    return `${c.step} ${c.arrangement} ${cell(s[0].id)} ` + c.diagram.transitions.map((t) => `${cell(t.from)}>${cell(t.to)}`).sort().join(" ");
+  });
+  assert.equal(new Set(looks).size, looks.length, "two hub candidates are the same drawing");
 });
 
 test("a wheel round the reset state: no crossings, the start arrow clear, nothing left of the reset state, every spoke one step", () => {

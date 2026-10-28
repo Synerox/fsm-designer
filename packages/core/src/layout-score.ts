@@ -34,7 +34,7 @@ export interface LayoutScore {
   leftOfStart: number;
   /** States lined up with no other state, in a row or a column. */
   floating: number;
-  /** Triangles of linked states, two of them linked both ways, that are not about equilateral (not counting the slices round a state centred in an equilateral triangle). */
+  /** Triangles of linked states, two of them linked both ways, that are not about equilateral (not counting the slices round a state centred in an equilateral triangle of the three states it links to, and to nothing else). */
   uneven: number;
   /** How far lines between states run past one and a half times the shortest line, summed (in shortest lines). */
   long: number;
