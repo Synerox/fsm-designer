@@ -3,7 +3,7 @@
 // less common FSM styles, long case statements, deep nesting).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { importVerilog, parseExpression } from "../../src/import/index.ts";
+import { importVerilog, listStateMachines, parseExpression } from "../../src/import/index.ts";
 import { simplify } from "../../src/import/expr.ts";
 import type { FsmDiagram } from "../../src/model.ts";
 
@@ -219,4 +219,119 @@ module m(input clk, input rst, input a, input b, output reg y);
 endmodule`, { maxPaths: 64 });
   assert.deepEqual(t.warnings, []);
   assert.ok(edges(t.diagram).includes("S0->S1: a && b"), edges(t.diagram).join("\n"));
+});
+
+test("a next state written only with ?: is detected", () => {
+  const src = `
+module m(input clk, input rst_n, input a, input b, output reg y);
+  localparam S0 = 2'd0, S1 = 2'd1, S2 = 2'd2, S3 = 2'd3;
+  reg [1:0] s, n;
+  always @(posedge clk or negedge rst_n) if (!rst_n) s <= S0; else s <= n;
+  always @* begin
+    n = (s == S0) ? (a ? S1 : S0) :
+        (s == S1) ? (b ? S2 : a ? S3 : S1) :
+        (s == S2) ? S3 : S0;
+    y = (s == S3) ? 1'b1 : 1'b0;
+  end
+endmodule`;
+  assert.deepEqual(listStateMachines(src), [{ module: "m", stateVar: "s" }]);
+  const r = importVerilog(src);
+  assert.ok(edges(r.diagram).includes("S1->S3: !b && a"), edges(r.diagram).join("\n"));
+  // A register written as one ?: and a wire next state behind a ?: reset.
+  const one = importVerilog(`
+module m(input clk, input rst_n, input a, output reg y);
+  localparam S0 = 0, S1 = 1;
+  reg s;
+  always @(posedge clk or negedge rst_n) if (!rst_n) s <= S0; else s <= a ? S1 : S0;
+  always @* y = (s == S1);
+endmodule`);
+  assert.deepEqual(edges(one.diagram), ["S0->S1: a", "S0->S0: !a", "S1->S1: a", "S1->S0: !a"]);
+  const w = importVerilog(`
+module a07 (input clk, input rst, input x, input y, output wire o);
+  localparam S0=2'd0, S1=2'd1, S2=2'd2;
+  reg [1:0] st;
+  wire [1:0] nx = (st == S0) ? (x ? S1 : S0) : (st == S1) ? (y ? S2 : (x ? S1 : S0)) : S0;
+  always @(posedge clk) st <= rst ? S0 : nx;
+  assign o = (st == S2) ? 1'b1 : 1'b0;
+endmodule`);
+  assert.equal(w.nextVar, "nx");
+  assert.deepEqual(w.diagram.reset, { name: "rst", activeLow: false, async: false });
+  assert.ok(edges(w.diagram).includes("S1->S2: y"), edges(w.diagram).join("\n"));
+});
+
+test("a case on a concatenation of the state and inputs is detected", () => {
+  const src = `
+module a05 (input clk, input rst, input [1:0] in, output reg o);
+  reg [1:0] st, nx;
+  always @(posedge clk) if (rst) st <= 2'b00; else st <= nx;
+  always @* begin
+    nx = st; o = 0;
+    casex ({st, in})
+      4'b00_1x: nx = 2'b01;
+      4'b00_0x: nx = 2'b00;
+      4'b01_x1: begin nx = 2'b10; o = 1; end
+      4'b01_x0: nx = 2'b01;
+      4'b10_xx: nx = 2'b00;
+      default: nx = 2'b00;
+    endcase
+  end
+endmodule`;
+  assert.deepEqual(listStateMachines(src), [{ module: "a05", stateVar: "st" }]);
+  assert.ok(edges(importVerilog(src).diagram).includes("S1->S2: in[0] / o=1"));
+  const named = importVerilog(`
+module m(input clk, input rst_n, input a, output reg y);
+  localparam S0 = 1'b0, S1 = 1'b1;
+  reg s, n;
+  always @(posedge clk or negedge rst_n) if (!rst_n) s <= S0; else s <= n;
+  always @* begin
+    n = s; y = 0;
+    case ({s, a})
+      {S0, 1'b1}: n = S1;
+      {S1, 1'b0}: begin n = S0; y = 1; end
+      default: n = s;
+    endcase
+  end
+endmodule`);
+  assert.deepEqual(named.diagram.states.map((s) => s.name), ["S0", "S1"]);
+  assert.ok(edges(named.diagram).includes("S1->S0: !a / y=1"), edges(named.diagram).join("\n"));
+});
+
+test("one-hot with plain bit indices, and a one-hot write whose index is a ?:", () => {
+  const src = `
+module oh2(input clk, input rst, input go, output reg busy);
+  reg [2:0] st, nx;
+  always @(posedge clk) if (rst) st <= 3'b001; else st <= nx;
+  always @* begin
+    nx = 3'b000; busy = 0;
+    case (1'b1)
+      st[0]: if (go) nx[1] = 1'b1; else nx[0] = 1'b1;
+      st[1]: begin busy = 1; nx[2] = 1'b1; end
+      st[2]: nx[0] = 1'b1;
+    endcase
+  end
+endmodule`;
+  assert.deepEqual(listStateMachines(src), [{ module: "oh2", stateVar: "st" }]);
+  const r = importVerilog(src);
+  assert.deepEqual(r.stateCodes, { S_001: "3'b001", S_010: "3'b010", S_100: "3'b100" });
+  assert.deepEqual(edges(r.diagram), ["S_001->S_010: go", "S_001->S_001: !go", "S_010->S_100: ", "S_100->S_001: "]);
+  const t = importVerilog(`
+module m(input clk, input rst_n, input go, input stop, output reg run);
+  parameter IDLE = 0, GO = 1, RUN = 2;
+  reg [2:0] st;
+  always @(posedge clk or negedge rst_n)
+    if (!rst_n) st <= 3'b001;
+    else begin
+      st <= 3'b000;
+      case (1'b1)
+        st[IDLE]: st[go ? GO : IDLE] <= 1'b1;
+        st[GO]:   st[RUN] <= 1'b1;
+        st[RUN]:  st[stop ? IDLE : RUN] <= 1'b1;
+        default:  st[IDLE] <= 1'b1;
+      endcase
+    end
+  always @* run = st[RUN];
+endmodule`);
+  assert.deepEqual(t.warnings, []);
+  assert.deepEqual(edges(t.diagram), ["IDLE->GO: go", "IDLE->IDLE: !go", "GO->RUN: ", "RUN->IDLE: stop", "RUN->RUN: !stop"]);
+  assert.deepEqual(stateOutputs(t.diagram).RUN, { run: 1 });
 });

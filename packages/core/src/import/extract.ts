@@ -263,6 +263,34 @@ interface Candidate {
   values: Set<string>;
 }
 
+/** The values a right-hand side can take: itself, or the leaves of a ?: chain (s <= a ? S1 : S0). */
+function leaves(e: Expr): Expr[] {
+  return e.k === "tern" ? [...leaves(e.a), ...leaves(e.b)] : [e];
+}
+
+/**
+ * For a case on a concatenation that holds `names` ({state, in}), the part
+ * that does and the bits below it, so each label's state field can be read.
+ */
+function catField(subject: Expr, names: Set<string>, ctx: EvalCtx): { index: number; parts: number; w: number; shift: number } | undefined {
+  if (subject.k !== "cat") return undefined;
+  let shift = subject.parts.reduce((a, p) => a + widthOf(p, ctx), 0);
+  for (const [index, p] of subject.parts.entries()) {
+    const w = widthOf(p, ctx);
+    shift -= w;
+    if (p.k === "id" && names.has(p.name)) return { index, parts: subject.parts.length, w, shift };
+  }
+  return undefined;
+}
+
+/** The state field of a case label on a concatenation, when those bits are all 0/1. */
+function fieldOf(label: Expr, f: { w: number; shift: number }, ctx: EvalCtx): bigint | undefined {
+  const v = simplify(label, ctx);
+  if (!isNum(v)) return undefined;
+  const bits = mask(-1n, f.w) << BigInt(f.shift);
+  return ((v.x | v.z) & bits) === 0n ? (v.v & bits) >> BigInt(f.shift) : undefined;
+}
+
 function findCandidates(c: Ctx, blocks: Block[]): Candidate[] {
   const m = c.m;
   const pctx: EvalCtx = { lookup: (n) => c.params.get(n), width: (n) => c.widths.get(n) };
@@ -279,9 +307,12 @@ function findCandidates(c: Ctx, blocks: Block[]): Candidate[] {
     const nexts = new Map<string, number>();
     for (const b of blocks.filter((x) => x.seq && x.writes.has(name))) {
       for (const a of assignsTo(b.stmt, name)) {
-        const v = a.lhs.k === "id" ? constOf(a.rhs) : undefined;
-        if (v) values.add(v.v.toString());
-        if (a.rhs.k === "id" && combWritten.has(a.rhs.name)) nexts.set(a.rhs.name, (nexts.get(a.rhs.name) ?? 0) + 1);
+        for (const l of a.lhs.k === "id" ? leaves(a.rhs) : []) {
+          const v = constOf(l);
+          if (v) values.add(v.v.toString());
+          // state <= next, or state <= rst ? IDLE : next
+          if (l.k === "id" && combWritten.has(l.name)) nexts.set(l.name, (nexts.get(l.name) ?? 0) + 1);
+        }
         if (a.rhs.k === "bin" && ["+", "-"].includes(a.rhs.op) && freeIds(a.rhs).has(name)) counter = true;
       }
     }
@@ -290,25 +321,33 @@ function findCandidates(c: Ctx, blocks: Block[]): Candidate[] {
       for (const b of blocks.filter((x) => !x.seq && x.writes.has(next))) {
         for (const a of assignsTo(b.stmt, next)) {
           if (a.lhs.k !== "id") continue;
-          const v = constOf(a.rhs);
-          if (v) values.add(v.v.toString());
+          for (const l of leaves(a.rhs)) { const v = constOf(l); if (v) values.add(v.v.toString()); }
           if (a.rhs.k === "bin" && ["+", "-"].includes(a.rhs.op) && freeIds(a.rhs).has(name)) counter = true;
         }
       }
     }
-    // Usage: case subject, comparisons with constants, one-hot bit tests.
+    // Usage: case subject (alone or in a concatenation: case ({state, in})),
+    // comparisons with constants, one-hot bit tests (state[IDLE], or st[0]
+    // with a plain index, which counts as a use but not as evidence alone:
+    // any vector is bit-tested that way).
     const names = new Set([name, ...(next ? [next] : [])]);
-    let caseUses = 0, compares = 0, bitTests = 0;
+    let caseUses = 0, compares = 0, bitTests = 0, numericBitTests = 0;
     for (const b of blocks) {
       eachStmt(b.stmt, (x) => {
         if (x.k === "case" && x.subject.k === "id" && names.has(x.subject.name)) {
           caseUses++;
           for (const it of x.items) for (const l of it.labels ?? []) { const v = constOf(l); if (v) values.add(v.v.toString()); }
         }
+        const f = x.k === "case" ? catField(x.subject, names, pctx) : undefined;
+        if (x.k === "case" && f) {
+          caseUses++;
+          for (const it of x.items) for (const l of it.labels ?? []) { const v = fieldOf(l, f, pctx); if (v !== undefined) values.add(v.toString()); }
+        }
       });
       eachExpr(b.stmt, (e) => subExprs(e, (s) => {
         if (s.k === "bin" && (s.op === "==" || s.op === "!=") && s.a.k === "id" && names.has(s.a.name) && constOf(s.b)) compares++;
         if (s.k === "idx" && s.a.k === "id" && names.has(s.a.name) && s.i.k === "id" && c.params.has(s.i.name)) bitTests++;
+        else if (s.k === "idx" && s.a.k === "id" && names.has(s.a.name) && s.i.k === "num" && constOf(s.i)) numericBitTests++;
       }));
     }
     const enumTyped = decl?.enumType !== undefined;
@@ -316,7 +355,7 @@ function findCandidates(c: Ctx, blocks: Block[]): Candidate[] {
     if (counter) score -= 20;
     if (decl?.dir === "output") score -= 2;
     const enough = values.size >= 2 || bitTests >= 2 || (enumTyped && caseUses > 0);
-    if (enough && (caseUses > 0 || compares > 0 || bitTests > 0)) out.push({ name, next, score, values });
+    if (enough && (caseUses > 0 || compares > 0 || bitTests > 0 || numericBitTests > 0)) out.push({ name, next, score, values });
   }
   return out.sort((a, b) => b.score - a.score);
 }
@@ -451,6 +490,11 @@ class Engine {
         return ps;
       }
       case "assign": {
+        // st[go ? GO : IDLE] <= 1'b1: fork on the index, so each run writes one bit.
+        if (s.lhs.k === "idx") {
+          const i = simplify(s.lhs.i, this.ctx(p));
+          if (i.k === "tern") { const lhs = s.lhs; return this.branch(p, i.c).flatMap(([q, b]) => this.exec({ ...s, lhs: { ...lhs, i: b ? i.a : i.b } }, q, seq)); }
+        }
         const v = simplify(s.rhs, this.ctx(p));
         // x ? A : B with an unknown x: fork, so each run assigns a constant.
         if (v.k === "tern") return this.branch(p, v.c).flatMap(([q, b]) => this.exec({ ...s, rhs: b ? v.a : v.b }, q, seq));
@@ -764,14 +808,22 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
     if (name && !names.has(k)) names.set(k, name);
   };
   const indexNames: string[] = [];
+  const numericIndices = new Set<number>();
   for (const b of blocks) {
     eachStmt(b.stmt, (x) => {
       if (x.k === "assign" && x.lhs.k === "id" && stateNames.has(x.lhs.name)) {
-        const v = simplify(x.rhs, pctx);
-        if (isConst(v)) addName(v.v, named(x.rhs));
+        for (const l of leaves(x.rhs)) { const v = simplify(l, pctx); if (isConst(v)) addName(v.v, named(l)); }
       }
       if (x.k === "case" && x.subject.k === "id" && stateNames.has(x.subject.name)) {
         for (const it of x.items) for (const l of it.labels ?? []) { const v = simplify(l, pctx); if (isConst(v)) addName(v.v, named(l)); }
+      }
+      const f = x.k === "case" ? catField(x.subject, stateNames, pctx) : undefined;
+      if (x.k === "case" && f) {
+        for (const it of x.items) for (const l of it.labels ?? []) {
+          const v = fieldOf(l, f, pctx);
+          // {S0, 1'b1}: the label's own part names the state.
+          if (v !== undefined) addName(v, l.k === "cat" && l.parts.length === f.parts ? named(l.parts[f.index]) : undefined);
+        }
       }
     });
     eachExpr(b.stmt, (e) => subExprs(e, (s) => {
@@ -780,6 +832,7 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
         if (isConst(v)) addName(v.v, named(s.b));
       }
       if (s.k === "idx" && s.a.k === "id" && stateNames.has(s.a.name) && s.i.k === "id" && c.params.has(s.i.name) && !indexNames.includes(s.i.name)) indexNames.push(s.i.name);
+      if (s.k === "idx" && s.a.k === "id" && stateNames.has(s.a.name) && s.i.k === "num" && isConst(s.i)) numericIndices.add(Number(s.i.v));
     }));
   }
   const enumType = m.decls.get(R)?.enumType;
@@ -795,6 +848,13 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
       declaredValues.clear();
       indexNames.forEach((n, i) => addName(1n << BigInt(idx[i]), n));
     }
+  } else if (numericIndices.size >= 2 && !names.size && [...numericIndices].every((i) => i < Rw) && [...declaredValues].every((k) => { const v = BigInt(k); return (v & (v - 1n)) === 0n; })) {
+    // The same with plain indices (case (1'b1) st[0]: ... nx[1] = 1'b1), when
+    // nothing names the states and every value written is one-hot (or the
+    // all-zero default the bits are set on).
+    oneHotIndex = true;
+    declaredValues.clear();
+    for (const i of numericIndices) addName(1n << BigInt(i));
   }
 
   // Initial values (FPGA style, no reset): reg [1:0] state = IDLE; or initial state = IDLE;
