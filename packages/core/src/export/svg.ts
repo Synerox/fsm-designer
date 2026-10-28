@@ -63,16 +63,30 @@ export interface PlanOptions {
 
 function edgeLines(d: FsmDiagram, ts: Transition[], opts: PlanOptions, hidden: boolean): string[] {
   const shown = opts.shownEdge?.from === ts[0].from && opts.shownEdge.to === ts[0].to;
-  return hidden && !shown ? [] : ts.flatMap((t) => labelLines(transitionLabel(d, t, opts)));
+  if (hidden && !shown) return [];
+  // Wrap the condition and the outputs separately: a condition can hold a
+  // division (" / "), which re-splitting the joined label would take for the
+  // outputs separator.
+  return ts.flatMap((t) => {
+    const { cond, outs } = labelParts(d, t, opts);
+    const text = joinLabel(cond, outs);
+    if (text.length <= WRAP_CHARS) return text ? [text] : [];
+    return [...wrapCondition(cond, WRAP_CHARS), ...(outs ? [`/ ${outs}`] : [])];
+  });
 }
+
+function labelParts(d: FsmDiagram, t: Transition, opts: PlanOptions): { cond: string; outs: string } {
+  let cond = t.condition;
+  if (isUnconditional(t) && (opts.elseLabels ?? true)) cond = outgoing(d, t.from).length > 1 ? "else" : "";
+  return { cond, outs: d.type === "mealy" ? formatOutputs(t.outputs) : "" };
+}
+
+const joinLabel = (cond: string, outs: string) => (outs ? (cond ? `${cond} / ${outs}` : `/ ${outs}`) : cond);
 
 /** Text drawn on a transition: "cond" (Moore) or "cond / z=1" (Mealy). */
 export function transitionLabel(d: FsmDiagram, t: Transition, opts: PlanOptions = {}): string {
-  let cond = t.condition;
-  if (isUnconditional(t) && (opts.elseLabels ?? true)) cond = outgoing(d, t.from).length > 1 ? "else" : "";
-  const outs = d.type === "mealy" ? formatOutputs(t.outputs) : "";
-  if (outs) return cond ? `${cond} / ${outs}` : `/ ${outs}`;
-  return cond;
+  const { cond, outs } = labelParts(d, t, opts);
+  return joinLabel(cond, outs);
 }
 
 /** Labels longer than this many characters are wrapped. */
@@ -81,15 +95,24 @@ export const WRAP_CHARS = 36;
 /**
  * Lines of a transition label: a long label is broken after `||` (and, if a
  * line is still long, after `&&` outside or one level inside parentheses),
- * with Mealy outputs on a line of their own.
+ * with Mealy outputs on a line of their own. The text is a whole
+ * transitionLabel(): its last top-level " / " is taken as the outputs
+ * separator, so a Moore condition with a division should go through
+ * planDiagram, which knows which part is which.
  */
 export function labelLines(text: string, max = WRAP_CHARS): string[] {
   if (text.length <= max) return text ? [text] : [];
   const slash = splitAfter(text, " / ", 0);
   if (slash.length > 1) {
+    // Only the last piece is outputs: a " / " before it is a division in the condition.
     const cond = slash.slice(0, -1).join("").replace(/ \/ $/, "");
-    return [...(cond ? labelLines(cond, max) : []), `/ ${slash[slash.length - 1]}`];
+    return [...wrapCondition(cond, max), `/ ${slash[slash.length - 1]}`];
   }
+  return wrapCondition(text, max);
+}
+
+function wrapCondition(text: string, max: number): string[] {
+  if (text.length <= max) return text ? [text] : [];
   return pack(splitAfter(text, " || ", 0), max).flatMap((l) => (l.length > max ? pack(splitAfter(l, " && ", 1), max) : [l]));
 }
 
