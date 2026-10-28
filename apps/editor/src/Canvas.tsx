@@ -197,9 +197,10 @@ export function Canvas({ view, setView, grid }: { view: View; setView: Dispatch<
     if (!g) return;
     // An undo or redo while the button is held can take away what is being
     // dragged: the gesture ends there.
-    const held = g.kind === "curve" ? [g.from, g.to] : g.kind === "move" || g.kind === "loop" || g.kind === "resize" || g.kind === "initial" ? [g.id] : [];
+    const held = g.kind === "curve" ? [g.from, g.to] : g.kind === "move" || g.kind === "loop" || g.kind === "resize" || g.kind === "initial" ? [g.id] : g.kind === "link" && g.from ? [g.from] : [];
     if (held.some((id) => !byId.has(id))) {
       gesture.current = null;
+      setLink(null);
       setGuides([]);
       return;
     }
@@ -284,6 +285,7 @@ export function Canvas({ view, setView, grid }: { view: View; setView: Dispatch<
     }
     if (!g || g.kind !== "link") return;
     setLink(null);
+    if (g.from && !byId.has(g.from)) return; // undone while dragging
     const p = toWorld(e);
     const target = linkTarget(plan, g.from, p);
     if (!target) return;
@@ -489,8 +491,9 @@ function GridDots({ view }: { view: View }) {
  */
 function linkTarget(plan: DiagramPlan, from: string | null, p: Pt): string | null {
   const hit = stateAt(plan, p);
-  if (hit || !from) return hit;
-  const { state: s, r } = plan.states.find((v) => v.state.id === from)!;
+  const src = from ? plan.states.find((v) => v.state.id === from) : undefined;
+  if (hit || !src) return hit;
+  const { state: s, r } = src;
   return Math.hypot(p.x - s.x!, p.y - s.y!) < r * 3.5 ? from : null;
 }
 
@@ -598,6 +601,9 @@ function InitialArrow({ a, selected }: { a: NonNullable<DiagramPlan["initialArro
 
 function LinkPreview({ link, plan }: { link: { from: string | null; start: Pt; at: Pt }; plan: DiagramPlan }) {
   const find = (id: string) => plan.states.find((p) => p.state.id === id)!;
+  // The source can be undone away mid-drag; this renders before the next
+  // pointer move ends the gesture.
+  if (link.from && !plan.states.some((p) => p.state.id === link.from)) return null;
   const over = linkTarget(plan, link.from, link.at);
   let d: string;
   if (link.from) {
