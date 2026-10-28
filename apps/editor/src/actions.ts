@@ -159,11 +159,15 @@ export async function exportPng(scale = 2): Promise<void> {
 export function startAutosave(): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const unsub = useEditor.subscribe((s, prev) => {
-    if (s.doc === prev.doc && s.filePath === prev.filePath) return;
+    // dirty counts too: an import or restore sets it in a second update after
+    // load(), and a save to the same path changes nothing else.
+    if (s.doc === prev.doc && s.filePath === prev.filePath && s.dirty === prev.dirty) return;
     clearTimeout(timer);
     timer = setTimeout(() => {
+      // Write the state as it is now, not as it was when the timer started.
+      const { doc, filePath, dirty } = useEditor.getState();
       try {
-        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({ doc: s.doc, filePath: s.filePath, dirty: s.dirty }));
+        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({ doc, filePath, dirty }));
       } catch { /* storage full or unavailable */ }
     }, 300);
   });
