@@ -142,8 +142,10 @@ export function score(d: FsmDiagram, plan: DiagramPlan = planDiagram(d), step = 
       // A slice of a centred hub: one corner at the centre of an equilateral
       // triangle that the other two make with a fourth state linked to all
       // three (four states all linked, drawn as a triangle round its centre).
-      // Only the outer triangle can be equilateral then.
-      if ([a, b, c].some((h) => [...linked.get(h)!].some((e) => e !== a && e !== b && e !== c && [a, b, c].every((x) => x === h || linked.get(e)!.has(x)) && centred(at.get(h)!, [a, b, c, e].filter((x) => x !== h).map((x) => at.get(x)!))))) continue;
+      // Only the outer triangle can be equilateral then. The centre must have
+      // no other lines: one leaving the triangle (k5 drawn as a grid) makes
+      // the drawing no cleaner than an uneven one.
+      if ([a, b, c].some((h) => linked.get(h)!.size === 3 && [...linked.get(h)!].some((e) => e !== a && e !== b && e !== c && [a, b, c].every((x) => x === h || linked.get(e)!.has(x)) && centred(at.get(h)!, [a, b, c, e].filter((x) => x !== h).map((x) => at.get(x)!))))) continue;
       const sides = [Math.hypot(p.x - q.x, p.y - q.y), Math.hypot(q.x - r.x, q.y - r.y), Math.hypot(r.x - p.x, r.y - p.y)];
       if (Math.max(...sides) > 1.15 * Math.min(...sides)) s.uneven++;
     }
