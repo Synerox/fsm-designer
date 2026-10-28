@@ -5,6 +5,7 @@ import { autoLayout, ensureLayout, fitStateSizes, importVerilogLaidOut, parseDia
 import type { FsmDiagram, ImportOptions, ImportResult, LayoutIssue } from "@fsm/core";
 import { FSM_FILTER, baseName, confirmDialog, fileError, launchFile, openTextFile, saveFile } from "./platform.ts";
 import type { OpenedFile } from "./platform.ts";
+import { pathNumbers } from "./geometry.ts";
 import { DEFAULT_NAME, drawOptions, newDiagram, useEditor } from "./store.ts";
 
 import { tr } from "./i18n.ts";
@@ -30,8 +31,10 @@ async function confirmDiscard(): Promise<boolean> {
 
 /**
  * Earlier versions stored labels as "S_0" / "\beta" and drew them converted;
- * labels now hold the characters themselves, so convert old ones on load.
- * Conditions only get greek converted (data_0 is a Verilog name).
+ * labels now hold the characters themselves, so convert old ones when a file
+ * is opened. Conditions only get greek converted (data_0 is a Verilog name).
+ * A file cannot say which version wrote it, so this also rewrites a label
+ * typed in this one without the space that converts it ("S_0'").
  */
 function upgradeLabels(d: FsmDiagram): FsmDiagram {
   for (const s of d.states) if (s.label !== undefined) s.label = prettyText(s.label);
@@ -46,14 +49,45 @@ function upgradeLabels(d: FsmDiagram): FsmDiagram {
  * are easy to loosen again.
  */
 function checkDrawable(d: FsmDiagram): void {
+  const cannot = (why: string) => new Error(tr(`the diagram cannot be drawn (${why})`, `無法畫出這張圖（${why}）`, `図を描画できません（${why}）`));
+  let plan: ReturnType<typeof planDiagram>;
   try {
-    planDiagram(d, drawOptions());
+    plan = planDiagram(d, drawOptions());
   } catch (e) {
-    throw new Error(tr(`the diagram cannot be drawn (${errorText(e)})`, `無法畫出這張圖（${errorText(e)}）`, `図を描画できません（${errorText(e)}）`));
+    throw cannot(errorText(e));
   }
+  // Huge coordinates, curves or radii (a hand edit: x: 1e308) do not throw
+  // here: the lines between them come out as NaN or Infinity, or as numbers
+  // SVG cannot hold, and the canvas threw on them. Nothing drawn by hand
+  // comes near MAX_COORD; SVG's single-precision numbers end at about 3e38.
+  const { minX, minY, maxX, maxY } = plan.bounds;
+  const sane = (v: number) => Math.abs(v) <= MAX_COORD; // false for NaN too
+  if (![minX, minY, maxX, maxY].every(sane) || !plan.edges.every((e) => pathNumbers(e.path).every(sane)))
+    throw cannot(tr("a position or size is too large", "位置或大小的數值太大", "位置または大きさの値が大きすぎます"));
 }
 
+const MAX_COORD = 1e15;
+
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+/**
+ * parseDiagram, with its refusals of the whole file in the UI language: the
+ * core words them in English for API callers. These are what opening the
+ * wrong file, or one from a newer version, gives. A refusal of one field
+ * ("states[2].x must be ...") stays as the core wrote it, as technical
+ * detail, like a Verilog syntax error in the import dialog.
+ */
+function readDiagram(json: unknown): FsmDiagram {
+  try {
+    return parseDiagram(json);
+  } catch (e) {
+    const msg = errorText(e);
+    const v = msg.match(/^This diagram is version (\d+), from a newer FSM Designer/);
+    if (v) throw new Error(tr(`it was saved by a newer FSM Designer (format version ${v[1]}); update this one to open it`, `它是較新版的 FSM Designer 存的（格式第 ${v[1]} 版），請更新後再開啟`, `新しい FSM Designer で保存された図です（形式バージョン ${v[1]}）。更新してから開いてください`));
+    if (/^Not an FSM Designer diagram|^Diagram JSON must be an object/.test(msg)) throw new Error(tr("it is not an FSM Designer diagram", "不是 FSM Designer 的圖檔", "FSM Designer の図ではありません"));
+    throw e;
+  }
+}
 
 export async function loadText(text: string, path: string | null): Promise<void> {
   let json: unknown;
@@ -63,7 +97,7 @@ export async function loadText(text: string, path: string | null): Promise<void>
   } catch {
     throw new Error(tr("it is not a valid JSON file", "不是有效的 JSON 檔案", "有効な JSON ファイルではありません"));
   }
-  const d = upgradeLabels(parseDiagram(json));
+  const d = upgradeLabels(readDiagram(json));
   // A file whose states are all placed (everything the editor saves) opens as
   // it was saved: in the editor text never resizes a state, so its circles and
   // positions are the user's. Files made elsewhere (agents) can come without
@@ -234,7 +268,20 @@ export const useAutosave = create<{ failed: boolean; otherTab: boolean; overwrit
 /** True when a reload or close would lose this tab's unsaved changes even though the browser build autosaves. */
 export const autosaveLost = () => { const a = useAutosave.getState(); return a.failed || a.overwritten; };
 
+/** Set while a write is due; undefined once it has run or been cancelled. */
 let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
+
+/**
+ * Write a due autosave now. A reload or closed tab cancels the timer, and the
+ * guard stays quiet because the autosave holds the work: without this the
+ * last 300 ms of edits (or a New, a Discard, a Save) would be lost unasked.
+ */
+function flushAutosave(): void {
+  if (autosaveTimer === undefined) return;
+  clearTimeout(autosaveTimer);
+  autosaveTimer = undefined;
+  writeAutosave();
+}
 
 function writeAutosave(): void {
   const { doc, filePath, dirty } = useEditor.getState();
@@ -253,14 +300,26 @@ export function startAutosave(): () => void {
     if (s.doc === prev.doc && s.filePath === prev.filePath && s.dirty === prev.dirty) return;
     clearTimeout(autosaveTimer);
     // Write the state as it is when the timer fires, not as it was when it started.
-    autosaveTimer = setTimeout(writeAutosave, 300);
+    autosaveTimer = setTimeout(() => { autosaveTimer = undefined; writeAutosave(); }, 300);
   });
   // Fired only by other tabs (key null: they cleared storage).
   const onStorage = (e: StorageEvent) => {
     if (e.key === AUTOSAVE_KEY || e.key === null) useAutosave.setState({ otherTab: true, overwritten: true });
   };
+  // pagehide comes with every reload, close and navigation; a hidden tab may
+  // be killed without one (mobile, or a discarded background tab).
+  const onHidden = () => { if (globalThis.document?.visibilityState !== "visible") flushAutosave(); };
   globalThis.addEventListener?.("storage", onStorage);
-  return () => { clearTimeout(autosaveTimer); unsub(); globalThis.removeEventListener?.("storage", onStorage); };
+  globalThis.addEventListener?.("pagehide", flushAutosave);
+  globalThis.document?.addEventListener("visibilitychange", onHidden);
+  return () => {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = undefined;
+    unsub();
+    globalThis.removeEventListener?.("storage", onStorage);
+    globalThis.removeEventListener?.("pagehide", flushAutosave);
+    globalThis.document?.removeEventListener("visibilitychange", onHidden);
+  };
 }
 
 /**
@@ -268,7 +327,9 @@ export function startAutosave(): () => void {
  * next launch must not bring them back: it opens what was last saved.
  */
 export function discardUnsaved(): void {
+  // Cancelled, not flushed: the pending write holds the discarded changes.
   clearTimeout(autosaveTimer);
+  autosaveTimer = undefined;
   const { savedDoc, filePath } = useEditor.getState();
   try {
     // No savedDoc: an import or restored session that was never written anywhere.
@@ -295,9 +356,18 @@ interface Session { doc: FsmDiagram; filePath: string | null; dirty: boolean }
 
 /** The stored session as a drawable diagram; throws if it is not one. */
 async function parseSession(raw: string): Promise<Session> {
-  const saved = JSON.parse(raw) as { doc?: unknown; filePath?: unknown; dirty?: unknown } | null;
+  let saved: { doc?: unknown; filePath?: unknown; dirty?: unknown } | null;
+  try {
+    saved = JSON.parse(raw) as typeof saved;
+  } catch {
+    // The engine's own message ("Expected property name ...") is English only.
+    throw new Error(tr("it is not valid JSON", "不是有效的 JSON", "有効な JSON ではありません"));
+  }
   if (typeof saved !== "object" || saved === null) throw new Error(tr("not a saved diagram", "不是存下來的圖", "保存された図ではありません"));
-  const d = upgradeLabels(parseDiagram(saved.doc));
+  // Not upgradeLabels: every build since labels hold Unicode writes the slot,
+  // and a label typed without the space that converts it ("S_0'", "a\beta!")
+  // is what the user typed; the upgrade changed it on every reload.
+  const d = readDiagram(saved.doc);
   // Only this editor writes the slot, but an older build, or a hand edit, can leave anything in it.
   const filePath = typeof saved.filePath === "string" ? saved.filePath : null;
   // Older versions opened an example under its own name; an unsaved copy takes the default.

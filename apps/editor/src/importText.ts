@@ -36,6 +36,11 @@ const WARNINGS: Array<[RegExp, Fill, Fill, Fill?]> = [
   [/^Imported module (\w+); the file also has (.+) \(pick/, (_, m, others) => `匯入的是 module ${m}；檔案裡還有 ${others}（沒有狀態機的 module 會略過）`, (_, m, others) => `読み込んだのは module ${m} です。ファイルにはほかに ${others} があります（ステートマシンのない module は省略）`, (_, m, others) => `Imported module ${m}; the file also has ${others} (modules without a state machine are skipped)`],
   [/^"(.+)" is not assigned on every path of state (.+); assumed to stay$/, (_, n, s) => `狀態 ${s} 有些情況沒有指定 ${n}，視為停在原狀態`, (_, n, s) => `状態 ${s} で ${n} が代入されない場合があり、同じ状態にとどまるとみなしました`],
   [/^Next state of (.+) is not a constant \((.+)\); that case is left out$/, (_, s, e) => `狀態 ${s} 的下一狀態不是常數（${e}），這種情況沒有畫出`, (_, s, e) => `状態 ${s} の次状態が定数ではない（${e}）ため、その場合は描いていません`],
+  [/^Taking "(.+)" for a synchronous reset because it sets "(.+)" to a constant$/, (_, r, n) => `把 ${r} 視為同步 reset（它會把 ${n} 設成常數）`, (_, r, n) => `${r} は ${n} を定数にするため、同期リセットとみなしました`],
+  // The example in parentheses is "a[4] reads a[3]": a bit select as written, then the position it reads.
+  [/^"(.+)" is declared \[(-?\d+):(-?\d+)\]; its bit selects are shown as positions from the LSB \((.+) reads (.+)\)$/,
+    (_, n, msb, lsb, as, is) => `${n} 宣告為 [${msb}:${lsb}]，它的位元選取改以從 LSB 起算的位置顯示（${as} 顯示為 ${is}）`,
+    (_, n, msb, lsb, as, is) => `${n} は [${msb}:${lsb}] と宣言されているため、ビット選択は LSB から数えた位置で表示します（${as} は ${is} と表示）`],
 ];
 
 /** An importer warning in the UI language (English ones that name API options are reworded too). */
@@ -50,7 +55,7 @@ export function warningText(w: string): string {
   return w;
 }
 
-/** An importer error in the UI language. A syntax error keeps the parser's own (English) detail. */
+/** An importer error in the UI language. A syntax error, or the engine's message after "Could not import the Verilog:", keeps its own (English) detail. */
 export function importErrorText(msg: string): string {
   if (useLang.getState().lang === "ja") {
     if (/^No module found/.test(msg)) return "コードに module が見つかりません。";
@@ -61,6 +66,9 @@ export function importErrorText(msg: string): string {
     if (m) return `${m[1]} がとる状態の値を判別できませんでした。`;
     m = msg.match(/^More than 256 states reached from "(.+)"/);
     if (m) return `${m[1]} から 256 個を超える状態に到達します。本当に状態レジスタですか？`;
+    if (/^The Verilog is nested too deeply/.test(msg)) return "コードの入れ子が深すぎて読み込めません。";
+    m = msg.match(/^Could not import the Verilog: (.+)$/);
+    if (m) return `読み込めませんでした：${m[1]}`;
     return msg;
   }
   if (useLang.getState().lang !== "zh") {
@@ -76,5 +84,8 @@ export function importErrorText(msg: string): string {
   if (m) return `無法判斷 ${m[1]} 有哪些狀態值。`;
   m = msg.match(/^More than 256 states reached from "(.+)"/);
   if (m) return `從 ${m[1]} 走到的狀態超過 256 個，它真的是狀態暫存器嗎？`;
+  if (/^The Verilog is nested too deeply/.test(msg)) return "程式碼巢狀層數太深，無法匯入。";
+  m = msg.match(/^Could not import the Verilog: (.+)$/);
+  if (m) return `無法匯入：${m[1]}`;
   return msg;
 }

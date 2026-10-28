@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { autoLayout, renderSvg } from "@fsm/core";
 import { MAX_DRAFT, autosaveLost, discardUnsaved, importVerilogText, loadText, loadVerilogDraft, restoreSession, saveVerilogDraft, serialize, startAutosave, tidyUp, useAutosave } from "../src/actions.ts";
 import { createState, createTransition, drawOptions, newDiagram, setInitial, useEditor } from "../src/store.ts";
+import { useLang } from "../src/i18n.ts";
 
 // Node has no localStorage; a Map stands in for the browser's.
 const storage = new Map<string, string>();
@@ -19,7 +20,7 @@ let storageFull = false;
 // ...and no window to hear other tabs' "storage" events on.
 const events = new EventTarget();
 Object.assign(globalThis, { addEventListener: events.addEventListener.bind(events), removeEventListener: events.removeEventListener.bind(events) });
-const autosaved = () => JSON.parse(storage.get("fsm-designer:autosave") ?? "null") as { dirty: boolean; filePath: string | null } | null;
+const autosaved = () => JSON.parse(storage.get("fsm-designer:autosave") ?? "null") as { doc: { states: Array<{ label?: string }> }; dirty: boolean; filePath: string | null } | null;
 
 const SEQ = `module m (input clk, input rst, input x, output reg z);
   localparam A = 1'b0, B = 1'b1;
@@ -197,6 +198,79 @@ test("opening a file with a state the editor cannot draw fails instead of blanki
   await assert.rejects(loadText("{ not json", "bad.fsm.json"), /^Error: it is not a valid JSON file$/);
 });
 
+test("opening the wrong file, or one from a newer version, says why in the UI language", async () => {
+  const files = ['{"name":"x","version":"1.0.0"}', '{"foo":1}', "[1, 2]", '{"version":2,"states":[]}'];
+  const why = async () => {
+    const out: string[] = [];
+    for (const f of files) await loadText(f, "f.json").catch((e: Error) => out.push(e.message));
+    return out;
+  };
+  try {
+    assert.deepEqual(await why(), [
+      "it is not an FSM Designer diagram", "it is not an FSM Designer diagram", "it is not an FSM Designer diagram",
+      "it was saved by a newer FSM Designer (format version 2); update this one to open it",
+    ]);
+    useLang.getState().setLang("zh");
+    assert.deepEqual(await why(), ["不是 FSM Designer 的圖檔", "不是 FSM Designer 的圖檔", "不是 FSM Designer 的圖檔", "它是較新版的 FSM Designer 存的（格式第 2 版），請更新後再開啟"]);
+    useLang.getState().setLang("ja");
+    assert.deepEqual(await why(), ["FSM Designer の図ではありません", "FSM Designer の図ではありません", "FSM Designer の図ではありません", "新しい FSM Designer で保存された図です（形式バージョン 2）。更新してから開いてください"]);
+    // A restore that is not JSON at all: the engine's English message stayed in the toast.
+    storage.set("fsm-designer:autosave", "{bad");
+    await assert.rejects(restoreSession(), /^Error: 前回のセッションを復元できませんでした：有効な JSON ではありません$/);
+    useLang.getState().setLang("zh");
+    storage.set("fsm-designer:autosave", "{bad");
+    await assert.rejects(restoreSession(), /^Error: 無法還原上次的工作：不是有效的 JSON$/);
+    storage.set("fsm-designer:autosave", JSON.stringify({ doc: { version: 3, states: [] }, filePath: null, dirty: true }));
+    await assert.rejects(restoreSession(), /^Error: 無法還原上次的工作：它是較新版的 FSM Designer 存的（格式第 3 版）/);
+    // A refusal of one field stays as the core words it: technical detail.
+    await assert.rejects(loadText('{"version":1,"states":[{"id":"s0","name":"A","x":"left","y":0}]}', "f.json"), /states\[0\]/);
+  } finally {
+    useLang.getState().setLang("en");
+  }
+});
+
+test("a file or autosave with huge coordinates, curves or radii is refused, not drawn", async () => {
+  useEditor.getState().load(newDiagram(), null);
+  const doc = (patch: (d: { states: Array<Record<string, unknown>>; transitions: Array<Record<string, unknown>> }) => void) => {
+    const d = { version: 1, name: "M", type: "moore", states: [{ id: "s0", name: "A", x: 100, y: 100, isInitial: true }, { id: "s1", name: "B", x: 300, y: 100 }], transitions: [{ id: "t0", from: "s0", to: "s1" }] };
+    patch(d);
+    return d;
+  };
+  const tooLarge = /^Error: the diagram cannot be drawn \(a position or size is too large\)$/;
+  // The edge between x = 1e308 and -1e308 came out as NaN, and the canvas threw on it.
+  await assert.rejects(loadText(JSON.stringify(doc((d) => { d.states[0].x = 1e308; d.states[1].x = -1e308; })), "huge.fsm.json"), tooLarge);
+  await assert.rejects(loadText(JSON.stringify(doc((d) => { d.transitions[0].curve = 1e300; })), "curve.fsm.json"), tooLarge);
+  await assert.rejects(loadText(JSON.stringify(doc((d) => { d.states[1].radius = 1e300; })), "radius.fsm.json"), tooLarge);
+  assert.equal(useEditor.getState().doc.states.length, 0);
+  // Far out, but drawable: still opens.
+  await loadText(JSON.stringify(doc((d) => { d.states[1].x = 1e9; })), "far.fsm.json");
+  assert.equal(useEditor.getState().doc.states[1].x, 1e9);
+  // The same doc as an autosave crashed the editor on every start.
+  storage.set("fsm-designer:autosave", JSON.stringify({ doc: doc((d) => { d.states[0].x = 1e308; d.states[1].x = -1e308; }), filePath: null, dirty: true }));
+  await assert.rejects(restoreSession(), /^Error: Could not restore the last session: the diagram cannot be drawn/);
+  assert.equal(storage.has("fsm-designer:autosave"), false, "set aside");
+});
+
+test("a reload brings labels back exactly as typed, shortcut syntax and all", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  const stop = startAutosave();
+  try {
+    const d = newDiagram();
+    // Typed with no space after them, so never converted: not identifiers, so they are labels.
+    createState(d, 100, 100).label = "S_0'";
+    createState(d, 300, 100).label = "a\\beta!";
+    useEditor.getState().load(d, "m.fsm.json");
+    mock.timers.tick(300);
+  } finally {
+    stop();
+    mock.timers.reset();
+  }
+  useEditor.getState().load(newDiagram(), null);
+  await restoreSession();
+  assert.deepEqual(useEditor.getState().doc.states.map((s) => s.label), ["S_0'", "a\\beta!"], "came back as S₀' and aβ!, marked clean");
+  assert.equal(useEditor.getState().dirty, false);
+});
+
 test("discarding on close leaves the last saved diagram in the autosave, not the discarded changes", () => {
   const d = newDiagram();
   createState(d, 100, 100);
@@ -210,6 +284,47 @@ test("discarding on close leaves the last saved diagram in the autosave, not the
   useEditor.setState({ savedDoc: null });
   discardUnsaved();
   assert.equal(storage.has("fsm-designer:autosave"), false);
+});
+
+test("a reload, closed tab or hidden page writes a pending autosave at once", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  // Node has no document either: a stand-in that can hide.
+  const doc = Object.assign(new EventTarget(), { visibilityState: "visible" });
+  (globalThis as { document?: unknown }).document = doc;
+  const stop = startAutosave();
+  try {
+    useEditor.getState().load(newDiagram(), null);
+    mock.timers.tick(300);
+    // An edit, then the page goes before the 300 ms are up.
+    useEditor.getState().edit((d) => { createState(d, 0, 0).label = "IDLE"; });
+    events.dispatchEvent(new Event("pagehide"));
+    assert.deepEqual(autosaved()?.doc.states.map((s) => s.label), ["IDLE"], "the edit is in the autosave");
+    // A save, then a reload: it comes back saved, under its name.
+    useEditor.getState().markSaved("m.fsm.json");
+    events.dispatchEvent(new Event("pagehide"));
+    assert.deepEqual([autosaved()?.dirty, autosaved()?.filePath], [false, "m.fsm.json"]);
+    // New (after Discard), then the tab is hidden and killed.
+    useEditor.getState().load(newDiagram(), null);
+    doc.visibilityState = "hidden";
+    doc.dispatchEvent(new Event("visibilitychange"));
+    assert.deepEqual([autosaved()?.doc.states.length, autosaved()?.filePath], [0, null]);
+    doc.visibilityState = "visible";
+    // Nothing due: a pagehide writes nothing (another tab may hold the slot).
+    storage.set("fsm-designer:autosave", "other tab");
+    events.dispatchEvent(new Event("pagehide"));
+    assert.equal(storage.get("fsm-designer:autosave"), "other tab");
+    // Discarded on close: the pending write held the discarded changes, so it stays cancelled.
+    useEditor.getState().load(newDiagram(), "m.fsm.json");
+    useEditor.getState().edit((d) => { createState(d, 0, 0); });
+    discardUnsaved();
+    events.dispatchEvent(new Event("pagehide"));
+    mock.timers.tick(300);
+    assert.equal(autosaved()?.doc.states.length, 0, "the discarded state does not come back");
+  } finally {
+    stop();
+    delete (globalThis as { document?: unknown }).document;
+    mock.timers.reset();
+  }
 });
 
 test("a failed autosave write is reported until a write works again", () => {
