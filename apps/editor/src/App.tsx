@@ -8,6 +8,7 @@ import { Menu } from "./Menu.tsx";
 import { ImportReport, VerilogImportDialog } from "./VerilogImport.tsx";
 import { discardMessage, exportLatex, exportPng, exportSvg, latexText, newFile, openFile, restoreSession, saveDoc, startAutosave, tidyUp } from "./actions.ts";
 import { baseName, copyText, guardWindowClose, isDesktop, setWindowTitle } from "./platform.ts";
+import { deleteCopied, deletesSelection, keyPressesButton, typedText } from "./keys.ts";
 import { modalOpen, useModal } from "./dialog.ts";
 import { drawOptions, selectionParts, copySelection, deleteSelection, edgeTransitions, getStateText, hasClipboard, pasteClipboard, selectAll, setEdgeText, setStateText, useEditor } from "./store.ts";
 import type { Selection } from "./store.ts";
@@ -98,10 +99,24 @@ export function App() {
     void setWindowTitle(`${dirty ? "● " : ""}${filePath ? baseName(filePath) : tr("Untitled", "未命名")} — FSM Designer`);
   }, [filePath, dirty, lang]);
 
+  // Selecting in the diagram drops any text selected on the page (the canvas
+  // is user-select: none, so clicking it does not), so Ctrl+C copies whichever
+  // of the two the user picked last.
+  useEffect(() => useEditor.subscribe((s, prev) => {
+    if (s.selection && s.selection !== prev.selection && pageText()) window.getSelection()?.removeAllRanges();
+  }), []);
+
   useEffect(() => {
+    // The last button clicked with the mouse: Chromium leaves focus on it, and
+    // Space after that is typing, not pressing it again (see keyPressesButton).
+    let clicked: Element | null = null;
+    const onPointer = (e: PointerEvent) => { clicked = (e.target as Element).closest?.("button") ?? null; };
     const onKey = (e: KeyboardEvent) => {
+      // A menu that handled the key itself (arrow keys) already prevented it.
+      if (e.defaultPrevented) return;
       const mod = e.ctrlKey || e.metaKey;
-      const inField = (e.target as Element).closest("input, textarea, select");
+      const target = e.target instanceof Element ? e.target : document.body;
+      const inField = target.closest("input, textarea, select, [role=menu]");
       const k = e.key.toLowerCase();
       if (mod && k === "s") { e.preventDefault(); run(() => saveDoc(e.shiftKey))(); return; }
       // An open dialog (LaTeX, Import, Discard changes?) owns the keyboard; it
@@ -113,6 +128,9 @@ export function App() {
       if (mod && (k === "y" || (k === "z" && e.shiftKey))) { e.preventDefault(); redo(); return; }
       if (mod && k === "z") { e.preventDefault(); undo(); return; }
       if (mod && (k === "c" || k === "x")) {
+        // Text selected on the page (the import report, the status bar) is
+        // copied the normal way.
+        if (pageText()) return;
         e.preventDefault();
         const st = useEditor.getState();
         const n = copySelection(st.doc, st.selection);
@@ -121,8 +139,10 @@ export function App() {
           return;
         }
         if (k === "x") {
-          st.edit((d) => deleteSelection(d, st.selection));
-          st.select(null);
+          // Only what was copied is deleted; lone lines and the start arrow stay selected.
+          let kept: Selection = null;
+          st.edit((d) => { kept = deleteCopied(d, st.selection); });
+          st.select(kept);
         }
         setNotice(k === "x" ? tr(`Cut ${n} item${n === 1 ? "" : "s"}`, `已剪下 ${n} 個物件`, `${n} 個を切り取りました`) : tr(`Copied ${n} item${n === 1 ? "" : "s"}`, `已複製 ${n} 個物件`, `${n} 個をコピーしました`));
         return;
@@ -142,14 +162,16 @@ export function App() {
         st.select(selectAll(st.doc));
         return;
       }
-      if (mod || e.altKey) return;
+      const typed = typedText(e);
+      if ((mod || e.altKey) && typed === null) return;
+      if (keyPressesButton(e.key, target, clicked)) return;
 
       const { selection, doc, edit, select } = useEditor.getState();
       if (e.key === "Escape") { select(null); return; }
       // F fits the window, unless a state or line is selected (then it is typed).
       if (k === "f" && selection?.kind !== "state" && selection?.kind !== "edge") { e.preventDefault(); fit(); return; }
       if (!selection) return;
-      if (e.key === "Delete") {
+      if (deletesSelection(e.key, selection)) {
         e.preventDefault();
         edit((d) => deleteSelection(d, selection));
         select(null);
@@ -191,12 +213,13 @@ export function App() {
           return;
         }
       }
-      if (e.key.length !== 1) return;
+      if (typed === null) return;
       e.preventDefault();
-      put(cur.slice(0, caret) + e.key + cur.slice(caret), caret + 1);
+      put(cur.slice(0, caret) + typed + cur.slice(caret), caret + 1);
     };
+    window.addEventListener("pointerdown", onPointer, true);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => { window.removeEventListener("pointerdown", onPointer, true); window.removeEventListener("keydown", onKey); };
   }, [undo, redo]);
 
   return (
@@ -341,6 +364,13 @@ function LatexDialog({ latex, onClose, onSave, setNotice }: { latex: string; onC
 }
 
 const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "Cmd" : "Ctrl";
+
+/** Whether the user has selected text on the page (outside the text fields). */
+function pageText(): boolean {
+  if (document.activeElement?.closest("input, textarea")) return false;
+  const sel = window.getSelection();
+  return !!sel && !sel.isCollapsed && sel.toString().trim() !== "";
+}
 const GRID_KEY = "fsm-designer.grid.v2";
 const HINTS_KEY = "fsm-designer.hints.v1";
 
