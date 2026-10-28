@@ -324,6 +324,24 @@ export function planDiagram(d: FsmDiagram, opts: PlanOptions = {}): DiagramPlan 
     pending.push({ plan, own: g.samples, candidates: [{ at: g.apex, n: out }, side(0.35), side(0.65), side(0.2), side(0.8)] });
   }
 
+  // Initial arrow (from the left by default). Its line goes into the
+  // collision set like an edge's, so no label is placed on top of it; it is
+  // added only now so it does not change where self loops go (busy already
+  // holds its direction).
+  let initialArrow: DiagramPlan["initialArrow"];
+  if (initial) {
+    const r = R.get(initial.id)!;
+    const c = Math.cos(initialAngle), s = Math.sin(initialAngle);
+    initialArrow = {
+      from: { x: initial.x! + c * (r + 38), y: initial.y! + s * (r + 38) },
+      to: { x: initial.x! + c * (r + 1), y: initial.y! + s * (r + 1) },
+      state: initial,
+      angle: initialAngle,
+    };
+    const { from, to } = initialArrow;
+    drawn.push(Array.from({ length: 11 }, (_, i) => ({ x: from.x + ((to.x - from.x) * i) / 10, y: from.y + ((to.y - from.y) * i) / 10 })));
+  }
+
   // Place labels greedily, avoiding states, other labels and other edges.
   const placed: Rect[] = [];
   for (const { plan, own, candidates } of pending) {
@@ -343,19 +361,6 @@ export function planDiagram(d: FsmDiagram, opts: PlanOptions = {}): DiagramPlan 
     });
     plan.label = best;
     placed.push(best!);
-  }
-
-  // Initial arrow from the left.
-  let initialArrow: DiagramPlan["initialArrow"];
-  if (initial) {
-    const r = R.get(initial.id)!;
-    const c = Math.cos(initialAngle), s = Math.sin(initialAngle);
-    initialArrow = {
-      from: { x: initial.x! + c * (r + 38), y: initial.y! + s * (r + 38) },
-      to: { x: initial.x! + c * (r + 1), y: initial.y! + s * (r + 1) },
-      state: initial,
-      angle: initialAngle,
-    };
   }
 
   // Bounds.
