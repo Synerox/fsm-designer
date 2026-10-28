@@ -12,9 +12,10 @@ import { deleteCopied, deletesSelection, keyPressesButton, typedText } from "./k
 import { modalOpen, useModal } from "./dialog.ts";
 import { drawOptions, selectionParts, copySelection, deleteSelection, edgeTransitions, getStateText, hasClipboard, pasteClipboard, selectAll, setEdgeText, setStateText, useEditor } from "./store.ts";
 import type { Selection } from "./store.ts";
-import type { FsmDiagram, ImportResult, LayoutIssue } from "@fsm/core";
+import type { ImportResult, LayoutIssue } from "@fsm/core";
+import { drewText, statusText } from "./summary.ts";
 import type { LabelMode } from "./store.ts";
-import { tr, useLang } from "./i18n.ts";
+import { MOD, tr, useLang } from "./i18n.ts";
 import type { Lang } from "./i18n.ts";
 
 const LABEL_MODES = (): Array<[LabelMode, string, string]> => [
@@ -30,11 +31,13 @@ const issueText = (issues: LayoutIssue[]) => issues.map(({ kind, count: n }) => 
 })[kind]).join(tr(", ", "、", "、"));
 
 const LANGS: Array<[Lang, string]> = [["en", "English"], ["zh", "中文"], ["ja", "日本語"]];
+/** BCP 47 tag for the page and for each language's own name in the menu. */
+const langTag = (l: Lang) => (l === "zh" ? "zh-Hant" : l);
 
 export function App() {
   const lang = useLang((s) => s.lang);
   const setLang = useLang((s) => s.setLang);
-  useEffect(() => { document.documentElement.lang = lang === "zh" ? "zh-Hant" : lang; }, [lang]);
+  useEffect(() => { document.documentElement.lang = langTag(lang); }, [lang]);
   const [view, setView] = useState<View>({ x: 0, y: 0, k: 1 });
   const [grid, setGrid] = useState<GridOptions>(loadGridOptions);
   useEffect(() => { try { localStorage.setItem(GRID_KEY, JSON.stringify(grid)); } catch { /* storage off */ } }, [grid]);
@@ -274,16 +277,18 @@ export function App() {
         </div>
         <span className="sep" />
         <nav className="group" aria-label={tr("Edit", "編輯")}>
-          <button className="ghost with-icon" onClick={undo} disabled={!canUndo} title="Ctrl+Z">{tr("Undo", "復原")}<Icon d={UNDO} /></button>
-          <button className="ghost with-icon" onClick={redo} disabled={!canRedo} title="Ctrl+Shift+Z">{tr("Redo", "重做")}<Icon d={REDO} /></button>
+          <button className="ghost with-icon" onClick={undo} disabled={!canUndo} title={`${MOD}+Z`}>{tr("Undo", "復原")}<Icon d={UNDO} /></button>
+          <button className="ghost with-icon" onClick={redo} disabled={!canRedo} title={`${MOD}+Shift+Z`}>{tr("Redo", "重做")}<Icon d={REDO} /></button>
         </nav>
         <span className="file" title={filePath ?? undefined}>{dirty && <span className="dot" title={tr("Unsaved changes", "尚未儲存")} />}{filePath ? baseName(filePath) : tr("Untitled", "未命名")}</span>
         <Menu
           icon
           label={<Globe />}
-          title="Language / 語言"
+          // Names itself in English and in the other UI languages, so it can be
+          // found by someone who cannot read the current one (English is the default).
+          title={tr("Language / 語言 / 言語", "Language / 語言", "Language / 言語")}
           testId="lang"
-          items={LANGS.map(([l, name]) => ({ label: name, checked: lang === l, onSelect: () => setLang(l) }))}
+          items={LANGS.map(([l, name]) => ({ label: name, lang: langTag(l), checked: lang === l, onSelect: () => setLang(l) }))}
         />
       </header>
       <main className="main">
@@ -310,9 +315,9 @@ export function App() {
           <button className="chip" aria-pressed={grid.snap} onClick={() => setGrid((g) => ({ ...g, snap: !g.snap }))} title={tr("Snap to the grid while dragging (hold Alt to turn off for a moment)", "拖曳時吸附到格線（按住 Alt 暫時不吸附）")}>{tr("Snap", "吸附")}</button>
           <button className="chip" aria-pressed={hints} data-testid="hints-toggle" onClick={() => setHints((h) => !h)} title={hints ? tr("Hide shortcut hints", "隱藏快捷鍵提示") : tr("Show shortcut hints", "顯示快捷鍵提示")}>{tr("Hints", "提示")}</button>
           <span className="zoom-controls" role="group" aria-label={tr("Zoom", "縮放")}>
-            <button className="icon" onClick={() => zoomBy(1 / 1.1)} title={tr("Zoom out (Ctrl+wheel)", "縮小（Ctrl+滾輪）")} aria-label={tr("Zoom out", "縮小")}><Icon d={ZOOM_OUT} /></button>
+            <button className="icon" onClick={() => zoomBy(1 / 1.1)} title={tr(`Zoom out (${MOD}+wheel)`, `縮小（${MOD}+滾輪）`, `縮小（${MOD}+ホイール）`)} aria-label={tr("Zoom out", "縮小")}><Icon d={ZOOM_OUT} /></button>
             <button className="zoom" data-testid="zoom" onClick={() => zoomBy(1 / view.k)} title={tr("Zoom level; click for 100%", "縮放比例；點一下回到 100%")}>{Math.round(view.k * 100)}%</button>
-            <button className="icon" onClick={() => zoomBy(1.1)} title={tr("Zoom in (Ctrl+wheel)", "放大（Ctrl+滾輪）")} aria-label={tr("Zoom in", "放大")}><Icon d={ZOOM_IN} /></button>
+            <button className="icon" onClick={() => zoomBy(1.1)} title={tr(`Zoom in (${MOD}+wheel)`, `放大（${MOD}+滾輪）`, `拡大（${MOD}+ホイール）`)} aria-label={tr("Zoom in", "放大")}><Icon d={ZOOM_IN} /></button>
             <button className="icon" data-testid="fit" onClick={fit} title={tr("Fit to window (F)", "符合視窗（F）")} aria-label={tr("Fit to window", "符合視窗")}><Icon d={FIT} /></button>
           </span>
         </div>
@@ -324,8 +329,7 @@ export function App() {
           onImported={(result) => {
             setImporting(false);
             setReport({ result, seq: useEditor.getState().loadSeq });
-            const ns = result.diagram.states.length, nt = result.diagram.transitions.length;
-            setNotice(tr(`Drew ${ns} states and ${nt} transitions from Verilog`, `已從 Verilog 畫出 ${ns} 個狀態、${nt} 條轉移`, `Verilog から ${ns} 個の状態と ${nt} 本の遷移を描きました`));
+            setNotice(drewText(result.diagram));
           }}
         />
       )}
@@ -362,7 +366,7 @@ function LatexDialog({ latex, onClose, onSave, setNotice }: { latex: string; onC
               const area = box.current!.querySelector("textarea")!;
               copyText(latex).then(
                 () => setNotice(tr("LaTeX copied", "已複製 LaTeX")),
-                () => { area.focus(); area.select(); setNotice(tr("All text selected; press Ctrl+C to copy", "已選取全部文字，請按 Ctrl+C 複製")); },
+                () => { area.focus(); area.select(); setNotice(tr(`All text selected; press ${MOD}+C to copy`, `已選取全部文字，請按 ${MOD}+C 複製`, `全テキストを選択しました。${MOD}+C でコピー`)); },
               );
             }}
           >
@@ -376,8 +380,6 @@ function LatexDialog({ latex, onClose, onSave, setNotice }: { latex: string; onC
   );
 }
 
-const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "Cmd" : "Ctrl";
-
 /** Whether the user has selected text on the page (outside the text fields). */
 function pageText(): boolean {
   if (document.activeElement?.closest("input, textarea")) return false;
@@ -387,18 +389,6 @@ function pageText(): boolean {
 const GRID_KEY = "fsm-designer.grid.v2";
 const HINTS_KEY = "fsm-designer.hints.v1";
 
-/** Status bar text: what is selected, else the size of the diagram. */
-function statusText(d: FsmDiagram, sel: Selection): string {
-  const { states, edges, initial } = selectionParts(sel);
-  const kind = d.type === "mealy" ? "Mealy" : "Moore";
-  const ns = d.states.length, nt = d.transitions.length;
-  if (!sel) return tr(`${d.outputs.length ? `${kind} machine · ` : ""}${ns} state${ns === 1 ? "" : "s"} · ${nt} transition${nt === 1 ? "" : "s"}`, `${d.outputs.length ? `${kind} 機 · ` : ""}${ns} 個狀態 · ${nt} 條轉移`, `${d.outputs.length ? `${kind} マシン · ` : ""}状態 ${ns} 個 · 遷移 ${nt} 本`);
-  if (sel.kind === "state") return tr("1 state selected · type to edit its text", "已選取 1 個狀態 · 直接打字編輯文字");
-  if (sel.kind === "edge") return sel.from === sel.to ? tr("1 self loop selected · type to edit its text", "已選取 1 條自迴圈 · 直接打字編輯文字") : tr("1 transition selected · type to edit its text", "已選取 1 條轉移 · 直接打字編輯文字");
-  if (sel.kind === "initial") return tr("Start arrow selected", "已選取起始箭頭");
-  const nl = edges.length + (initial ? 1 : 0);
-  return tr(`${states.length} states and ${nl} lines selected`, `已選取 ${states.length} 個狀態、${nl} 條線`, `状態 ${states.length} 個、線 ${nl} 本を選択中`);
-}
 const GRID_STYLE_IDS: GridStyle[] = ["line", "dot", "none"];
 const GRID_STYLES = (): Array<[GridStyle, string]> => [["line", tr("Line", "線")], ["dot", tr("Dot", "點")], ["none", tr("None", "無")]];
 

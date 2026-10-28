@@ -146,7 +146,7 @@ export function latexText(): string {
 }
 
 export async function exportSvg(): Promise<void> {
-  await saveFile(svgText(), { suggestedName: `${stem()}.svg`, filters: [{ name: "SVG image", extensions: ["svg"] }], mime: "image/svg+xml" });
+  await saveFile(svgText(), { suggestedName: `${stem()}.svg`, filters: [{ name: tr("SVG image", "SVG 圖片", "SVG 画像"), extensions: ["svg"] }], mime: "image/svg+xml" });
 }
 
 export async function exportLatex(): Promise<void> {
@@ -169,7 +169,7 @@ export async function pngBytes(scale = 2): Promise<Uint8Array> {
     const ctx = canvas.getContext("2d")!;
     ctx.scale(scale, scale);
     ctx.drawImage(img, 0, 0, w, h);
-    const blob = await new Promise<Blob>((res, rej) => canvas.toBlob((b) => (b ? res(b) : rej(new Error("PNG encoding failed"))), "image/png"));
+    const blob = await new Promise<Blob>((res, rej) => canvas.toBlob((b) => (b ? res(b) : rej(new Error(tr("PNG encoding failed", "PNG 編碼失敗", "PNG のエンコードに失敗しました")))), "image/png"));
     return new Uint8Array(await blob.arrayBuffer());
   } finally {
     URL.revokeObjectURL(url);
@@ -177,7 +177,7 @@ export async function pngBytes(scale = 2): Promise<Uint8Array> {
 }
 
 export async function exportPng(scale = 2): Promise<void> {
-  await saveFile(await pngBytes(scale), { suggestedName: `${stem()}.png`, filters: [{ name: "PNG image", extensions: ["png"] }], mime: "image/png" });
+  await saveFile(await pngBytes(scale), { suggestedName: `${stem()}.png`, filters: [{ name: tr("PNG image", "PNG 圖片", "PNG 画像"), extensions: ["png"] }], mime: "image/png" });
 }
 
 // ---- Autosave: the open diagram survives a reload or crash, like Evan's editor ----

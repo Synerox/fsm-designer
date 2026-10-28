@@ -15,6 +15,8 @@ export interface MenuItem {
   submenu?: MenuItem[];
   /** Shown with a check mark (a pick-one list such as the language menu). */
   checked?: boolean;
+  /** Language of the label when it differs from the page's (the language names). */
+  lang?: string;
 }
 
 const items = (list: Element | null | undefined) => [...(list?.querySelectorAll<HTMLButtonElement>(":scope > li > button") ?? [])];
@@ -100,7 +102,7 @@ export function Menu({ label, items: entries, disabled, testId, icon, title }: {
             }}
           >
             {item.checked !== undefined && <span className="check" aria-hidden="true">{item.checked ? "✓" : ""}</span>}
-            <span>{item.label}</span>
+            <span lang={item.lang}>{item.label}</span>
             {item.shortcut && <span className="shortcut">{item.shortcut}</span>}
             {item.submenu && <span className="chevron" aria-hidden="true">›</span>}
           </button>

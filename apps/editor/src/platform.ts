@@ -12,7 +12,8 @@ export interface FileFilter {
 
 export const isDesktop = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
-export const FSM_FILTER: FileFilter = { name: "FSM diagram", extensions: ["fsm.json", "json"] };
+// A getter, so the native dialog shows the name in the language of the moment.
+export const FSM_FILTER: FileFilter = { get name() { return tr("FSM diagram", "FSM 狀態圖", "FSM 図"); }, extensions: ["fsm.json", "json"] };
 export const VERILOG_FILTER: FileFilter = { name: "Verilog", extensions: ["v", "sv", "vh", "svh", "txt"] };
 
 export interface OpenedFile {
@@ -50,7 +51,11 @@ export async function openTextFile(filters: FileFilter[]): Promise<OpenedFile | 
   });
 }
 
-/** Desktop: read a file passed on the command line (double-clicking a .fsm.json). */
+/**
+ * Desktop: read a file passed on the command line (`FSM Designer path.fsm.json`,
+ * or "Open with" on Windows and Linux). The installers register no .fsm.json
+ * association, and macOS hands files over as an Opened event, not argv.
+ */
 export async function launchFile(): Promise<OpenedFile | null> {
   if (!isDesktop) return null;
   const path = await invoke<string | null>("launch_file");

@@ -75,7 +75,7 @@ pnpm dev:web      # opens http://localhost:5173
 | Shift + drag from a state | Add a transition; drag back onto the state for a self loop |
 | Shift + drag from empty space onto a state | Add the start arrow |
 | Drag a line | Bend or rotate it |
-| Type with something selected | Edit its name or condition; `_0` + Space gives ₀, `\alpha` + Space gives α |
+| Type with something selected | Edit its name or condition; in state names `_0` + Space gives ₀ (conditions keep `_0`, as in Verilog's `data_0`); `\alpha` + Space gives α |
 | Ctrl + drag | Box select |
 | Ctrl + I | Import Verilog |
 | F | Fit the diagram to the window |
