@@ -275,6 +275,19 @@ test("the reset state is never low down with the machine above it (e2e: gen14_4,
   }
 });
 
+test("the reset state goes on top only where that costs no crossing (gen17_7, gen18_2, gen15_11, gen15_4 and gen14_1 gained 1 to 3)", async () => {
+  // Turned over, a finished drawing is not the same drawing (arcs bow the
+  // other way, a spread rounds the other way): the turned one is kept only
+  // when it is not clearly worse. gen15_11 and gen15_4: grids turned before
+  // finishing; gen17_7: a turned grid spread upside down; gen14_1: polish
+  // moves made on a drawing turned between moves.
+  for (const [n, seed, labels, crossings] of [[17, 7, "all", 14], [18, 2, "all", 11], [15, 11, "all", 10], [15, 4, "all", 8], [14, 1, "none", 4]] as const) {
+    const d = generated(n, seed);
+    const r = (await autoLayout(d, { draw: { labels } }))!;
+    assert.ok(r.score.crossings <= crossings, `gen${n}_${seed}: ${r.score.crossings} crossings, ${crossings} when drawn as made`);
+  }
+});
+
 test("four states all linked: each hub shape is made once, not once per hub with the states only named differently", () => {
   const d = machine(4, [[0, 1], [1, 0], [0, 2], [2, 0], [0, 3], [3, 0], [1, 2], [2, 1], [1, 3], [3, 1], [2, 3], [3, 2]]);
   const hubs = layoutCandidates(d, { plan: { labels: "none" } }).filter((c) => /^hub-[a-z]+$/.test(c.arrangement));
