@@ -22,7 +22,7 @@ import { addSignal, addState, addTransition, createDiagram, DEFAULT_RESET } from
 import { fitStateSizes } from "../metrics.ts";
 import type { FsmDiagram, OutputValue } from "../model.ts";
 import { minimize } from "./boolmin.ts";
-import { caseMatch, FALSE, formatNum, freeIds, isConst, isNum, mask, num, printExpr, simplify, TRUE, widthOf, wildcardBits } from "./expr.ts";
+import { caseMatch, FALSE, fitWidth, formatNum, freeIds, isConst, isNum, lowBits, mask, num, printExpr, simplify, simplifyCond, TRUE, widthOf, wildcardBits } from "./expr.ts";
 import type { EvalCtx, Expr, Num } from "./expr.ts";
 import type { Always, Module, Stmt } from "./parser.ts";
 
@@ -575,7 +575,9 @@ class Engine {
           const i = simplify(s.lhs.i, this.ctx(p));
           if (i.k === "tern") { const lhs = s.lhs; return this.branch(p, i.c).flatMap(([q, b]) => this.exec({ ...s, lhs: { ...lhs, i: b ? i.a : i.b } }, q, seq)); }
         }
-        const v = simplify(s.rhs, this.ctx(p));
+        // (Evaluated at the width of what it is assigned to: y = go + 1'b1 is 2 for a 2-bit y.)
+        const ctx = this.ctx(p);
+        const v = simplify(s.rhs, ctx, widthOf(s.lhs, ctx));
         // x ? A : B with an unknown x: fork, so each run assigns a constant.
         if (v.k === "tern") return this.branch(p, v.c).flatMap(([q, b]) => this.exec({ ...s, rhs: b ? v.a : v.b }, q, seq));
         const q = clonePath(p);
@@ -629,7 +631,11 @@ class Engine {
       if (!seq || !nb) q.env.set(name, val);
       if (seq) q.nb.set(name, val);
     };
-    if (lhs.k === "id") return set(lhs.name, v);
+    if (lhs.k === "id") {
+      // Stored at the variable's width: a 1-bit z = data keeps data[0].
+      const w = this.c.widths.get(lhs.name);
+      return set(lhs.name, w === undefined ? v : fitWidth(v, w, ctx, this.c.signed.has(lhs.name)));
+    }
     if ((lhs.k === "idx" || lhs.k === "part") && lhs.a.k === "id") {
       const name = lhs.a.name;
       const w = this.c.widths.get(name) ?? 1;
@@ -690,7 +696,7 @@ class Engine {
     const work = [p];
     while (work.length) {
       const q = work.shift()!;
-      const v = simplify(cond, this.ctx(q));
+      const v = simplifyCond(cond, this.ctx(q));
       if (isConst(v)) { out.push([q, v.v !== 0n]); continue; }
       const atom = this.coarse ? v : pickAtom(v, this.ctx(q));
       for (const val of [true, false]) {
@@ -1045,7 +1051,9 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
         forks = forks.flatMap((q) => {
           const v = q[env].get(o);
           if (!v) return [q];
-          const sv = simplify(v, eng.ctx(q));
+          // (Bit 0 only: assigning data[3:0] to a 1-bit z keeps data[0], not data != 0.)
+          const qctx = eng.ctx(q);
+          const sv = lowBits(simplify(v, qctx), 1, qctx);
           if (isConst(sv) || !fromPorts(sv)) return [q];
           return eng.branch(q, sv).map(([r, b]) => { r[env].set(o, num(b ? 1 : 0, 1)); return r; });
         });
