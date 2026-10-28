@@ -2,7 +2,7 @@
 // FSM in it is extracted (by @fsm/core's importer, no guessing) and drawn as a
 // new diagram. A small report says what was found.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { listStateMachines } from "@fsm/core";
 import type { ImportResult } from "@fsm/core";
 import { importVerilogText } from "./actions.ts";
@@ -39,6 +39,11 @@ endmodule
 
 const DRAFT_KEY = "fsm-designer:verilog-draft";
 
+/** A draft too big to store is dropped rather than leaving an older one to come back next time. */
+function saveDraft(code: string) {
+  try { localStorage.setItem(DRAFT_KEY, code); } catch { try { localStorage.removeItem(DRAFT_KEY); } catch { /* storage off */ } }
+}
+
 export function VerilogImportDialog({ onClose, onImported }: { onClose: () => void; onImported: (r: ImportResult) => void }) {
   const [code, setCode] = useState(() => { try { return localStorage.getItem(DRAFT_KEY) ?? ""; } catch { return ""; } });
   const [selfLoops, setSelfLoops] = useState(true);
@@ -46,11 +51,19 @@ export function VerilogImportDialog({ onClose, onImported }: { onClose: () => vo
   const [busy, setBusy] = useState(false);
   const [picked, setPicked] = useState(0);
   // Every FSM in the code (several modules, or several state registers in one).
-  const machines = useMemo(() => listStateMachines(code), [code]);
-  const choice = machines[Math.min(picked, machines.length - 1)];
+  // Parsed from a deferred copy, so typing in a long source stays responsive.
+  const parsed = useDeferredValue(code);
+  const machines = useMemo(() => listStateMachines(parsed), [parsed]);
   const area = useRef<HTMLTextAreaElement>(null);
   useEffect(() => { area.current?.focus(); }, []);
-  useEffect(() => { try { localStorage.setItem(DRAFT_KEY, code); } catch { /* storage off */ } }, [code]);
+  // The draft is saved once typing pauses, and when the dialog closes.
+  const latest = useRef(code);
+  latest.current = code;
+  useEffect(() => {
+    const t = setTimeout(() => saveDraft(code), 300);
+    return () => clearTimeout(t);
+  }, [code]);
+  useEffect(() => () => saveDraft(latest.current), []);
 
   const openFile = async () => {
     const f = await openTextFile([VERILOG_FILTER]);
@@ -60,7 +73,10 @@ export function VerilogImportDialog({ onClose, onImported }: { onClose: () => vo
     setBusy(true);
     setError(null);
     try {
-      const r = await importVerilogText(code, { selfLoops, ...(machines.length > 1 && choice ? choice : {}) });
+      // The machine list may still be catching up with the last keystroke.
+      const list = parsed === code ? machines : listStateMachines(code);
+      const pick = list[Math.min(picked, list.length - 1)];
+      const r = await importVerilogText(code, { selfLoops, ...(list.length > 1 && pick ? pick : {}) });
       if (r) onImported(r);
     } catch (e) {
       setError(importErrorText(e instanceof Error ? e.message : String(e)));
