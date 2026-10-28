@@ -109,8 +109,11 @@ export function App() {
   useEffect(() => {
     // The last button clicked with the mouse: Chromium leaves focus on it, and
     // Space after that is typing, not pressing it again (see keyPressesButton).
+    // Forgotten once focus moves anywhere else, so a button reached again by
+    // Tab/Shift+Tab is pressed by Space like any keyboard-focused one.
     let clicked: Element | null = null;
     const onPointer = (e: PointerEvent) => { clicked = (e.target as Element).closest?.("button") ?? null; };
+    const onFocus = (e: FocusEvent) => { if (e.target !== clicked) clicked = null; };
     const onKey = (e: KeyboardEvent) => {
       // A menu that handled the key itself (arrow keys) already prevented it.
       if (e.defaultPrevented) return;
@@ -218,8 +221,13 @@ export function App() {
       put(cur.slice(0, caret) + typed + cur.slice(caret), caret + 1);
     };
     window.addEventListener("pointerdown", onPointer, true);
+    window.addEventListener("focusin", onFocus, true);
     window.addEventListener("keydown", onKey);
-    return () => { window.removeEventListener("pointerdown", onPointer, true); window.removeEventListener("keydown", onKey); };
+    return () => {
+      window.removeEventListener("pointerdown", onPointer, true);
+      window.removeEventListener("focusin", onFocus, true);
+      window.removeEventListener("keydown", onKey);
+    };
   }, [undo, redo]);
 
   return (
