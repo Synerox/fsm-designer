@@ -50,7 +50,11 @@ export async function openTextFile(filters: FileFilter[]): Promise<OpenedFile | 
   });
 }
 
-/** Desktop: read a file passed on the command line (double-clicking a .fsm.json). */
+/**
+ * Desktop: read a file passed on the command line (`FSM Designer path.fsm.json`,
+ * or "Open with" on Windows and Linux). The installers register no .fsm.json
+ * association, and macOS hands files over as an Opened event, not argv.
+ */
 export async function launchFile(): Promise<OpenedFile | null> {
   if (!isDesktop) return null;
   const path = await invoke<string | null>("launch_file");
