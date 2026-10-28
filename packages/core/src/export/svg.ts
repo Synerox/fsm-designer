@@ -380,6 +380,16 @@ export function planDiagram(d: FsmDiagram, opts: PlanOptions = {}): DiagramPlan 
   }
 
   // Place labels greedily, avoiding states, other labels and other edges.
+  // Each try tests every drawn line point by point, the main cost of planning
+  // a large diagram, so a line whose bounding box is clear of the rect (with
+  // a pixel to spare beyond the 1 px rectSegmentHits allows, so no hit is
+  // missed and the result is the same) is skipped without looking at it.
+  const boxes = drawn.map((pts) => ({
+    minX: Math.min(...pts.map((p) => p.x)), maxX: Math.max(...pts.map((p) => p.x)),
+    minY: Math.min(...pts.map((p) => p.y)), maxY: Math.max(...pts.map((p) => p.y)),
+  }));
+  const nearBox = (r: Rect, b: (typeof boxes)[number]) =>
+    b.maxX > r.x - r.w / 2 - 2 && b.minX < r.x + r.w / 2 + 2 && b.maxY > r.y - r.h / 2 - 2 && b.minY < r.y + r.h / 2 + 2;
   const placed: Rect[] = [];
   for (const { plan, own, candidates } of pending) {
     if (!plan.lines.length) continue;
@@ -393,7 +403,7 @@ export function planDiagram(d: FsmDiagram, opts: PlanOptions = {}): DiagramPlan 
       let score = rank;
       for (const s of d.states) if (rectCircleOverlap(rect, P(s), R.get(s.id)!)) score += 10;
       for (const p of placed) if (rectsOverlap(rect, p)) score += 10;
-      for (const pts of drawn) if (pts !== own && rectSegmentHits(rect, pts)) score += 3;
+      drawn.forEach((pts, k) => { if (pts !== own && nearBox(rect, boxes[k]) && rectSegmentHits(rect, pts)) score += 3; });
       if (score < bestScore) { bestScore = score; best = rect; }
     });
     plan.label = best;
