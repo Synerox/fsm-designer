@@ -1,7 +1,7 @@
 // File commands: autosave, opening files, auto layout.
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
-import { importVerilogText, startAutosave } from "../src/actions.ts";
+import { importVerilogText, loadText, serialize, startAutosave } from "../src/actions.ts";
 import { createState, newDiagram, useEditor } from "../src/store.ts";
 
 // Node has no localStorage; a Map stands in for the browser's.
@@ -55,4 +55,34 @@ test("autosave keeps the unsaved flag of an import, and clears it after a save t
     stop();
     mock.timers.reset();
   }
+});
+
+test("opening a file the editor saved gives back the same diagram", async () => {
+  // Drawn in the editor: default circles 120 px apart, one long name, one radius set by hand.
+  const d = newDiagram();
+  for (const [i, name] of ["IDLE", "WAIT_FOR_ACKNOWLEDGE", "SEND", "DONE"].entries()) {
+    const s = createState(d, 200 + 120 * i, 300);
+    s.name = name;
+    delete s.label;
+  }
+  d.states[0].radius = 24;
+  d.states[0].isInitial = true;
+  const text = serialize(d);
+  await loadText(text, "drawn.fsm.json");
+  assert.equal(serialize(useEditor.getState().doc), text, "no circle grows, no font shrinks, nothing moves");
+  assert.equal(useEditor.getState().dirty, false);
+});
+
+test("a file without coordinates still gets circles that fit its names, and a layout", async () => {
+  const d = newDiagram();
+  for (const name of ["IDLE", "WAIT_FOR_ACKNOWLEDGE"]) {
+    const s = createState(d, 0, 0);
+    s.name = name;
+    delete s.label;
+    delete s.x; delete s.y;
+  }
+  await loadText(serialize(d), null);
+  const st = useEditor.getState().doc.states;
+  assert.ok(st.every((s) => s.radius !== undefined && s.radius > 30), "circles grow to fit the long name");
+  assert.ok(st.every((s) => s.x !== undefined && s.y !== undefined));
 });

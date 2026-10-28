@@ -37,13 +37,18 @@ function upgradeLabels(d: FsmDiagram): FsmDiagram {
 
 export async function loadText(text: string, path: string | null): Promise<void> {
   const d = upgradeLabels(parseDiagram(JSON.parse(text)));
-  // Files made elsewhere (agents, older versions) can have names and outputs
-  // too big for their circles: grow the circles, and re-lay out if they now crowd.
-  const before = d.states.map((s) => s.radius);
-  fitStateSizes(d);
-  const grown = d.states.some((s, i) => s.radius !== before[i]);
-  if (grown && crowded(d)) await autoLayout(d, { draw: drawOptions() });
-  else await ensureLayout(d); // agent-made files may come without coordinates
+  // A file whose states are all placed (everything the editor saves) opens as
+  // it was saved: in the editor text never resizes a state, so its circles and
+  // positions are the user's. Files made elsewhere (agents) can come without
+  // coordinates and with names and outputs too big for their circles: grow
+  // the circles, and re-lay out if they now crowd.
+  if (d.states.some((s) => s.x === undefined || s.y === undefined)) {
+    const before = d.states.map((s) => s.radius);
+    fitStateSizes(d);
+    const grown = d.states.some((s, i) => s.radius !== before[i]);
+    if (grown && crowded(d)) await autoLayout(d, { draw: drawOptions() });
+    else await ensureLayout(d);
+  }
   useEditor.getState().load(d, path);
 }
 
