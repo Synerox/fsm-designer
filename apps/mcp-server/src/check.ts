@@ -1,7 +1,7 @@
 // Checks on agent-supplied values that @fsm/core passes through unchanged:
 // colours, export file targets and PNG sizes.
 
-import { readdir, realpath, stat } from "node:fs/promises";
+import { lstat, readdir, realpath, stat } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve, isAbsolute } from "node:path";
 import { userPath } from "./store.ts";
 
@@ -51,24 +51,56 @@ export async function exportTarget(workspace: string, p: string, format: keyof t
   const isDir = /[\\/]$/.test(p) || (await stat(file).then((s) => s.isDirectory(), () => false));
   if (isDir) file = join(file, `${name}${FORMAT_EXT[format]}`);
   const lower = basename(file).toLowerCase();
-  if (lower.endsWith(".fsm.json")) {
+  // A link is checked where it leads; a link to a missing file could create anything there.
+  const isLink = await lstat(file).then((l) => l.isSymbolicLink(), () => false);
+  const target = isLink ? await realpath(file).catch(() => undefined) : file;
+  if (!target) throw new Error(`Refusing to write ${file}: it is a link to a file that does not exist. Give the real path instead`);
+  for (const f of new Set([file, target])) await guardTarget(workspace, f, format);
+  const want = FORMAT_EXT[format];
+  const note = lower.endsWith(want) || (format === "latex" && extname(lower) === ".latex") ? "" : ` (note: the file name does not end in ${want})`;
+  return { file, note };
+}
+
+/** The checks for one spelling of an export target (the path as given, and where a link leads). */
+async function guardTarget(workspace: string, file: string, format: keyof typeof FORMAT_EXT): Promise<void> {
+  const base = basename(file).toLowerCase();
+  if (base.endsWith(".fsm.json")) {
     if (format !== "json") throw new Error(`Refusing to write ${format} into ${file}: .fsm.json files are diagrams. Use a ${FORMAT_EXT[format]} file name`);
     if (await inWorkspace(workspace, file))
       throw new Error(`Refusing to write ${file}: that is where the workspace keeps the diagram "${basename(file).slice(0, -".fsm.json".length)}". ` +
         "To copy a diagram use create_fsm with the JSON from get_fsm; to export elsewhere give a path outside the workspace folder or a sub-folder");
   }
   // The workspace's lock, wait and temp files belong to the server.
-  if (/\.fsm\.json\./i.test(basename(file)) && (await inWorkspace(workspace, file)))
+  if (/\.fsm\.json\./i.test(base) && (await inWorkspace(workspace, file)))
     throw new Error(`Refusing to write ${file}: the server uses that file to coordinate edits. Pick another file name`);
+  // A diagram linked from the workspace keeps its lock files beside its real file.
+  const realFile = fold(await real(file));
+  for (const d of await diagramFiles(workspace)) {
+    const rd = fold(d.real);
+    if (realFile === rd) throw new Error(`Refusing to write ${file}: it is the workspace's diagram file ${d.entry}. Give a path outside the workspace folder`);
+    if (realFile.startsWith(`${rd}.`)) throw new Error(`Refusing to write ${file}: the server uses that file to coordinate edits of ${d.entry}. Pick another file name`);
+  }
   // A device or pipe (the server's own stdout, /dev/...) is never an export target.
   const existing = await stat(file).catch(() => undefined);
   if (existing && !existing.isFile()) throw new Error(`Refusing to write ${file}: it is not a regular file`);
-  // Whatever the spelling (links, \\?\ prefixes, short names), never write over a diagram file.
+  // Whatever the spelling (hard links, \\?\ prefixes, short names), never write over a diagram file.
   const same = await sameAsDiagram(workspace, file);
   if (same) throw new Error(`Refusing to write ${file}: it is the workspace's diagram file ${same}. Give a path outside the workspace folder`);
-  const want = FORMAT_EXT[format];
-  const note = lower.endsWith(want) || (format === "latex" && extname(lower) === ".latex") ? "" : ` (note: the file name does not end in ${want})`;
-  return { file, note };
+}
+
+/** Windows and macOS file systems usually ignore case. */
+const fold = (p: string) => (process.platform === "win32" || process.platform === "darwin" ? p.toLowerCase() : p);
+
+/** The workspace's .fsm.json entries with the real file each one is (links followed). */
+async function diagramFiles(workspace: string): Promise<{ entry: string; real: string }[]> {
+  const names = await readdir(workspace).catch(() => [] as string[]);
+  const out: { entry: string; real: string }[] = [];
+  for (const n of names) {
+    if (!n.toLowerCase().endsWith(".fsm.json")) continue;
+    const entry = join(workspace, n);
+    out.push({ entry, real: await real(entry) });
+  }
+  return out;
 }
 
 /** The real path of `p`, resolving links in the part of it that exists. */
@@ -81,22 +113,24 @@ async function real(p: string): Promise<string> {
   }
 }
 
-/** Whether `file` is directly in the workspace folder, however either path is spelled. Lower-cased: Windows and macOS ignore case. */
+/** Whether `file` is directly in the workspace folder, however either path is spelled: the same folder on disk. */
 async function inWorkspace(workspace: string, file: string): Promise<boolean> {
-  const a = (await real(dirname(file))).toLowerCase();
-  const b = (await real(resolve(workspace))).toLowerCase();
-  return a === b || a.replace(/[\\/]+$/, "") === b.replace(/[\\/]+$/, "");
+  const [a, b] = await Promise.all([stat(dirname(file), { bigint: true }).catch(() => undefined), stat(workspace, { bigint: true }).catch(() => undefined)]);
+  if (!a || !b) return false;
+  if (a.ino !== 0n && b.ino !== 0n) return a.dev === b.dev && a.ino === b.ino;
+  // File systems without inode numbers: compare the real paths.
+  return fold(await real(dirname(file))) === fold(await real(resolve(workspace)));
 }
 
 /** The workspace diagram file that `file` already is (same device and inode), if any. */
 async function sameAsDiagram(workspace: string, file: string): Promise<string | undefined> {
-  const t = await stat(file).catch(() => undefined);
-  if (!t || !t.isFile()) return undefined;
+  const t = await stat(file, { bigint: true }).catch(() => undefined);
+  if (!t || !t.isFile() || t.ino === 0n) return undefined;
   const names = await readdir(workspace).catch(() => [] as string[]);
   for (const n of names) {
     if (!n.toLowerCase().endsWith(".fsm.json")) continue;
-    const s = await stat(join(workspace, n)).catch(() => undefined);
-    if (s && s.dev === t.dev && s.ino === t.ino && s.ino !== 0) return join(workspace, n);
+    const s = await stat(join(workspace, n), { bigint: true }).catch(() => undefined);
+    if (s && s.dev === t.dev && s.ino === t.ino) return join(workspace, n);
   }
   return undefined;
 }

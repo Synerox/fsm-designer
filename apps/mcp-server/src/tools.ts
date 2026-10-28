@@ -388,17 +388,24 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
   server.registerTool(
     "delete_fsm",
     { title: "Delete FSM", description: "Delete an FSM diagram file from the workspace. This cannot be undone.", inputSchema: z.object({ name: fsmName() }).strict(), annotations: hints({ destructiveHint: true, idempotentHint: false }) },
-    guard(async ({ name }) =>
-      store.lock(name, async () => {
+    guard(async ({ name }) => {
+      const del = async () => {
         // exists(), not load(): a corrupt file must still be deletable.
         if (!(await store.exists(name)) && !(await store.hasEntry?.(name))) throw new Error(`No FSM named "${name}". Existing: ${(await store.list()).join(", ") || "(none)"}.`);
+        const link = await store.isLink?.(name);
         await store.remove(name);
-        return text(`Deleted "${name}".`);
+        return text(link ? `Deleted "${name}", a link; the file it pointed to was kept.` : `Deleted "${name}".`);
+      };
+      return store.lock(name, del).catch(async (e) => {
+        // A link whose target is in a read-only folder: the lock cannot be made there,
+        // but deleting only removes the link in the workspace.
+        if (/is not writable/.test((e as Error).message) && (await store.isLink?.(name))) return del();
+        throw e;
       }).then((r) => {
         server.sendResourceListChanged();
         return r;
-      }),
-    ),
+      });
+    }),
   );
 
   server.registerTool(

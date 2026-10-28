@@ -32,6 +32,8 @@ export interface DiagramStore {
   ignored?(): Promise<string[]>;
   /** Whether anything (even a broken link) sits where the diagram would be, so delete_fsm can clear it. */
   hasEntry?(name: string): Promise<boolean>;
+  /** Whether the diagram's file name is a symbolic link. */
+  isLink?(name: string): Promise<boolean>;
 }
 
 const FILE_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -270,13 +272,15 @@ async function withFileLock<T>(lockPath: string, fn: () => Promise<T>, deadline:
   // it is there, so a server whose calls follow each other back to back cannot
   // keep the lock from another server's waiting call.
   const waitPath = `${lockPath}.wait`;
+  // Its own token: the lock's token must stay ours while the lock is held.
+  const ticket = randomUUID();
   let waiting = false;
   let last: LockInfo | undefined;
   try {
     for (let attempt = 0; ; attempt++) {
-      if (!(await queuedBehind(waitPath, token)) && (await claim(lockPath, token))) break;
-      if (waiting) waiting = await renewTicket(waitPath, token);
-      else waiting = await claim(waitPath, token);
+      if (!(await queuedBehind(waitPath, ticket)) && (await claim(lockPath, token))) break;
+      if (waiting) waiting = await renewTicket(waitPath, ticket);
+      else waiting = await claim(waitPath, ticket);
       const cur = await readLock(lockPath);
       if (cur) {
         last = cur.info ?? last;
@@ -284,9 +288,9 @@ async function withFileLock<T>(lockPath: string, fn: () => Promise<T>, deadline:
         if (why) await breakStale(lockPath, cur, why);
       }
       if (Date.now() > deadline) {
-        const ticket = cur ? undefined : (await readLock(waitPath))?.info;
-        if (ticket && ticket.token !== token)
-          throw new Error(`The diagram ${lockPath.replace(/\.lock$/, "")} is free, but a call of process ${ticket.pid} on ${ticket.host} has been waiting for it first and has not taken it; waited ${Math.round(LOCK_WAIT_MS / 1000)} s. Try again.`);
+        const first = cur ? undefined : (await readLock(waitPath))?.info;
+        if (first && first.token !== ticket)
+          throw new Error(`The diagram ${lockPath.replace(/\.lock$/, "")} is free, but a call of process ${first.pid} on ${first.host} has been waiting for it first and has not taken it; waited ${Math.round(LOCK_WAIT_MS / 1000)} s. Try again.`);
         const who = last ? `process ${last.pid} on ${last.host}` : "another process";
         throw new Error(`The diagram is locked by ${who} (${lockPath}); waited ${Math.round((Date.now() - deadline + LOCK_WAIT_MS) / 1000)} s. ` +
           "Another FSM server may be busy with a long auto_layout or many edits of this diagram; try again later, or delete the lock file if that server is gone.");
@@ -294,7 +298,7 @@ async function withFileLock<T>(lockPath: string, fn: () => Promise<T>, deadline:
       await sleep(Math.min(200, 20 + attempt * 10) * (0.5 + Math.random()));
     }
   } finally {
-    if (waiting) await release(waitPath, token);
+    if (waiting) await release(waitPath, ticket);
   }
   try {
     return await fn();
@@ -427,6 +431,10 @@ export class FileStore implements DiagramStore {
   async exists(name: string) {
     return (await this.list()).includes(name);
   }
+  /** Whether the diagram's file name is a symbolic link. */
+  async isLink(name: string) {
+    return lstat(this.file(name)).then((l) => l.isSymbolicLink(), () => false);
+  }
   /** Whether anything at all (even a broken link) sits at the diagram's file name. */
   async hasEntry(name: string) {
     return lstat(this.file(name)).then(() => true, () => false);
@@ -514,7 +522,7 @@ export class FileStore implements DiagramStore {
     await mkdir(this.dir, { recursive: true });
     // Lock the real file, so names that symlink to one diagram share one lock.
     // (Hard-linked diagrams are refused when saving; see save.)
-    const real = await realpath(this.file(name)).catch(() => this.file(name));
+    const real = await realpath(this.file(name)).catch(async () => join(await realpath(this.dir).catch(() => this.dir), basename(this.file(name))));
     // Lower-cased: on Windows and macOS "Seq" and "seq" are the same file.
     return this.queue.run(real.toLowerCase(), () => withFileLock(`${real}.lock`, fn, deadline));
   }

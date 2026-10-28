@@ -4,7 +4,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -525,4 +525,35 @@ test("locks: a waiter that stalls loses its place after a short lease", { skip: 
   const t0 = Date.now();
   await ok("add_state", { fsm: "leased", name: "B" });
   assert.ok(Date.now() - t0 < 5000, "a lapsed ticket does not hold the lock back");
+});
+
+test("exports through links are checked where they lead; a symlinked workspace keeps one lock per diagram; Linux folders differing in case are different", { skip: process.platform === "win32" }, async () => {
+  const { symlink, mkdir } = await import("node:fs/promises");
+  const out = await mkdtemp(join(tmpdir(), "fsm-mcp-x-"));
+  try {
+    await ok("create_fsm", { name: "Lx", states: [{ name: "A" }] });
+    await symlink(join(dir, "NewOne.fsm.json"), join(out, "new.json"));
+    await symlink(join(dir, "Lx.fsm.json.lock"), join(out, "a.svg"));
+    await fails("export_fsm", { name: "Lx", format: "json", path: join(out, "new.json") }, /link to a file that does not exist/);
+    await fails("export_fsm", { name: "Lx", format: "svg", path: join(out, "a.svg") }, /link to a file that does not exist/);
+    // A diagram linked in from elsewhere keeps its lock beside its real file; that is protected too.
+    await writeFile(join(out, "X.fsm.json"), await readFile(join(dir, "Lx.fsm.json")));
+    await symlink(join(out, "X.fsm.json"), join(dir, "Linked.fsm.json"));
+    await fails("export_fsm", { name: "Lx", format: "svg", path: join(out, "X.fsm.json.lock") }, /coordinate edits of/);
+    assert.match(await ok("delete_fsm", { name: "Linked" }), /a link; the file it pointed to was kept/);
+    await stat(join(out, "X.fsm.json"));
+    if (process.platform === "linux") {
+      const upper = join(dirname(dir), basename(dir).toUpperCase());
+      if (upper !== dir) {
+        await mkdir(upper, { recursive: true });
+        try {
+          await ok("export_fsm", { name: "Lx", format: "json", path: join(upper, "Lx.fsm.json") });
+        } finally {
+          await rm(upper, { recursive: true, force: true });
+        }
+      }
+    }
+  } finally {
+    await rm(out, { recursive: true, force: true });
+  }
 });
