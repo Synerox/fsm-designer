@@ -2,11 +2,11 @@
 // (useful for IME input such as Chinese, which canvas typing can't take).
 
 import { LABEL_SIZE, NAME_SIZE, STATE_RADIUS, expandShortcut } from "@fsm/core";
-import { PARALLEL_GAP, planDiagram } from "@fsm/core";
+import { PARALLEL_GAP, planDiagram, transitionLabel } from "@fsm/core";
 import type { FsmDiagram } from "@fsm/core";
 import { useId, useLayoutEffect, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
-import { DRAW, alignStates, deleteSelection, edgeTransitions, setEdgeShape, getStateText, setEdgeText, setStateText, useEditor } from "./store.ts";
+import { DRAW, alignStates, deleteSelection, editedTransition, edgeTransitions, setEdgeShape, getStateText, setEdgeText, setStateText, useEditor } from "./store.ts";
 
 import { snapToGrid } from "./geometry.ts";
 import { MOD, tr } from "./i18n.ts";
@@ -242,7 +242,9 @@ export function Inspector({ snap }: { snap: boolean }) {
 
   if (selection?.kind === "edge") {
     const ts = edgeTransitions(doc, selection.from, selection.to);
-    if (!ts.length) return <aside className="inspector" />;
+    const t = editedTransition(doc, selection);
+    if (!t) return <aside className="inspector" />;
+    const others = ts.filter((x) => x !== t);
     const name = (id: string) => { const s = doc.states.find((x) => x.id === id)!; return getStateText(s) || s.name; };
     return (
       <aside className="inspector">
@@ -251,15 +253,20 @@ export function Inspector({ snap }: { snap: boolean }) {
         <label>
           {tr("Label / condition", "標籤 / 條件")}
           <input
-            value={ts[0].condition}
+            value={t.condition}
             placeholder={tr("Enter label", "輸入標籤")}
-            onKeyDown={(e) => expandOnSpace(e, false, (v) => edit((d) => setEdgeText(d, selection.from, selection.to, v), `text:${ts[0].id}`))}
-            onChange={(e) => edit((d) => setEdgeText(d, selection.from, selection.to, e.target.value), `text:${ts[0].id}`)} />
+            onKeyDown={(e) => expandOnSpace(e, false, (v) => edit((d) => setEdgeText(d, selection.from, selection.to, v, t.id), `text:${t.id}`))}
+            onChange={(e) => edit((d) => setEdgeText(d, selection.from, selection.to, e.target.value, t.id), `text:${t.id}`)} />
         </label>
-        {ts.length > 1 && <p className="hint">{tr(`${ts.length - 1} more in the same direction: `, `另有 ${ts.length - 1} 條同方向轉移：`, `同じ向きの遷移がほかに ${ts.length - 1} 本：`)}{ts.slice(1).map((t) => t.condition || tr("(no condition)", "（無條件）")).join(tr(", ", "、"))}</p>}
+        {others.length > 0 && (
+          <p className="hint">
+            {tr(`${others.length} more in the same direction (click a line of text on the canvas to edit it): `, `另有 ${others.length} 條同方向轉移（在畫布上點它的文字即可編輯）：`, `同じ向きの遷移がほかに ${others.length} 本（キャンバス上でその文字をクリックすると編集できます）：`)}
+            {others.map((x) => transitionLabel(doc, x, DRAW) || tr("(no condition)", "（無條件）")).join(tr(", ", "、"))}
+          </p>
+        )}
         <SizeControls doc={doc} states={[]} edges={[selection]} edit={edit} keyPrefix={ts[0].id} />
         <ShapeControls doc={doc} edges={[selection]} edit={edit} />
-        <button className="danger" onClick={del}>{tr("Delete transition", "刪除轉移")}</button>
+        <button className="danger" onClick={del}>{ts.length > 1 ? tr(`Delete ${ts.length} transitions`, `刪除 ${ts.length} 條轉移`, `遷移 ${ts.length} 本を削除`) : tr("Delete transition", "刪除轉移")}</button>
       </aside>
     );
   }

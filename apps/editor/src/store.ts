@@ -3,12 +3,14 @@
 
 import { create } from "zustand";
 import { current, isDraft, produce } from "immer";
-import { addState, addTransition, asciiText, createDiagram, planDiagram, removeState, stateText } from "@fsm/core";
+import { addState, addTransition, asciiText, createDiagram, labelLines, planDiagram, removeState, stateText, transitionLabel } from "@fsm/core";
 import type { FsmDiagram, MachineType, PlanOptions, Signal, State, Transition } from "@fsm/core";
 
 export type Selection =
   | { kind: "state"; id: string }
-  | { kind: "edge"; from: string; to: string } // all transitions between the pair (drawn as one arc)
+  // All transitions between the pair (drawn as one arc). `tid` is the one whose
+  // text typing edits (the label line clicked); absent means the first.
+  | { kind: "edge"; from: string; to: string; tid?: string }
   | { kind: "initial" }
   | { kind: "multi"; states: string[]; edges: EdgeRef[]; initial: boolean } // box select, Ctrl+click, Ctrl+A
   | null;
@@ -186,10 +188,48 @@ export function getStateText(s: State): string {
   return stateText(s);
 }
 
-/** Condition text is stored as typed (spaces included); codegen trims it. */
-export function setEdgeText(d: FsmDiagram, from: string, to: string, text: string): void {
-  const [first] = edgeTransitions(d, from, to);
-  if (first) first.condition = text;
+/**
+ * The transition whose text typing edits on a selected line: the one whose
+ * label line was clicked (several transitions between one pair share an arc
+ * and stack their labels), else the first.
+ */
+export function editedTransition(d: FsmDiagram, sel: { from: string; to: string; tid?: string }): Transition | undefined {
+  const ts = edgeTransitions(d, sel.from, sel.to);
+  return ts.find((t) => t.id === sel.tid) ?? ts[0];
+}
+
+/** Condition text is stored as typed (spaces included); codegen trims it. `tid` picks the transition (see editedTransition). */
+export function setEdgeText(d: FsmDiagram, from: string, to: string, text: string, tid?: string): void {
+  const t = editedTransition(d, { from, to, tid });
+  if (t) t.condition = text;
+}
+
+/**
+ * Which transition each label line of an arc belongs to (its index in `ts`,
+ * the arc's transitions): the lines are each transition's label lines in
+ * turn, and a transition with no text has none.
+ */
+export function lineOwners(d: FsmDiagram, ts: Transition[]): number[] {
+  return ts.flatMap((t, i) => labelLines(transitionLabel(d, t, DRAW)).map(() => i));
+}
+
+/**
+ * Where the text cursor before character `caret` of a transition's condition
+ * is drawn: which of the transition's own label lines, and how many
+ * characters into it. The condition begins the label ("cond / z=1" in
+ * Mealy), and a long label is wrapped into lines that each come from it in
+ * order, less the spaces at the breaks. Null when the transition draws no text.
+ */
+export function caretSpot(d: FsmDiagram, t: Transition, caret: number): { line: number; offset: number } | null {
+  const text = transitionLabel(d, t, DRAW);
+  const lines = labelLines(text);
+  let from = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const start = text.indexOf(lines[i], from), end = start + lines[i].length;
+    if (caret <= end || i === lines.length - 1) return { line: i, offset: Math.min(Math.max(caret - start, 0), lines[i].length) };
+    from = end;
+  }
+  return null;
 }
 
 // ---- Multiple selection ----

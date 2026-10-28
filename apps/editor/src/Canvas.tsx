@@ -20,7 +20,7 @@ import type { Dispatch, ReactElement, SVGProps, SetStateAction } from "react";
 import type { PointerEvent as RPointerEvent } from "react";
 import { SMALL_SIZE, SUB_LINE_H, drawnSubLines, planDiagram, stateDisplay, stateFontSize, unreachableStates } from "@fsm/core";
 import type { DiagramPlan, EdgePlan } from "@fsm/core";
-import { drawOptions, mergeSelections, createState, createTransition, edgeTransitions, isEdgeSelected, isStateSelected, multiSelection, selectionParts, setInitial, toggleInSelection, useEditor } from "./store.ts";
+import { caretSpot, drawOptions, editedTransition, mergeSelections, createState, createTransition, edgeTransitions, isEdgeSelected, isStateSelected, lineOwners, multiSelection, selectionParts, setInitial, toggleInSelection, useEditor } from "./store.ts";
 import type { Selection } from "./store.ts";
 import { GRID, SNAP_PX, angleOf, boxOf, circleHitsBox, edgePoints, inBox, segmentHitsBox, borderPoint, curveThrough, edgeMidpoint, loopPath, snapAngle, snapPoint, snapToGrid, stateAt } from "./geometry.ts";
 import type { Guide, Pt } from "./geometry.ts";
@@ -180,7 +180,11 @@ export function Canvas({ view, setView, grid }: { view: View; setView: Dispatch<
       gesture.current = { kind: "move", id: stateId, dx: s.x! - p.x, dy: s.y! - p.y, key };
     } else if (edgeEl) {
       const [from, to] = edgeEl.getAttribute("data-edge")!.split(" ");
-      select({ kind: "edge", from, to });
+      // A click on one of the stacked label lines picks that transition for
+      // typing; a click on the arc keeps the one already picked.
+      const tid = target.closest("[data-tid]")?.getAttribute("data-tid")
+        ?? (selection?.kind === "edge" && selection.from === from && selection.to === to ? selection.tid : undefined);
+      select({ kind: "edge", from, to, ...(tid ? { tid } : {}) });
       gesture.current = from === to ? { kind: "loop", id: from, key } : { kind: "curve", from, to, key };
     } else if (onInitial) {
       const init = doc.states.find((s) => s.isInitial)!;
@@ -354,9 +358,21 @@ export function Canvas({ view, setView, grid }: { view: View; setView: Dispatch<
       {grid.style === "line" && <GridLines view={view} w={size.w} h={size.h} />}
       {grid.style === "dot" && <GridDots view={view} />}
       <g transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
-        {plan.edges.map((e) => (
-          <Edge key={edgeKey(e)} e={e} selected={isEdgeSelected(shown, e.transitions[0].from, e.transitions[0].to)} caret={shown?.kind === "edge" ? caret : undefined} mid={edgeMidpoint(plan, e)} />
-        ))}
+        {plan.edges.map((e) => {
+          const editing = shown?.kind === "edge" && isEdgeSelected(shown, e.transitions[0].from, e.transitions[0].to);
+          const t = editing ? editedTransition(doc, shown) : undefined;
+          return (
+            <Edge
+              key={edgeKey(e)}
+              e={e}
+              owners={e.lines.length ? lineOwners(doc, e.transitions) : []}
+              selected={isEdgeSelected(shown, e.transitions[0].from, e.transitions[0].to)}
+              edited={t ? e.transitions.indexOf(t) : -1}
+              spot={t ? caretSpot(doc, t, Math.min(caret ?? t.condition.length, t.condition.length)) : null}
+              mid={edgeMidpoint(plan, e)}
+            />
+          );
+        })}
         {plan.initialArrow && <InitialArrow a={plan.initialArrow} selected={selectionParts(shown).initial} />}
         {plan.states.map(({ state: s, r }) => {
           const selected = isStateSelected(shown, s.id);
@@ -553,16 +569,27 @@ function CaretText({ x, y, text, caret, fontSize, ...rest }: { x: number; y: num
   );
 }
 
-function Edge({ e, selected, caret: caretAt, mid }: { e: EdgePlan; selected: boolean; caret: number | null | undefined; mid: Pt }) {
+/**
+ * A line with its stacked label lines (one or more per transition, see
+ * lineOwners). On the selected line the text cursor is drawn in the
+ * transition being edited (`edited`, its index; -1 when none) at `spot`;
+ * one with no text gets a cursor between the others' lines, where its text
+ * will appear, or at the middle of the line when nothing is written on it.
+ */
+function Edge({ e, owners, selected, edited, spot, mid }: { e: EdgePlan; owners: number[]; selected: boolean; edited: number; spot: { line: number; offset: number } | null; mid: Pt }) {
   const color = selected ? SELECT : STROKE;
   const lines = e.lines;
-  const showCaret = selected && caretAt !== undefined;
-  const cond = e.transitions[0].condition;
-  // Caret position within the condition text (the first label line).
-  const at = showCaret && cond ? Math.min(caretAt ?? cond.length, cond.length) : null;
-  const caret: Pt | null = showCaret && !cond ? (e.label && lines.length ? null : mid) : null;
   const lh = e.fontSize * 1.3;
   const top = e.label ? e.label.y - (lines.length * lh) / 2 + lh / 2 : 0;
+  const first = owners.indexOf(edited);
+  const caretLine = edited >= 0 && spot && first >= 0 ? first + spot.line : -1;
+  let gap: { at: Pt; h: number } | null = null;
+  if (edited >= 0 && !spot) {
+    if (e.label && lines.length) {
+      const next = owners.findIndex((o) => o > edited);
+      gap = { at: { x: e.label.x, y: top + (next < 0 ? lines.length : next) * lh - lh / 2 }, h: lh * 0.35 };
+    } else gap = { at: mid, h: 8 };
+  }
   return (
     <g data-edge={edgeKey(e)} className="edge">
       <path d={e.path} fill="none" stroke="transparent" strokeWidth={14} />
@@ -571,10 +598,11 @@ function Edge({ e, selected, caret: caretAt, mid }: { e: EdgePlan; selected: boo
       {e.label && lines.map((l, i) => (
         <CaretText
           key={i}
+          data-tid={e.transitions[owners[i]]?.id}
           x={e.label!.x}
           y={top + i * lh}
           text={l}
-          caret={i === 0 && at !== null && l === cond ? at : i === 0 && showCaret && !cond ? 0 : null}
+          caret={i === caretLine ? spot!.offset : null}
           fontSize={e.fontSize}
           fill={color}
           stroke="#ffffff"
@@ -583,7 +611,7 @@ function Edge({ e, selected, caret: caretAt, mid }: { e: EdgePlan; selected: boo
           paintOrder="stroke"
         />
       ))}
-      {caret && <line className="caret-line" x1={caret.x} x2={caret.x} y1={caret.y - 8} y2={caret.y + 8} stroke={SELECT} strokeWidth={1.4} pointerEvents="none" />}
+      {gap && <line className="caret-line" x1={gap.at.x} x2={gap.at.x} y1={gap.at.y - gap.h} y2={gap.at.y + gap.h} stroke={SELECT} strokeWidth={1.4} pointerEvents="none" />}
     </g>
   );
 }

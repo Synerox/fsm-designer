@@ -145,6 +145,43 @@ test("paste into a diagram without the copy's signals declares them, so the file
   parseDiagram(JSON.parse(JSON.stringify(f)));
 });
 
+test("typing on a merged line edits the transition whose text was clicked, with the caret drawn in it", async () => {
+  const { caretSpot, editedTransition, lineOwners, setEdgeText } = await import("../src/store.ts");
+  const { addState, addTransition, createDiagram, labelLines, transitionLabel } = await import("@fsm/core");
+  const d = createDiagram({ name: "m", type: "mealy", inputs: ["a", "b"], outputs: ["y", "z"] });
+  const A = addState(d, { name: "A", x: 0, y: 0 }), B = addState(d, { name: "B", x: 200, y: 0 });
+  const t0 = addTransition(d, { from: A.id, to: B.id, condition: "a", outputs: { z: 1 } });
+  const t1 = addTransition(d, { from: A.id, to: B.id, condition: "b", outputs: { y: 1 } });
+  const t2 = addTransition(d, { from: A.id, to: B.id, outputs: { z: 0 } });
+  assert.deepEqual(lineOwners(d, [t0, t1, t2]), [0, 1, 2], "one line each: 'a / z=1', 'b / y=1', '/ z=0'");
+  const sel = { kind: "edge" as const, from: A.id, to: B.id, tid: t1.id };
+  assert.equal(editedTransition(d, sel), t1);
+  assert.equal(editedTransition(d, { ...sel, tid: undefined }), t0, "no line picked: the first");
+  assert.equal(editedTransition(d, { ...sel, tid: "gone" }), t0, "a picked transition undone away: the first");
+  setEdgeText(d, A.id, B.id, "bZ", t1.id);
+  assert.deepEqual(d.transitions.map((t) => t.condition), ["a", "bZ", ""]);
+
+  // Mealy: the caret sits in "cond / outs", not nowhere.
+  assert.deepEqual(caretSpot(d, t1, 1), { line: 0, offset: 1 });
+  assert.deepEqual(caretSpot(d, t2, 0), { line: 0, offset: 0 }, "before the '/' of an output-only label");
+  // A wrapped condition: the caret follows the text onto the second line.
+  t0.condition = "(req_valid && grant_ready) || (a && !b && c) || (!a && b)";
+  const lines = labelLines(transitionLabel(d, t0, { elseLabels: false }));
+  assert.deepEqual(lines, ["(req_valid && grant_ready) ||", "(a && !b && c) || (!a && b)", "/ z=1"]);
+  assert.deepEqual(caretSpot(d, t0, 0), { line: 0, offset: 0 });
+  assert.deepEqual(caretSpot(d, t0, 29), { line: 0, offset: 29 }, "just after the first '||'");
+  assert.deepEqual(caretSpot(d, t0, 30), { line: 1, offset: 0 }, "after the space at the break");
+  assert.deepEqual(caretSpot(d, t0, t0.condition.length), { line: 1, offset: lines[1].length });
+  assert.deepEqual(lineOwners(d, [t0, t1, t2]), [0, 0, 0, 1, 2]);
+
+  // Moore: an emptied transition draws no line, so it has no spot (the
+  // canvas draws its caret between the other lines instead).
+  d.type = "moore";
+  t1.condition = "";
+  assert.equal(caretSpot(d, t1, 0), null);
+  assert.deepEqual(lineOwners(d, [t0, t1, t2]), [0, 0]);
+});
+
 test("align and spread states", async () => {
   const { alignStates } = await import("../src/store.ts");
   const d = newDiagram();
