@@ -13,7 +13,7 @@ import type { Selection } from "./store.ts";
 import type { ImportResult, LayoutIssue } from "@fsm/core";
 import { drewText, statusText } from "./summary.ts";
 import type { LabelMode } from "./store.ts";
-import { tr, useLang } from "./i18n.ts";
+import { MOD, tr, useLang } from "./i18n.ts";
 import type { Lang } from "./i18n.ts";
 
 const LABEL_MODES = (): Array<[LabelMode, string, string]> => [
@@ -233,8 +233,8 @@ export function App() {
         </div>
         <span className="sep" />
         <nav className="group" aria-label={tr("Edit", "編輯")}>
-          <button className="ghost with-icon" onClick={undo} disabled={!canUndo} title="Ctrl+Z">{tr("Undo", "復原")}<Icon d={UNDO} /></button>
-          <button className="ghost with-icon" onClick={redo} disabled={!canRedo} title="Ctrl+Shift+Z">{tr("Redo", "重做")}<Icon d={REDO} /></button>
+          <button className="ghost with-icon" onClick={undo} disabled={!canUndo} title={`${MOD}+Z`}>{tr("Undo", "復原")}<Icon d={UNDO} /></button>
+          <button className="ghost with-icon" onClick={redo} disabled={!canRedo} title={`${MOD}+Shift+Z`}>{tr("Redo", "重做")}<Icon d={REDO} /></button>
         </nav>
         <span className="file" title={filePath ?? undefined}>{dirty && <span className="dot" title={tr("Unsaved changes", "尚未儲存")} />}{filePath ? baseName(filePath) : tr("Untitled", "未命名")}</span>
         <Menu
@@ -269,9 +269,9 @@ export function App() {
           <button className="chip" aria-pressed={grid.snap} onClick={() => setGrid((g) => ({ ...g, snap: !g.snap }))} title={tr("Snap to the grid while dragging (hold Alt to turn off for a moment)", "拖曳時吸附到格線（按住 Alt 暫時不吸附）")}>{tr("Snap", "吸附")}</button>
           <button className="chip" aria-pressed={hints} data-testid="hints-toggle" onClick={() => setHints((h) => !h)} title={hints ? tr("Hide shortcut hints", "隱藏快捷鍵提示") : tr("Show shortcut hints", "顯示快捷鍵提示")}>{tr("Hints", "提示")}</button>
           <span className="zoom-controls" role="group" aria-label={tr("Zoom", "縮放")}>
-            <button className="icon" onClick={() => zoomBy(1 / 1.1)} title={tr("Zoom out (Ctrl+wheel)", "縮小（Ctrl+滾輪）")} aria-label={tr("Zoom out", "縮小")}><Icon d={ZOOM_OUT} /></button>
+            <button className="icon" onClick={() => zoomBy(1 / 1.1)} title={tr(`Zoom out (${MOD}+wheel)`, `縮小（${MOD}+滾輪）`, `縮小（${MOD}+ホイール）`)} aria-label={tr("Zoom out", "縮小")}><Icon d={ZOOM_OUT} /></button>
             <button className="zoom" data-testid="zoom" onClick={() => zoomBy(1 / view.k)} title={tr("Zoom level; click for 100%", "縮放比例；點一下回到 100%")}>{Math.round(view.k * 100)}%</button>
-            <button className="icon" onClick={() => zoomBy(1.1)} title={tr("Zoom in (Ctrl+wheel)", "放大（Ctrl+滾輪）")} aria-label={tr("Zoom in", "放大")}><Icon d={ZOOM_IN} /></button>
+            <button className="icon" onClick={() => zoomBy(1.1)} title={tr(`Zoom in (${MOD}+wheel)`, `放大（${MOD}+滾輪）`, `拡大（${MOD}+ホイール）`)} aria-label={tr("Zoom in", "放大")}><Icon d={ZOOM_IN} /></button>
             <button className="icon" data-testid="fit" onClick={fit} title={tr("Fit to window (F)", "符合視窗（F）")} aria-label={tr("Fit to window", "符合視窗")}><Icon d={FIT} /></button>
           </span>
         </div>
@@ -287,7 +287,7 @@ export function App() {
                   const area = (e.currentTarget.closest(".modal") as HTMLElement).querySelector("textarea")!;
                   copyText(latex).then(
                     () => setNotice(tr("LaTeX copied", "已複製 LaTeX")),
-                    () => { area.focus(); area.select(); setNotice(tr("All text selected; press Ctrl+C to copy", "已選取全部文字，請按 Ctrl+C 複製")); },
+                    () => { area.focus(); area.select(); setNotice(tr(`All text selected; press ${MOD}+C to copy`, `已選取全部文字，請按 ${MOD}+C 複製`, `全テキストを選択しました。${MOD}+C でコピー`)); },
                   );
                 }}
               >
@@ -319,7 +319,6 @@ export function App() {
   );
 }
 
-const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "Cmd" : "Ctrl";
 const GRID_KEY = "fsm-designer.grid.v2";
 const HINTS_KEY = "fsm-designer.hints.v1";
 

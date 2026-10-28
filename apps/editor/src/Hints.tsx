@@ -1,9 +1,7 @@
 // Keyboard and mouse reference, shown over the canvas by the status bar's
 // Hints button (laid out like Analog Canvas's shortcut sheet).
 
-import { tr } from "./i18n.ts";
-
-const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "Cmd" : "Ctrl";
+import { MOD, tr } from "./i18n.ts";
 
 /** Each hint: the keys pressed together, then what they do. */
 const hints = (): Array<[string[], string]> => [

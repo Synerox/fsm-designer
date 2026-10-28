@@ -9,7 +9,7 @@ import type { KeyboardEvent } from "react";
 import { DRAW, alignStates, deleteSelection, edgeTransitions, setEdgeShape, getStateText, setEdgeText, setStateText, useEditor } from "./store.ts";
 
 import { snapToGrid } from "./geometry.ts";
-import { tr } from "./i18n.ts";
+import { MOD, tr } from "./i18n.ts";
 import { diagramSizeText, selectionSizeText } from "./summary.ts";
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -246,7 +246,7 @@ export function Inspector({ snap }: { snap: boolean }) {
             )}
           </div>
         )}
-        <p className="hint">{tr("Drag any of the states to move them together; Delete removes them all; Ctrl+click adds to or removes from the selection.", "拖曳其中一個狀態可以一起移動；按 Delete 全部刪除；Ctrl+點一下可以加入或移出選取。")}</p>
+        <p className="hint">{tr(`Drag any of the states to move them together; Delete removes them all; ${MOD}+click adds to or removes from the selection.`, `拖曳其中一個狀態可以一起移動；按 Delete 全部刪除；${MOD}+點一下可以加入或移出選取。`, `どれか 1 つの状態をドラッグするとまとめて移動します。Delete ですべて削除、${MOD}+クリックで選択に追加／選択から外せます。`)}</p>
         <button className="danger" onClick={del}>{tr("Delete selected", "刪除選取的物件")}</button>
       </aside>
     );

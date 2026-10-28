@@ -13,6 +13,13 @@ export const useLang = create<{ lang: Lang; setLang(lang: Lang): void }>((set) =
   setLang(lang) { try { localStorage.setItem(KEY, lang); } catch {} set({ lang }); },
 }));
 
+/**
+ * The modifier key as shortcut text: "Cmd" on Apple devices, else "Ctrl". The
+ * key handlers accept either key, but text should name the one the user has
+ * (on a Mac, Ctrl+click is a right click).
+ */
+export const MOD = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "Cmd" : "Ctrl";
+
 /** UI text in the current language. Japanese comes from `ja`, else from the JA table by the English text. */
 export function tr(en: string, zh: string, ja?: string): string {
   const lang = useLang.getState().lang;

@@ -7,7 +7,7 @@ import { listStateMachines } from "@fsm/core";
 import type { ImportResult } from "@fsm/core";
 import { importVerilogText } from "./actions.ts";
 import { VERILOG_FILTER, openTextFile } from "./platform.ts";
-import { tr, useLang } from "./i18n.ts";
+import { MOD, tr, useLang } from "./i18n.ts";
 
 const SAMPLE = `// Example: Mealy machine detecting the sequence 1011 (two always blocks)
 module seq_detector_1011 (
@@ -103,7 +103,7 @@ export function VerilogImportDialog({ onClose, onImported }: { onClose: () => vo
           <button onClick={() => { setCode(SAMPLE); setError(null); }}>{tr("Example", "範例")}</button>
           <button onClick={() => void openFile()}>{tr("Open file…", "開啟檔案…")}</button>
           <button onClick={onClose}>{tr("Cancel", "取消")}</button>
-          <button className="primary" disabled={!code.trim() || busy} onClick={() => void run()} title="Ctrl+Enter" data-testid="verilog-import">{tr("Import", "匯入")}</button>
+          <button className="primary" disabled={!code.trim() || busy} onClick={() => void run()} title={`${MOD}+Enter`} data-testid="verilog-import">{tr("Import", "匯入")}</button>
         </div>
       </div>
     </div>
