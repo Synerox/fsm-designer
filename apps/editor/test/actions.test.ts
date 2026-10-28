@@ -229,6 +229,28 @@ test("opening the wrong file, or one from a newer version, says why in the UI la
   }
 });
 
+test("a file or autosave with huge coordinates, curves or radii is refused, not drawn", async () => {
+  useEditor.getState().load(newDiagram(), null);
+  const doc = (patch: (d: { states: Array<Record<string, unknown>>; transitions: Array<Record<string, unknown>> }) => void) => {
+    const d = { version: 1, name: "M", type: "moore", states: [{ id: "s0", name: "A", x: 100, y: 100, isInitial: true }, { id: "s1", name: "B", x: 300, y: 100 }], transitions: [{ id: "t0", from: "s0", to: "s1" }] };
+    patch(d);
+    return d;
+  };
+  const tooLarge = /^Error: the diagram cannot be drawn \(a position or size is too large\)$/;
+  // The edge between x = 1e308 and -1e308 came out as NaN, and the canvas threw on it.
+  await assert.rejects(loadText(JSON.stringify(doc((d) => { d.states[0].x = 1e308; d.states[1].x = -1e308; })), "huge.fsm.json"), tooLarge);
+  await assert.rejects(loadText(JSON.stringify(doc((d) => { d.transitions[0].curve = 1e300; })), "curve.fsm.json"), tooLarge);
+  await assert.rejects(loadText(JSON.stringify(doc((d) => { d.states[1].radius = 1e300; })), "radius.fsm.json"), tooLarge);
+  assert.equal(useEditor.getState().doc.states.length, 0);
+  // Far out, but drawable: still opens.
+  await loadText(JSON.stringify(doc((d) => { d.states[1].x = 1e9; })), "far.fsm.json");
+  assert.equal(useEditor.getState().doc.states[1].x, 1e9);
+  // The same doc as an autosave crashed the editor on every start.
+  storage.set("fsm-designer:autosave", JSON.stringify({ doc: doc((d) => { d.states[0].x = 1e308; d.states[1].x = -1e308; }), filePath: null, dirty: true }));
+  await assert.rejects(restoreSession(), /^Error: Could not restore the last session: the diagram cannot be drawn/);
+  assert.equal(storage.has("fsm-designer:autosave"), false, "set aside");
+});
+
 test("discarding on close leaves the last saved diagram in the autosave, not the discarded changes", () => {
   const d = newDiagram();
   createState(d, 100, 100);

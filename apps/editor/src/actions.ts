@@ -5,6 +5,7 @@ import { autoLayout, ensureLayout, fitStateSizes, importVerilogLaidOut, parseDia
 import type { FsmDiagram, ImportOptions, ImportResult, LayoutIssue } from "@fsm/core";
 import { FSM_FILTER, baseName, confirmDialog, fileError, launchFile, openTextFile, saveFile } from "./platform.ts";
 import type { OpenedFile } from "./platform.ts";
+import { pathNumbers } from "./geometry.ts";
 import { DEFAULT_NAME, drawOptions, newDiagram, useEditor } from "./store.ts";
 
 import { tr } from "./i18n.ts";
@@ -46,12 +47,24 @@ function upgradeLabels(d: FsmDiagram): FsmDiagram {
  * are easy to loosen again.
  */
 function checkDrawable(d: FsmDiagram): void {
+  const cannot = (why: string) => new Error(tr(`the diagram cannot be drawn (${why})`, `無法畫出這張圖（${why}）`, `図を描画できません（${why}）`));
+  let plan: ReturnType<typeof planDiagram>;
   try {
-    planDiagram(d, drawOptions());
+    plan = planDiagram(d, drawOptions());
   } catch (e) {
-    throw new Error(tr(`the diagram cannot be drawn (${errorText(e)})`, `無法畫出這張圖（${errorText(e)}）`, `図を描画できません（${errorText(e)}）`));
+    throw cannot(errorText(e));
   }
+  // Huge coordinates, curves or radii (a hand edit: x: 1e308) do not throw
+  // here: the lines between them come out as NaN or Infinity, or as numbers
+  // SVG cannot hold, and the canvas threw on them. Nothing drawn by hand
+  // comes near MAX_COORD; SVG's single-precision numbers end at about 3e38.
+  const { minX, minY, maxX, maxY } = plan.bounds;
+  const sane = (v: number) => Math.abs(v) <= MAX_COORD; // false for NaN too
+  if (![minX, minY, maxX, maxY].every(sane) || !plan.edges.every((e) => pathNumbers(e.path).every(sane)))
+    throw cannot(tr("a position or size is too large", "位置或大小的數值太大", "位置または大きさの値が大きすぎます"));
 }
+
+const MAX_COORD = 1e15;
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
