@@ -126,4 +126,14 @@ test("an autosave that cannot be loaded is reported and kept, not silently repla
   storage.set("fsm-designer:autosave", bad);
   await assert.rejects(restoreSession(), /could not be restored.*Unknown output "light"/);
   assert.equal(storage.get("fsm-designer:autosave:unreadable"), bad, "a copy survives the next autosave");
+
+  // Storage full: the copy can't be written, and the message doesn't claim it was.
+  storage.delete("fsm-designer:autosave:unreadable");
+  const ls = (globalThis as unknown as { localStorage: { setItem: (k: string, v: string) => void } }).localStorage;
+  const setItem = ls.setItem;
+  ls.setItem = () => { throw new Error("QuotaExceededError"); };
+  try {
+    await assert.rejects(restoreSession(), (e: Error) => /no copy could be kept/.test(e.message) && !/A copy was kept/.test(e.message));
+  } finally { ls.setItem = setItem; }
+  assert.equal(storage.has("fsm-designer:autosave:unreadable"), false);
 });

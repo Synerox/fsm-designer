@@ -220,12 +220,17 @@ export async function restoreSession(): Promise<void> {
   } catch (e) {
     // The blank diagram shown instead is autosaved over this one at the first
     // edit: keep a copy under its own key, and say what happened.
-    try { localStorage.setItem(UNREADABLE_KEY, raw); } catch { /* storage full */ }
+    let kept = false;
+    try { localStorage.setItem(UNREADABLE_KEY, raw); kept = true; } catch { /* storage full: the copy doubles the autosave */ }
     const why = e instanceof Error ? e.message : String(e);
-    throw new Error(tr(
+    throw new Error(kept ? tr(
       `The last session could not be restored (${why}). A copy was kept in this browser's storage as "${UNREADABLE_KEY}".`,
       `無法還原上次的工作階段（${why}）。已在瀏覽器儲存空間保留一份副本，名稱為「${UNREADABLE_KEY}」。`,
       `前回のセッションを復元できませんでした（${why}）。ブラウザのストレージに「${UNREADABLE_KEY}」としてコピーを残しました。`,
+    ) : tr(
+      `The last session could not be restored (${why}), and no copy could be kept (browser storage is full). It will be replaced at the next edit.`,
+      `無法還原上次的工作階段（${why}），且無法保留副本（瀏覽器儲存空間已滿）。下次編輯時會被覆寫。`,
+      `前回のセッションを復元できませんでした（${why}）。ブラウザのストレージが一杯のためコピーも残せませんでした。次の編集で上書きされます。`,
     ));
   }
 }

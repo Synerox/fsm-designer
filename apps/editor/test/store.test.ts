@@ -168,6 +168,12 @@ test("paste into a diagram without the copy's signals declares them, so the file
   assert.ok(f.transitions.every((t) => Object.keys(t.outputs).length === 0));
   assert.deepEqual(f.inputs.map((s) => s.name), ["z", "x"]);
   parseDiagram(JSON.parse(JSON.stringify(f)));
+
+  // Moore into Moore: outputs the file's transitions carry (hidden) are kept.
+  addTransition(moore, { from: y.id, to: g.id, condition: "car", outputs: { light: 3 } });
+  copySelection(moore, selectAll(moore));
+  pasteClipboard(moore);
+  assert.deepEqual(moore.transitions.slice(-2).map((t) => t.outputs), [{}, { light: 3 }]);
 });
 
 test("typing on a merged line edits the transition whose text was clicked, with the caret drawn in it", async () => {

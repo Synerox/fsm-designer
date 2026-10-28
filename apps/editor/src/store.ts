@@ -496,7 +496,9 @@ export function hasClipboard(): boolean {
  * uses is declared as it was in the source; one that cannot be (its name is
  * already taken for something else) is dropped. An empty diagram takes the
  * source's machine kind, and Mealy outputs pasted into a Moore machine are
- * dropped, since nothing there draws or edits them.
+ * dropped, since nothing there draws or edits them. (Outputs a Moore
+ * diagram's own transitions carry, hidden, are kept when pasted into a Moore
+ * diagram: they came from the file and are not the paste's to drop.)
  */
 export function pasteClipboard(d: FsmDiagram): Selection {
   if (!clipboard) return null;
@@ -551,7 +553,7 @@ export function pasteClipboard(d: FsmDiagram): Selection {
     t.id = fresh(`t${d.transitions.length}`, tids);
     t.from = idMap.get(src.from)!;
     t.to = idMap.get(src.to)!;
-    if (d.type === "moore") t.outputs = {};
+    if (d.type === "moore" && clip.type === "mealy") t.outputs = {};
     keepDeclared(t.outputs);
     // Names in the condition that were the source's inputs (the rest are left as typed).
     for (const name of t.condition.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) if (clip.inputs.some((x) => x.name === name)) declared("inputs", name);
