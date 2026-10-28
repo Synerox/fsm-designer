@@ -1,5 +1,6 @@
 // File and export commands shared by the toolbar and keyboard shortcuts.
 
+import { create } from "zustand";
 import { autoLayout, ensureLayout, fitStateSizes, importVerilogLaidOut, parseDiagram, planDiagram, prettyText, renderLatex, renderSvg, stateRadius } from "@fsm/core";
 import type { FsmDiagram, ImportOptions, ImportResult, LayoutIssue } from "@fsm/core";
 import { FSM_FILTER, baseName, confirmDialog, fileError, launchFile, openTextFile, saveFile } from "./platform.ts";
@@ -216,13 +217,27 @@ export async function exportPng(scale = 2): Promise<void> {
 
 // ---- Autosave: the open diagram survives a reload or crash, like Evan's editor ----
 
+/**
+ * Whether the autosave still holds this tab's diagram. failed: the last write
+ * threw (storage full, blocked, or an opaque sandbox). otherTab: another tab
+ * of this origin writes the same slot, so a reload brings back whichever tab
+ * wrote last. overwritten: it did so after this tab's last write.
+ */
+export const useAutosave = create<{ failed: boolean; otherTab: boolean; overwritten: boolean }>(() => ({ failed: false, otherTab: false, overwritten: false }));
+
+/** True when a reload or close would lose this tab's unsaved changes even though the browser build autosaves. */
+export const autosaveLost = () => { const a = useAutosave.getState(); return a.failed || a.overwritten; };
+
 let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
 
 function writeAutosave(): void {
   const { doc, filePath, dirty } = useEditor.getState();
   try {
     localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({ doc, filePath, dirty }));
-  } catch { /* storage full or unavailable */ }
+    useAutosave.setState({ failed: false, overwritten: false });
+  } catch {
+    useAutosave.setState({ failed: true });
+  }
 }
 
 export function startAutosave(): () => void {
@@ -234,7 +249,12 @@ export function startAutosave(): () => void {
     // Write the state as it is when the timer fires, not as it was when it started.
     autosaveTimer = setTimeout(writeAutosave, 300);
   });
-  return () => { clearTimeout(autosaveTimer); unsub(); };
+  // Fired only by other tabs (key null: they cleared storage).
+  const onStorage = (e: StorageEvent) => {
+    if (e.key === AUTOSAVE_KEY || e.key === null) useAutosave.setState({ otherTab: true, overwritten: true });
+  };
+  globalThis.addEventListener?.("storage", onStorage);
+  return () => { clearTimeout(autosaveTimer); unsub(); globalThis.removeEventListener?.("storage", onStorage); };
 }
 
 /**
@@ -320,4 +340,28 @@ export async function restoreSession(): Promise<void> {
     if (session.dirty) useEditor.setState({ dirty: true, savedDoc: null });
   }
   if (problem) throw problem;
+}
+
+// ---- Import Verilog dialog's draft ----
+
+const DRAFT_KEY = "fsm-designer:verilog-draft";
+/**
+ * Larger drafts are not kept: they share the origin's ~5 MB of storage with
+ * the autosave, and one near that size made every autosave fail. Real FSM
+ * sources are a few KB.
+ */
+export const MAX_DRAFT = 200_000;
+
+export function loadVerilogDraft(): string {
+  try { return localStorage.getItem(DRAFT_KEY) ?? ""; } catch { return ""; }
+}
+
+/** A draft too big to store is dropped rather than leaving an older one to come back next time. */
+export function saveVerilogDraft(code: string): void {
+  try {
+    if (code.length > MAX_DRAFT) throw new RangeError("draft too large");
+    localStorage.setItem(DRAFT_KEY, code);
+  } catch {
+    try { localStorage.removeItem(DRAFT_KEY); } catch { /* storage off */ }
+  }
 }

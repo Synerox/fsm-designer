@@ -257,9 +257,18 @@ export async function confirmDialog(message: string): Promise<boolean> {
   }
 }
 
-/** Desktop: ask before closing the window while `isDirty()` is true; `onDiscard` runs when the user agrees to lose the changes. */
+/**
+ * Ask before the window or tab goes while `isDirty()` is true; `onDiscard` runs
+ * when the user agrees to lose the changes. Desktop asks in a dialog; a
+ * browser can only show its own "Leave site?" prompt, so the caller there
+ * says dirty only when the autosave does not hold the work.
+ */
 export async function guardWindowClose(isDirty: () => boolean, message: () => string, onDiscard: () => void): Promise<() => void> {
-  if (!isDesktop) return () => {}; // the browser build keeps work in localStorage instead
+  if (!isDesktop) {
+    const onUnload = (e: BeforeUnloadEvent) => { if (isDirty()) e.preventDefault(); };
+    window.addEventListener("beforeunload", onUnload);
+    return () => window.removeEventListener("beforeunload", onUnload);
+  }
   const { getCurrentWindow } = await import("@tauri-apps/api/window");
   return getCurrentWindow().onCloseRequested(async (e) => {
     if (!isDirty()) return;

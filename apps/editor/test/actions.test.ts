@@ -2,16 +2,23 @@
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import { autoLayout } from "@fsm/core";
-import { discardUnsaved, importVerilogText, loadText, restoreSession, serialize, startAutosave, tidyUp } from "../src/actions.ts";
+import { MAX_DRAFT, autosaveLost, discardUnsaved, importVerilogText, loadText, loadVerilogDraft, restoreSession, saveVerilogDraft, serialize, startAutosave, tidyUp, useAutosave } from "../src/actions.ts";
 import { createState, createTransition, drawOptions, newDiagram, setInitial, useEditor } from "../src/store.ts";
 
 // Node has no localStorage; a Map stands in for the browser's.
 const storage = new Map<string, string>();
+let storageFull = false;
 (globalThis as { localStorage?: unknown }).localStorage = {
   getItem: (k: string) => storage.get(k) ?? null,
-  setItem: (k: string, v: string) => { storage.set(k, String(v)); },
+  setItem: (k: string, v: string) => {
+    if (storageFull) throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+    storage.set(k, String(v));
+  },
   removeItem: (k: string) => { storage.delete(k); },
 };
+// ...and no window to hear other tabs' "storage" events on.
+const events = new EventTarget();
+Object.assign(globalThis, { addEventListener: events.addEventListener.bind(events), removeEventListener: events.removeEventListener.bind(events) });
 const autosaved = () => JSON.parse(storage.get("fsm-designer:autosave") ?? "null") as { dirty: boolean; filePath: string | null } | null;
 
 const SEQ = `module m (input clk, input rst, input x, output reg z);
@@ -176,4 +183,58 @@ test("discarding on close leaves the last saved diagram in the autosave, not the
   useEditor.setState({ savedDoc: null });
   discardUnsaved();
   assert.equal(storage.has("fsm-designer:autosave"), false);
+});
+
+test("a failed autosave write is reported until a write works again", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  const stop = startAutosave();
+  try {
+    useEditor.getState().load(newDiagram(), null);
+    mock.timers.tick(300);
+    assert.equal(useAutosave.getState().failed, false);
+    storageFull = true;
+    useEditor.getState().edit((d) => { createState(d, 0, 0); });
+    mock.timers.tick(300);
+    assert.equal(useAutosave.getState().failed, true, "the status bar warns and a reload asks first");
+    assert.ok(autosaveLost());
+    storageFull = false;
+    useEditor.getState().edit((d) => { createState(d, 100, 0); });
+    mock.timers.tick(300);
+    assert.equal(useAutosave.getState().failed, false);
+    assert.equal(autosaveLost(), false);
+  } finally {
+    storageFull = false;
+    stop();
+    mock.timers.reset();
+  }
+});
+
+test("another tab writing the autosave is noticed, and this tab's next write takes the slot back", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  useAutosave.setState({ failed: false, otherTab: false, overwritten: false });
+  const stop = startAutosave();
+  try {
+    useEditor.getState().load(newDiagram(), null);
+    mock.timers.tick(300);
+    events.dispatchEvent(Object.assign(new Event("storage"), { key: "fsm-designer:labels" }));
+    assert.equal(useAutosave.getState().otherTab, false, "other keys do not count");
+    events.dispatchEvent(Object.assign(new Event("storage"), { key: "fsm-designer:autosave" }));
+    assert.deepEqual(useAutosave.getState(), { failed: false, otherTab: true, overwritten: true });
+    assert.ok(autosaveLost(), "a reload now brings back the other tab's diagram");
+    useEditor.getState().edit((d) => { createState(d, 0, 0); });
+    mock.timers.tick(300);
+    assert.equal(autosaveLost(), false);
+    assert.equal(useAutosave.getState().otherTab, true, "the warning stays: the other tab can write again");
+  } finally {
+    stop();
+    mock.timers.reset();
+    useAutosave.setState({ failed: false, otherTab: false, overwritten: false });
+  }
+});
+
+test("an import draft too big to share storage with the autosave is not kept", () => {
+  saveVerilogDraft("module m; endmodule");
+  assert.equal(loadVerilogDraft(), "module m; endmodule");
+  saveVerilogDraft("/*" + "x".repeat(MAX_DRAFT) + "*/");
+  assert.equal(loadVerilogDraft(), "", "a 5 MB draft made every later autosave fail");
 });
