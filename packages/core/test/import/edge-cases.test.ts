@@ -141,6 +141,10 @@ endmodule`;
   assert.equal(fold("4'sb1111 == -1"), 1n);
   assert.equal(fold("4'b1000 < 4'sd0"), 0n);
   assert.equal(fold("$signed(4'b1000) < 0"), 1n);
+  assert.equal(fold("-6 / 2 == -3"), 1n);
+  assert.equal(fold("-7 % 2 == -1"), 1n);
+  assert.equal(fold("(8'sb10000000 >>> 2) == -8'sd32"), 1n);
+  assert.equal(fold("8'b10000000 >>> 2"), 32n);
 });
 
 test("an enable in the first if is not taken for a synchronous reset", () => {

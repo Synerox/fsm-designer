@@ -161,15 +161,18 @@ function foldBinary(op: string, a: Num, b: Num): Num | undefined {
     case "+": return num(x + y, w, signed);
     case "-": return num(x - y, w, signed);
     case "*": return num(x * y, w, signed);
-    case "/": return y === 0n ? undefined : num(x / y, w);
-    case "%": return y === 0n ? undefined : num(x % y, w);
+    // (BigInt / and % truncate toward zero, as Verilog's signed ones do.)
+    case "/": return y === 0n ? undefined : num(sx / sy, w, signed);
+    case "%": return y === 0n ? undefined : num(sx % sy, w, signed);
     case "**": return num(x ** y, a.w);
     case "&": return num(x & y, w, signed);
     case "|": return num(x | y, w, signed);
     case "^": return num(x ^ y, w, signed);
     case "~^": case "^~": return num(~(x ^ y), w);
-    case "<<": case "<<<": return num(a.v << b.v, a.w ?? 32);
-    case ">>": case ">>>": return num(a.v >> b.v, a.w ?? 32);
+    // A shift keeps the left operand's width and sign; >>> fills with its sign bit when signed.
+    case "<<": case "<<<": return num(a.v << b.v, a.w ?? 32, a.signed ? { signed: true } : {});
+    case ">>": return num(mask(a.v, a.w ?? 32) >> b.v, a.w ?? 32, a.signed ? { signed: true } : {});
+    case ">>>": return num((a.signed ? toSigned(mask(a.v, a.w ?? 32), a.w ?? 32) : mask(a.v, a.w ?? 32)) >> b.v, a.w ?? 32, a.signed ? { signed: true } : {});
     case "==": case "===": return bool(x === y);
     case "!=": case "!==": return bool(x !== y);
     case "<": return bool(sx < sy);
