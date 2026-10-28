@@ -50,7 +50,8 @@ test("zh and ja import reports translate skips, partial assignments and left-out
     '已略過第 10 行（語法錯誤：expected a name but found "="）',
     "無法追蹤對 o[1] 的部分位元指定，該值視為未知",
   ]);
-  assert.equal(ja[2], "9 行目の sync2 のインスタンス を省略しました");
+  assert.equal(ja[1], "8 行目の function を省略しました");
+  assert.equal(ja[2], "9 行目の sync2 のインスタンスを省略しました");
   // Only names, Verilog keywords and the parser's own detail may stay in English.
   for (const w of [...zh, ...ja]) assert.doesNotMatch(w, /\b(Skipped|line|instance of|left out|Could not|Output|Signal)\b/, w);
 });

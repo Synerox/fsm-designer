@@ -89,7 +89,8 @@ button.chip[aria-pressed="true"] { border-color: transparent; background: var(--
   font: inherit; height: var(--control-h); padding: 0 8px; border: 1px solid var(--border-strong); border-radius: var(--radius); color: var(--text); background: var(--surface);
 }
 .inspector input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
-/* Keyboard focus gets a solid ring like the buttons' (border plus 1px outline). */
+/* A solid ring like the buttons' (accent border plus 1px outline). Text inputs match
+   :focus-visible on a mouse click too, so in practice the soft halo above only shows on checkboxes. */
 .inspector input:focus-visible { outline: 1px solid var(--accent); outline-offset: 0; }
 .inspector input[type="checkbox"] { accent-color: var(--accent); }
 .inspector .align { display: flex; flex-direction: column; gap: 6px; }
