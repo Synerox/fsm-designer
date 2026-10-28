@@ -1,5 +1,7 @@
 // PNG export: rasterises the SVG with resvg (a native module, loaded lazily so
-// browser builds of @fsm/core never pull it in).
+// browser builds of @fsm/core never pull it in). resvg cannot draw bitmap
+// colour-emoji fonts such as Noto Color Emoji, so emoji that a browser shows
+// in the SVG are blank here; CJK text renders through the system fonts.
 
 import { renderSvg } from "./svg.ts";
 import type { SvgOptions } from "./svg.ts";
