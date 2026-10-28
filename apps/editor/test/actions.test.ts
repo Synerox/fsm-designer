@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { autoLayout, renderSvg } from "@fsm/core";
 import { MAX_DRAFT, autosaveLost, discardUnsaved, importVerilogText, loadText, loadVerilogDraft, restoreSession, saveVerilogDraft, serialize, startAutosave, tidyUp, useAutosave } from "../src/actions.ts";
 import { createState, createTransition, drawOptions, newDiagram, setInitial, useEditor } from "../src/store.ts";
+import { useLang } from "../src/i18n.ts";
 
 // Node has no localStorage; a Map stands in for the browser's.
 const storage = new Map<string, string>();
@@ -195,6 +196,37 @@ test("opening a file with a state the editor cannot draw fails instead of blanki
   await assert.rejects(loadText(text, "agent.fsm.json"));
   assert.equal(useEditor.getState().doc.states.length, 0);
   await assert.rejects(loadText("{ not json", "bad.fsm.json"), /^Error: it is not a valid JSON file$/);
+});
+
+test("opening the wrong file, or one from a newer version, says why in the UI language", async () => {
+  const files = ['{"name":"x","version":"1.0.0"}', '{"foo":1}', "[1, 2]", '{"version":2,"states":[]}'];
+  const why = async () => {
+    const out: string[] = [];
+    for (const f of files) await loadText(f, "f.json").catch((e: Error) => out.push(e.message));
+    return out;
+  };
+  try {
+    assert.deepEqual(await why(), [
+      "it is not an FSM Designer diagram", "it is not an FSM Designer diagram", "it is not an FSM Designer diagram",
+      "it was saved by a newer FSM Designer (format version 2); update this one to open it",
+    ]);
+    useLang.getState().setLang("zh");
+    assert.deepEqual(await why(), ["不是 FSM Designer 的圖檔", "不是 FSM Designer 的圖檔", "不是 FSM Designer 的圖檔", "它是較新版的 FSM Designer 存的（格式第 2 版），請更新後再開啟"]);
+    useLang.getState().setLang("ja");
+    assert.deepEqual(await why(), ["FSM Designer の図ではありません", "FSM Designer の図ではありません", "FSM Designer の図ではありません", "新しい FSM Designer で保存された図です（形式バージョン 2）。更新してから開いてください"]);
+    // A restore that is not JSON at all: the engine's English message stayed in the toast.
+    storage.set("fsm-designer:autosave", "{bad");
+    await assert.rejects(restoreSession(), /^Error: 前回のセッションを復元できませんでした：有効な JSON ではありません$/);
+    useLang.getState().setLang("zh");
+    storage.set("fsm-designer:autosave", "{bad");
+    await assert.rejects(restoreSession(), /^Error: 無法還原上次的工作：不是有效的 JSON$/);
+    storage.set("fsm-designer:autosave", JSON.stringify({ doc: { version: 3, states: [] }, filePath: null, dirty: true }));
+    await assert.rejects(restoreSession(), /^Error: 無法還原上次的工作：它是較新版的 FSM Designer 存的（格式第 3 版）/);
+    // A refusal of one field stays as the core words it: technical detail.
+    await assert.rejects(loadText('{"version":1,"states":[{"id":"s0","name":"A","x":"left","y":0}]}', "f.json"), /states\[0\]/);
+  } finally {
+    useLang.getState().setLang("en");
+  }
 });
 
 test("discarding on close leaves the last saved diagram in the autosave, not the discarded changes", () => {

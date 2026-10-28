@@ -55,6 +55,25 @@ function checkDrawable(d: FsmDiagram): void {
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+/**
+ * parseDiagram, with its refusals of the whole file in the UI language: the
+ * core words them in English for API callers. These are what opening the
+ * wrong file, or one from a newer version, gives. A refusal of one field
+ * ("states[2].x must be ...") stays as the core wrote it, as technical
+ * detail, like a Verilog syntax error in the import dialog.
+ */
+function readDiagram(json: unknown): FsmDiagram {
+  try {
+    return parseDiagram(json);
+  } catch (e) {
+    const msg = errorText(e);
+    const v = msg.match(/^This diagram is version (\d+), from a newer FSM Designer/);
+    if (v) throw new Error(tr(`it was saved by a newer FSM Designer (format version ${v[1]}); update this one to open it`, `它是較新版的 FSM Designer 存的（格式第 ${v[1]} 版），請更新後再開啟`, `新しい FSM Designer で保存された図です（形式バージョン ${v[1]}）。更新してから開いてください`));
+    if (/^Not an FSM Designer diagram|^Diagram JSON must be an object/.test(msg)) throw new Error(tr("it is not an FSM Designer diagram", "不是 FSM Designer 的圖檔", "FSM Designer の図ではありません"));
+    throw e;
+  }
+}
+
 export async function loadText(text: string, path: string | null): Promise<void> {
   let json: unknown;
   try {
@@ -63,7 +82,7 @@ export async function loadText(text: string, path: string | null): Promise<void>
   } catch {
     throw new Error(tr("it is not a valid JSON file", "不是有效的 JSON 檔案", "有効な JSON ファイルではありません"));
   }
-  const d = upgradeLabels(parseDiagram(json));
+  const d = upgradeLabels(readDiagram(json));
   // A file whose states are all placed (everything the editor saves) opens as
   // it was saved: in the editor text never resizes a state, so its circles and
   // positions are the user's. Files made elsewhere (agents) can come without
@@ -322,9 +341,15 @@ interface Session { doc: FsmDiagram; filePath: string | null; dirty: boolean }
 
 /** The stored session as a drawable diagram; throws if it is not one. */
 async function parseSession(raw: string): Promise<Session> {
-  const saved = JSON.parse(raw) as { doc?: unknown; filePath?: unknown; dirty?: unknown } | null;
+  let saved: { doc?: unknown; filePath?: unknown; dirty?: unknown } | null;
+  try {
+    saved = JSON.parse(raw) as typeof saved;
+  } catch {
+    // The engine's own message ("Expected property name ...") is English only.
+    throw new Error(tr("it is not valid JSON", "不是有效的 JSON", "有効な JSON ではありません"));
+  }
   if (typeof saved !== "object" || saved === null) throw new Error(tr("not a saved diagram", "不是存下來的圖", "保存された図ではありません"));
-  const d = upgradeLabels(parseDiagram(saved.doc));
+  const d = upgradeLabels(readDiagram(saved.doc));
   // Only this editor writes the slot, but an older build, or a hand edit, can leave anything in it.
   const filePath = typeof saved.filePath === "string" ? saved.filePath : null;
   // Older versions opened an example under its own name; an unsaved copy takes the default.
