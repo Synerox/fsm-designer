@@ -36,7 +36,8 @@ function upgradeLabels(d: FsmDiagram): FsmDiagram {
 }
 
 export async function loadText(text: string, path: string | null): Promise<void> {
-  const d = upgradeLabels(parseDiagram(JSON.parse(text)));
+  // A byte order mark (from an editor that writes one) is not JSON; File.text() drops it, so drop it here too.
+  const d = upgradeLabels(parseDiagram(JSON.parse(text.replace(/^\uFEFF/, ""))));
   // A file whose states are all placed (everything the editor saves) opens as
   // it was saved: in the editor text never resizes a state, so its circles and
   // positions are the user's. Files made elsewhere (agents) can come without

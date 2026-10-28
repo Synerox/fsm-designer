@@ -1,6 +1,8 @@
 // Desktop shell for the FSM editor (apps/editor). The editor does all the
 // drawing and exporting; this side only reads and writes files the user picked.
 
+mod files;
+
 use std::fs;
 
 /// A .fsm.json path given on the command line (e.g. opening a file with the app).
@@ -11,7 +13,7 @@ fn launch_file() -> Option<String> {
 
 #[tauri::command]
 fn read_text_file(path: String) -> Result<String, String> {
-    fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))
+    fs::read(&path).map(|b| files::decode_text(&b)).map_err(|e| format!("{path}: {e}"))
 }
 
 #[tauri::command]
