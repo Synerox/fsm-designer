@@ -9,9 +9,24 @@ export const NAME_SIZE = 15;
 export const SMALL_SIZE = 12;
 export const LABEL_SIZE = 13;
 
+// Characters about 1 em wide: CJK (with Chinese/Japanese punctuation), kana,
+// Hangul, fullwidth forms (the （，）：１ that Chinese and Japanese input
+// methods type) and symbols that usually show as emoji.
+const WIDE = /[\u1100-\u115F\u2600-\u27BF\u2E80-\u9FFF\uA000-\uA4CF\uA960-\uA97F\uAC00-\uD7AF\uF900-\uFAFF\uFE30-\uFE4F\uFF01-\uFF60\uFFE0-\uFFE6\u{20000}-\u{3FFFD}]/u;
+// Emoji pictographs, drawn a little wider than 1 em.
+const EMOJI = /[\u{1F000}-\u{1FAFF}]/u;
+// Combining marks, zero-width spaces and joiners, variation selectors, skin
+// tones and tag characters change the glyph before them and add no width.
+const ZERO = /[\u0300-\u036F\u200B-\u200F\u2060\u20D0-\u20FF\uFE00-\uFE0F\u{1F3FB}-\u{1F3FF}\u{E0000}-\u{E007F}]/u;
+
 export function textWidth(s: string, size: number, bold = false): number {
-  let w = 0;
-  for (const ch of s) w += /[A-Z0-9_=]/.test(ch) ? 0.68 : /[il!.,:;'|1 ]/.test(ch) ? 0.32 : /[　-鿿]/.test(ch) ? 1 : 0.56;
+  let w = 0, joined = false;
+  for (const ch of s) {
+    if (ch < "\u0300") w += /[A-Z0-9_=]/.test(ch) ? 0.68 : /[il!.,:;'|1 ]/.test(ch) ? 0.32 : 0.56;
+    // A character after a zero-width joiner merges into one emoji with the one before it.
+    else if (!joined && !ZERO.test(ch)) w += EMOJI.test(ch) ? 1.25 : WIDE.test(ch) ? 1 : 0.56;
+    joined = ch === "\u200D";
+  }
   return w * size * (bold ? 1.06 : 1);
 }
 
