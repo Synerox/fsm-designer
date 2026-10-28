@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import type { MouseEvent as RMouseEvent } from "react";
+import type { MouseEvent as RMouseEvent, RefObject } from "react";
 import { expandShortcut, planDiagram } from "@fsm/core";
 import { Canvas, zoomAround } from "./Canvas.tsx";
 import { fitView } from "./geometry.ts";
@@ -113,11 +113,12 @@ export function App() {
       (next() ?? document.querySelector<SVGSVGElement>("[data-testid=canvas]"))?.focus();
     });
   };
+  const undoButton = useRef<HTMLButtonElement>(null);
+  const redoButton = useRef<HTMLButtonElement>(null);
   /** Undo or Redo, then (if that used it up) focus the other one while it can still be pressed. */
-  const undoRedo = (step: () => void) => (e: RMouseEvent<HTMLButtonElement>) => {
-    const other = (e.currentTarget.nextElementSibling ?? e.currentTarget.previousElementSibling) as HTMLButtonElement | null;
+  const undoRedo = (step: () => void, other: RefObject<HTMLButtonElement | null>) => (e: RMouseEvent<HTMLButtonElement>) => {
     step();
-    handFocus(e, () => (other && !other.disabled ? other : null));
+    handFocus(e, () => (other.current && !other.current.disabled ? other.current : null));
   };
 
   const run = (fn: () => Promise<void> | void) => () => {
@@ -167,11 +168,24 @@ export function App() {
         e.preventDefault();
         // A field that keeps its value only on blur (the diagram's name) must
         // be committed first, or the file gets the old value and the typed one
-        // is lost with no unsaved marker. Focus goes back to it if it is still there.
+        // is lost with no unsaved marker. Focus and caret then go back to the
+        // field; the name input is keyed by the name, so committing a new one
+        // remounts it once React updates, and the new input is found by its testid.
         const el = document.activeElement;
         if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+          const { selectionStart: from, selectionEnd: to } = el;
+          const refocus = (f: HTMLInputElement | HTMLTextAreaElement) => {
+            f.focus();
+            try { f.setSelectionRange(from, to); } catch { /* number inputs have no caret */ }
+          };
           el.blur();
-          if (el.isConnected) el.focus();
+          if (el.isConnected) refocus(el);
+          const id = el.dataset.testid;
+          if (id) requestAnimationFrame(() => {
+            if (el.isConnected || document.activeElement !== document.body) return;
+            const again = document.querySelector(`[data-testid="${id}"]`);
+            if (again instanceof HTMLInputElement || again instanceof HTMLTextAreaElement) refocus(again);
+          });
         }
         run(() => saveDoc(e.shiftKey))();
         return;
@@ -329,8 +343,8 @@ export function App() {
         </div>
         <span className="sep" />
         <nav className="group" aria-label={tr("Edit", "編輯")}>
-          <button className="ghost with-icon" onClick={undoRedo(undo)} disabled={!canUndo} title={`${MOD}+Z`}>{tr("Undo", "復原")}<Icon d={UNDO} /></button>
-          <button className="ghost with-icon" onClick={undoRedo(redo)} disabled={!canRedo} title={`${MOD}+Shift+Z`}>{tr("Redo", "重做")}<Icon d={REDO} /></button>
+          <button ref={undoButton} className="ghost with-icon" onClick={undoRedo(undo, redoButton)} disabled={!canUndo} title={`${MOD}+Z`}>{tr("Undo", "復原")}<Icon d={UNDO} /></button>
+          <button ref={redoButton} className="ghost with-icon" onClick={undoRedo(redo, undoButton)} disabled={!canRedo} title={`${MOD}+Shift+Z`}>{tr("Redo", "重做")}<Icon d={REDO} /></button>
         </nav>
         <span className="file" title={filePath ?? undefined}>{dirty && <span className="dot" title={tr("Unsaved changes", "尚未儲存")} />}{filePath ? baseName(filePath) : tr("Untitled", "未命名")}</span>
         <Menu

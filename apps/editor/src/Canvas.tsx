@@ -46,7 +46,6 @@ export interface GridOptions {
   snap: boolean;
 }
 
-
 /** Zoom by `factor` keeping screen point (mx, my) still. */
 export function zoomAround(v: View, factor: number, mx: number, my: number): View {
   const k = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.k * factor));
