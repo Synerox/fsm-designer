@@ -1,7 +1,7 @@
 // File commands: autosave, opening files, auto layout.
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
-import { autoLayout } from "@fsm/core";
+import { autoLayout, renderSvg } from "@fsm/core";
 import { importVerilogText, loadText, restoreSession, serialize, startAutosave, tidyUp } from "../src/actions.ts";
 import { createState, createTransition, drawOptions, newDiagram, setInitial, useEditor } from "../src/store.ts";
 
@@ -90,6 +90,21 @@ test("a file without coordinates still gets circles that fit its names, and a la
   const st = useEditor.getState().doc.states;
   assert.ok(st.every((s) => s.radius !== undefined && s.radius > 30), "circles grow to fit the long name");
   assert.ok(st.every((s) => s.x !== undefined && s.y !== undefined));
+});
+
+test("a hand-edited file with a null or NaN coordinate opens with every state placed", async () => {
+  // JSON has no NaN; a script writing one gives null. Drawing refuses both, so
+  // opening must place such a state instead of handing it to the canvas.
+  const text = JSON.stringify({ name: "m", states: [
+    { id: "s0", name: "A", x: 100, y: 100 },
+    { id: "s1", name: "B", x: 300, y: 100 },
+    { id: "s2", name: "C", x: null, y: 200, radius: 0 },
+  ], transitions: [{ id: "t0", from: "s0", to: "s2", condition: "" }] });
+  await loadText(text, "hand.fsm.json");
+  const st = useEditor.getState().doc.states;
+  assert.ok(st.every((s) => Number.isFinite(s.x) && Number.isFinite(s.y)), JSON.stringify(st));
+  assert.deepEqual(st.slice(0, 2).map((s) => [s.x, s.y]), [[100, 100], [300, 100]], "placed states stay where they were");
+  assert.ok(renderSvg(useEditor.getState().doc).includes("<svg"), "the canvas can draw it");
 });
 
 test("Auto Layout applies the start-arrow side the layout chose", async () => {
