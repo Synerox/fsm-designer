@@ -1,5 +1,6 @@
-// Automatic layout: one rule for every diagram, chosen by the graph's shape,
-// never by how many states it has.
+// Automatic layout: one rule for every diagram, chosen by the graph's shape.
+// Size counts only where time does: more than 16 states get one spacing,
+// more than 64 lines (a dense drawing) fewer finished candidates.
 //
 // 1. Analysis. Islands (states not linked to the rest) are laid out on
 //    their own and packed side by side, the reset state's island first.
@@ -11,8 +12,10 @@
 //      reset state in the left column, states moved between cells to reduce
 //      crossings, lines through states, diagonal and long lines (simulated
 //      annealing on a cost kept up to date move by move, single states and
-//      whole rows or columns at a time; of a grid and the same grid turned
-//      over its diagonal, the one whose flow leaves the reset state to the right);
+//      whole rows or columns at a time, then settled move by move, near
+//      cells only when trying every cell would cost more than the annealing;
+//      of a grid and the same grid turned over its diagonal, the one whose
+//      flow leaves the reset state to the right);
 //    - layers, left to right and top to bottom (Sugiyama style): loops set
 //      aside, each state one layer past its furthest predecessor, the reset
 //      state in the first layer, each layer ordered to reduce crossings and
@@ -32,13 +35,18 @@
 //      as one already made from another hub, the states only named
 //      differently, is made once.
 //    Each at two line lengths: room for the spacing, and room for the
-//    widest label.
+//    widest label (at most 320 px; the same length when labels are short;
+//    only the second above 16 states).
 // 3. Local shapes. A triangle of linked states (each candidate also tried
 //    with only those where two states link both ways) becomes equilateral
 //    (the state at the right angle moves to the apex over the level side);
 //    two sharing a side become a level diamond. In a ring, rows stay level:
 //    the triangle's states slide sideways instead.
-// 4. Finishing. Centres on a 20 px grid; a line that would cross a state
+// 4. Finishing, each candidate from scratch (arcs, loop sides and the start
+//    arrow's side an earlier layout or the user left are dropped; the arrow
+//    comes from the left unless blocked). A dense drawing finishes only the 8
+//    candidates with the fewest crossings and lines through states when
+//    drawn straight. Centres on a 20 px grid; a line that would cross a state
 //    becomes an arc (back edges bow below a row, forward jumps above),
 //    opposite edges become two parallel straight lines; a line that crosses
 //    another bows round it when some arc clears every state and crosses
@@ -60,13 +68,15 @@
 //    the reset state further to the right wins (a loop clockwise from the
 //    top left).
 // 6. Repair. Candidates that still have crossings, overlaps or lines
-//    through states, and would lead with those gone (at most five), are tried
-//    spread out a little; whatever cannot be fixed is reported in
-//    TidyResult.issues.
-// 7. Polish. In the best two, if within half again of the best score, a
-//    state with a long line tries the three free grid spots nearest its
-//    neighbours and moves to the one that improves the score most (the
-//    reset state never moves right of another).
+//    through states, and would lead with those gone (at most five, two when
+//    dense), are tried spread out a little and scored in their spread step;
+//    whatever cannot be fixed is reported in TidyResult.issues.
+// 7. Polish. In the two best that repair would take, then the best two if
+//    within half again of the best score, a state with a long line tries the
+//    three free grid spots nearest its neighbours and moves to the one that
+//    improves the score most (the reset state never moves right of another).
+//    One budget of tries for all, min(48, 40000 / lines²). Repair and polish
+//    add a drawing only if no candidate has its positions.
 
 import { FsmError } from "./model.ts";
 import type { FsmDiagram } from "./model.ts";
@@ -91,7 +101,7 @@ interface Graph {
 
 export interface TidyOptions {
   spacing?: number; // px between state edges, default 90
-  margin?: number; // px around the drawing, default 60
+  margin?: number; // default 60: the drawing's bounds start at margin - 20 (at least 20), on the grid
   /** How the diagram will be drawn (e.g. labels hidden), so spacing and scoring match. */
   plan?: PlanOptions;
 }
@@ -235,6 +245,8 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
   }));
   // Arrangements that land every state in the same place are drawn and scored once (the first name is kept).
   const seen = new Set<string>();
+  // Placed, not yet finished (see below).
+  const drafts: Array<Omit<Tried, "score">> = [];
   // asIs: drawn exactly as given (hub shapes), not reshaped round its triangles.
   const consider = (arrangement: string, given: Pos, sx: number, sy: number, keepRows = false, asIs = false) => {
     for (const tris of asIs ? [[]] : [triangles, mutual]) {
@@ -248,7 +260,7 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
         s.x = Math.round(p.x / GRID) * GRID;
         s.y = Math.round(p.y / GRID) * GRID;
       }
-      tried.push({ score: finish(c, sx), arrangement, d: c, sx, sy });
+      drafts.push({ arrangement, d: c, sx, sy });
     }
   };
   // Best first. Equal scores (but for rounding): the drawing whose flow leaves
@@ -288,6 +300,20 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
       for (const [name, pos] of hubs(g, sx, sy, R, drawn)) consider(name, pos, sx, sy, false, true);
     }
   }
+  // Finishing (routing, loops, labels, the score) costs about lines² per
+  // candidate. A drawing of more than DENSE lines (random_32 has 86,
+  // chain_32 32, cle_locked 20) finishes only the 8 candidates with the
+  // fewest crossings and lines through states when drawn straight: there
+  // arcs cannot untangle much, so the straight count ranks them well
+  // enough, and the others would cost seconds only to lose.
+  const lines = edgePairs(g);
+  const dense = lines.length > DENSE;
+  let keep = new Set(drafts);
+  if (dense && drafts.length > 8) {
+    const cost = new Map(drafts.map((t) => [t, straightCost(t.d, lines)]));
+    keep = new Set([...drafts].sort((a, b) => cost.get(a)! - cost.get(b)!).slice(0, 8));
+  }
+  for (const t of drafts) if (keep.has(t)) tried.push({ ...t, score: finish(t.d, t.sx) });
   tried.sort(byScore);
 
   // Repair and polish add a drawing only if no candidate has its positions already
@@ -298,10 +324,10 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
 
   // Repair: spread the leading candidates out a little where that clears crossings, overlaps or lines through states.
   const bad = (sc: LayoutScore) => sc.crossings + sc.throughStates + sc.labelOverlaps + sc.tooClose;
-  // Only candidates that would lead with their problems gone are worth it (at most five).
+  // Only candidates that would lead with their problems gone are worth it (at most five, two for a dense drawing).
   const must = (sc: LayoutScore) => WEIGHTS.crossings * sc.crossings + WEIGHTS.throughStates * sc.throughStates + WEIGHTS.labelOverlaps * sc.labelOverlaps + WEIGHTS.tooClose * sc.tooClose;
   const lead = tried[0].score.total;
-  for (const cand of tried.filter((t) => bad(t.score) && t.score.total - must(t.score) < lead + 10).slice(0, 5)) {
+  for (const cand of tried.filter((t) => bad(t.score) && t.score.total - must(t.score) < lead + 10).slice(0, dense ? 2 : 5)) {
     let cur = cand;
     for (const k of [1.25, 1.5]) {
       if (!bad(cur.score)) break;
@@ -901,6 +927,9 @@ function edgePairs(g: Graph): Array<[string, string]> {
   return out;
 }
 
+/** More lines than this make a drawing dense: fewer candidates are finished and repaired (see layoutIsland). */
+const DENSE = 64;
+
 /** A cost rounded to a multiple of 2^-20, so sums of costs are exact whatever order they are added in. */
 const exact = (v: number) => Math.round(v * 1048576) / 1048576;
 
@@ -1139,11 +1168,16 @@ function improveGrid(g: Graph, starts: Array<[string[], boolean]>, cols: number,
     return ms.length > 0;
   };
   // Settle: take every move that helps until none does (a few sweeps at most).
+  // A sweep tries every state in every cell. When that costs more than the
+  // annealing (a big, dense machine: many states, few steps each), only the
+  // cells within `near` rows and columns of the state are tried.
+  const near = n * C <= iters ? Infinity : Math.max(1, Math.floor((Math.sqrt(iters / n) - 1) / 2));
   const settle = (cur: number) => {
     for (let sweep = 0; sweep < 4 && (sweep === 0 || (sweep + 1) * n * C <= iters); sweep++) { // costing no more than the annealing, after the first
       const before = cur;
       for (let a = 0; a < n; a++) for (let k = 0; k < C; k++) {
         if (k === gc.slot[a]) continue;
+        if (near < Infinity && (Math.abs((k % cols) - (gc.slot[a] % cols)) > near || Math.abs(Math.floor(k / cols) - Math.floor(gc.slot[a] / cols)) > near)) continue;
         const c = single(a, k);
         if (c < cur) cur = c; else gc.undo();
       }
@@ -1354,7 +1388,7 @@ function clearStartArrow(d: FsmDiagram, L: number, lines: Pt[][] = []) {
   if (!init) return;
   const r = stateRadius(d, init);
   const circles = d.states.map((s) => ({ x: s.x!, y: s.y!, r: stateRadius(d, s) }));
-  lines = lines.filter((pts) => pts.some((p) => Math.hypot(p.x - init.x!, p.y - init.y!) < r + 60)); // only lines near the state can be in the way
+  lines = lines.filter((pts) => pts.some((p) => (p.x - init.x!) ** 2 + (p.y - init.y!) ** 2 < (r + 60) ** 2)); // only lines near the state can be in the way
   const memo = new Map<number, number>();
   const room = (a: number) => memo.get(a) ?? memo.set(a, roomAt(a)).get(a)!;
   const roomAt = (a: number) => {
@@ -1367,7 +1401,7 @@ function clearStartArrow(d: FsmDiagram, L: number, lines: Pt[][] = []) {
       if (along > 0 && across < r + stateRadius(d, s) + 10) near = Math.min(near, along);
     }
     const p = { x: init.x! + ux * (r + 1), y: init.y! + uy * (r + 1) }, q = { x: init.x! + ux * (r + 40), y: init.y! + uy * (r + 40) };
-    const cut = lines.some((pts) => crossCount([p, q], pts, circles) > 0 || pts.some((o) => Math.hypot(o.x - init.x!, o.y - init.y!) > r + 4 && segDist(o, p, q) < 8));
+    const cut = lines.some((pts) => crossCount([p, q], pts, circles) > 0 || pts.some((o) => (o.x - init.x!) ** 2 + (o.y - init.y!) ** 2 > (r + 4) ** 2 && segDist(o, p, q) < 8));
     return cut ? 0 : near;
   };
   const current = init.initialAngle ?? Math.PI;
@@ -1414,7 +1448,7 @@ function routeEdges(d: FsmDiagram): Pt[][] {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const p of pts) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
     // A state outside the line's box (by its radius) cannot be on it.
-    return circles.every((s) => s.id === a || s.id === b || s.x < x0 - s.r - 12 || s.x > x1 + s.r + 12 || s.y < y0 - s.r - 12 || s.y > y1 + s.r + 12 || pts.every((p) => Math.hypot(p.x - s.x, p.y - s.y) > s.r + 12));
+    return circles.every((s) => s.id === a || s.id === b || s.x < x0 - s.r - 12 || s.x > x1 + s.r + 12 || s.y < y0 - s.r - 12 || s.y > y1 + s.r + 12 || pts.every((p) => (p.x - s.x) ** 2 + (p.y - s.y) ** 2 > (s.r + 12) ** 2));
   };
   const lines = new Map<string, Pt[]>();
   const blocked: typeof groups = [];
@@ -1579,17 +1613,33 @@ function placeLoops(d: FsmDiagram) {
       // Ties: up in the top half, down in the bottom half, so a row's loops match.
       if (k === 0) sc += s.y < cy - 20 ? 0.15 : 0.05;
       if (k === 4 && s.y > cy + 20) sc += 0.15;
-      for (const [oid, o] of at) if (oid !== id && Math.hypot(c.x - o.x, c.y - o.y) < rl + o.r + 16) sc -= 5;
-      for (const l of loops) if (Math.hypot(c.x - l.x, c.y - l.y) < 2 * rl + 30) sc -= 5;
+      for (const [oid, o] of at) if (oid !== id && (c.x - o.x) ** 2 + (c.y - o.y) ** 2 < (rl + o.r + 16) ** 2) sc -= 5;
+      for (const l of loops) if ((c.x - l.x) ** 2 + (c.y - l.y) ** 2 < (2 * rl + 30) ** 2) sc -= 5;
       // Never on the start arrow (its direction is only one of the busy ones above).
       if (arrow && segDist(c, arrow[0], arrow[1]) < rl + 8) sc -= 5;
       for (const l of near) {
         const m = rl + 8 + l.pad;
-        if (c.x + m > l.x0 && c.x - m < l.x1 && c.y + m > l.y0 && c.y - m < l.y1 && l.pts.some((p) => Math.hypot(p.x - c.x, p.y - c.y) < m)) sc -= 1.5;
+        if (c.x + m > l.x0 && c.x - m < l.x1 && c.y + m > l.y0 && c.y - m < l.y1 && l.pts.some((p) => (p.x - c.x) ** 2 + (p.y - c.y) ** 2 < m * m)) sc -= 1.5;
       }
       if (sc > bestScore + 1e-9) { bestScore = sc; best = ang; }
     }
     loops.push({ x: s.x + 1.5 * s.r * Math.cos(best), y: s.y + 1.5 * s.r * Math.sin(best) });
     for (const t of ts) t.loopAngle = best;
   }
+}
+
+/** Crossings and lines through states with every line drawn straight: what finishing a dense drawing mostly has to live with. */
+function straightCost(d: FsmDiagram, lines: Array<[string, string]>): number {
+  const at = new Map(d.states.map((s) => [s.id, { x: s.x!, y: s.y!, r: stateRadius(d, s) }]));
+  const seg = lines.map(([a, b]) => [a, b, at.get(a)!, at.get(b)!] as const);
+  let n = 0;
+  for (let i = 0; i < seg.length; i++) {
+    const [a, b, p, q] = seg[i];
+    for (let j = i + 1; j < seg.length; j++) {
+      const [c, e, u, v] = seg[j];
+      if (a !== c && a !== e && b !== c && b !== e) n += cross(p.x, p.y, q.x, q.y, u.x, u.y, v.x, v.y);
+    }
+    for (const [id, o] of at) if (id !== a && id !== b && segDist(o, p, q) < o.r + 2) n++;
+  }
+  return n;
 }

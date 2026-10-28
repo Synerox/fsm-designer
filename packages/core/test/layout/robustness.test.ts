@@ -129,3 +129,16 @@ test("no candidate draws two states on top of each other (triangle clusters shru
   for (const [name, d] of cases)
     for (const c of layoutCandidates(d, { plan: { labels: "none" } })) assert.deepEqual(overlapping(c.diagram), [], `${name} ${c.arrangement}`);
 });
+
+test("a dense machine finishes only its 8 straightest candidates and spreads out at most two; one of 32 lines, every candidate", () => {
+  // random_32: 86 lines between states. Finishing all of its 20 arrangements took most of its 3-8 s.
+  const dense = layoutCandidates(importVerilog(fixture("random_32.v")).diagram);
+  const spread = dense.filter((c) => c.arrangement.endsWith("(spread)")).length;
+  assert.ok(dense.length <= 8 + 2 + 4, `${dense.length} candidates: ${dense.map((c) => c.arrangement).join(", ")}`);
+  assert.ok(spread <= 2, `${spread} spread copies`);
+  assert.equal(dense[0].score.tooClose, 0);
+  // chain_32: 32 lines, not dense: every arrangement is finished, as for any example machine.
+  const chain = layoutCandidates(importVerilog(fixture("chain_32.v")).diagram);
+  assert.ok(chain.length >= 10, `${chain.length} candidates`);
+  assert.equal(chain[0].score.crossings, 0);
+});

@@ -87,7 +87,7 @@ export function score(d: FsmDiagram, plan: DiagramPlan = planDiagram(d), step = 
   for (const e of edges) {
     const ends = new Set([e.transitions[0].from, e.transitions[0].to]);
     const b = box(e.points); // a state outside the line's box (by its radius) is not on it
-    for (const [id, c] of at) if (!ends.has(id) && c.x > b.x0 - c.r - 2 && c.x < b.x1 + c.r + 2 && c.y > b.y0 - c.r - 2 && c.y < b.y1 + c.r + 2 && e.points.some((p) => Math.hypot(p.x - c.x, p.y - c.y) < c.r + 2)) s.throughStates++;
+    for (const [id, c] of at) if (!ends.has(id) && c.x > b.x0 - c.r - 2 && c.x < b.x1 + c.r + 2 && c.y > b.y0 - c.r - 2 && c.y < b.y1 + c.r + 2 && e.points.some((p) => (p.x - c.x) ** 2 + (p.y - c.y) ** 2 < (c.r + 2) ** 2)) s.throughStates++;
   }
   const labels = edges.filter((e) => e.label);
   for (const [i, e] of labels.entries()) {
@@ -109,7 +109,7 @@ export function score(d: FsmDiagram, plan: DiagramPlan = planDiagram(d), step = 
     }
   }
   for (let i = 0; i < st.length; i++)
-    for (let j = i + 1; j < st.length; j++) if (Math.hypot(st[i].x - st[j].x, st[i].y - st[j].y) < st[i].r + st[j].r + 40) s.tooClose++;
+    for (let j = i + 1; j < st.length; j++) if ((st[i].x - st[j].x) ** 2 + (st[i].y - st[j].y) ** 2 < (st[i].r + st[j].r + 40) ** 2) s.tooClose++;
   // Main flow: whichever of left-to-right and top-to-bottom fewer lines go against.
   let left = 0, up = 0;
   for (const e of edges) {
@@ -214,13 +214,20 @@ export function crossCount(p: Pt[], q: Pt[], states: Iterable<Circle>): number {
   const sp = bp.straight ? [p[0], p[p.length - 1]] : p, sq = bq.straight ? [q[0], q[q.length - 1]] : q;
   let n = 0;
   let circles: Circle[] | undefined;
-  for (let i = 1; i < sp.length; i++)
+  for (let i = 1; i < sp.length; i++) {
+    // Only pieces whose boxes meet can cross (most pairs of pieces on two arcs that pass near each other do not).
+    const a = sp[i - 1], b = sp[i];
+    const x0 = Math.min(a.x, b.x), x1 = Math.max(a.x, b.x), y0 = Math.min(a.y, b.y), y1 = Math.max(a.y, b.y);
+    if (x1 < bq.x0 || x0 > bq.x1 || y1 < bq.y0 || y0 > bq.y1) continue;
     for (let j = 1; j < sq.length; j++) {
-      const x = intersect(sp[i - 1], sp[i], sq[j - 1], sq[j]);
+      const c = sq[j - 1], e = sq[j];
+      if ((c.x < x0 && e.x < x0) || (c.x > x1 && e.x > x1) || (c.y < y0 && e.y < y0) || (c.y > y1 && e.y > y1)) continue;
+      const x = intersect(a, b, c, e);
       if (!x) continue;
       circles ??= Array.isArray(states) ? states : [...states];
-      if (circles.every((s) => Math.hypot(x.x - s.x, x.y - s.y) > s.r + 6)) n++;
+      if (circles.every((s) => (x.x - s.x) ** 2 + (x.y - s.y) ** 2 > (s.r + 6) ** 2)) n++;
     }
+  }
   return n;
 }
 
