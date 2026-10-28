@@ -1,8 +1,9 @@
 // File commands: autosave, opening files, auto layout.
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
-import { importVerilogText, loadText, serialize, startAutosave } from "../src/actions.ts";
-import { createState, newDiagram, useEditor } from "../src/store.ts";
+import { autoLayout } from "@fsm/core";
+import { importVerilogText, loadText, serialize, startAutosave, tidyUp } from "../src/actions.ts";
+import { createState, createTransition, drawOptions, newDiagram, setInitial, useEditor } from "../src/store.ts";
 
 // Node has no localStorage; a Map stands in for the browser's.
 const storage = new Map<string, string>();
@@ -85,4 +86,22 @@ test("a file without coordinates still gets circles that fit its names, and a la
   const st = useEditor.getState().doc.states;
   assert.ok(st.every((s) => s.radius !== undefined && s.radius > 30), "circles grow to fit the long name");
   assert.ok(st.every((s) => s.x !== undefined && s.y !== undefined));
+});
+
+test("Auto Layout applies the start-arrow side the layout chose", async () => {
+  // The user turned the start arrow to the right, where the line to S1 will run.
+  const d = newDiagram();
+  const a = createState(d, 100, 100), b = createState(d, 400, 300);
+  createTransition(d, a.id, b.id);
+  createTransition(d, b.id, a.id);
+  setInitial(d, a.id, 0);
+  useEditor.getState().load(d, null);
+  const expected = structuredClone(d);
+  await autoLayout(expected, { draw: drawOptions() });
+  assert.notEqual(expected.states[0].initialAngle, 0, "the layout moves the arrow off the line");
+  const { moved } = await tidyUp();
+  assert.ok(moved);
+  const got = useEditor.getState().doc;
+  assert.deepEqual(got.states.map((s) => [s.x, s.y, s.initialAngle]), expected.states.map((s) => [s.x, s.y, s.initialAngle]));
+  assert.equal((await tidyUp()).moved, false, "a second run changes nothing");
 });

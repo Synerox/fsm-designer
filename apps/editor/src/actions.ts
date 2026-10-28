@@ -90,11 +90,17 @@ export async function tidyUp(): Promise<{ moved: boolean; issues: LayoutIssue[] 
   const issues = (await autoLayout(d, { draw: drawOptions() }))?.issues ?? [];
   const pos = new Map(d.states.map((s) => [s.id, s]));
   const tr = new Map(d.transitions.map((t) => [t.id, t]));
-  const same = doc.states.every((s) => s.x === pos.get(s.id)!.x && s.y === pos.get(s.id)!.y)
+  // The layout also picks the start arrow's side (away from the lines), so it comes back too.
+  const same = doc.states.every((s) => s.x === pos.get(s.id)!.x && s.y === pos.get(s.id)!.y && s.initialAngle === pos.get(s.id)!.initialAngle)
     && doc.transitions.every((t) => t.curve === tr.get(t.id)!.curve && t.loopAngle === tr.get(t.id)!.loopAngle);
   if (same) return { moved: false, issues };
   useEditor.getState().edit((draft) => {
-    for (const s of draft.states) { s.x = pos.get(s.id)!.x; s.y = pos.get(s.id)!.y; }
+    for (const s of draft.states) {
+      const u = pos.get(s.id)!;
+      s.x = u.x; s.y = u.y;
+      delete s.initialAngle;
+      if (u.initialAngle !== undefined) s.initialAngle = u.initialAngle;
+    }
     for (const t of draft.transitions) {
       const u = tr.get(t.id)!;
       delete t.curve; delete t.loopAngle;
