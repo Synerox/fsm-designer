@@ -46,11 +46,14 @@ export function App() {
   const [report, setReport] = useState<{ result: ImportResult; seq: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // A notice stays while the pointer is on it, and longer messages stay longer.
+  const [holdNotice, setHoldNotice] = useState(false);
   useEffect(() => {
-    if (!notice) return;
-    const t = setTimeout(() => setNotice(null), 2500);
+    if (!notice) { setHoldNotice(false); return; }
+    if (holdNotice) return;
+    const t = setTimeout(() => setNotice(null), 2500 + 50 * notice.length);
     return () => clearTimeout(t);
-  }, [notice]);
+  }, [notice, holdNotice]);
   const filePath = useEditor((s) => s.filePath);
   const dirty = useEditor((s) => s.dirty);
   const canUndo = useEditor((s) => s.past.length > 0);
@@ -290,12 +293,20 @@ export function App() {
           }}
         />
       )}
-      {error && (
-        <div className="toast" onClick={() => setError(null)}>{error}</div>
-      )}
-      {notice && (
-        <div className="toast ok" onClick={() => setNotice(null)}>{notice}</div>
-      )}
+      {/* Always in the page so screen readers announce what appears in them. */}
+      <div role="alert">
+        {error && (
+          <div className="toast" onClick={() => setError(null)}>
+            {error}
+            <button className="toast-close" onClick={() => setError(null)} aria-label={tr("Close", "關閉")}>×</button>
+          </div>
+        )}
+      </div>
+      <div role="status">
+        {notice && (
+          <div className="toast ok" onClick={() => setNotice(null)} onPointerEnter={() => setHoldNotice(true)} onPointerLeave={() => setHoldNotice(false)}>{notice}</div>
+        )}
+      </div>
     </div>
   );
 }
