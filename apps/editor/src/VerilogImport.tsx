@@ -71,8 +71,13 @@ export function VerilogImportDialog({ onClose, onImported }: { onClose: () => vo
   useEffect(() => () => saveDraft(latest.current), []);
 
   const openFile = async () => {
-    const f = await openTextFile([VERILOG_FILTER]);
-    if (f) { setCode(f.text); setError(null); }
+    try {
+      const f = await openTextFile([VERILOG_FILTER]);
+      if (f) { setCode(f.text); setError(null); }
+    } catch (e) {
+      // A read error (permission, not UTF-8) already names the file.
+      setError(e instanceof Error ? e.message : String(e));
+    }
   };
   const run = async () => {
     setBusy(true);

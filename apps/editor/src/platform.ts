@@ -25,6 +25,37 @@ export function baseName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }
 
+/**
+ * A failed open or save in the UI language: which file, which of the two, and
+ * why. The desktop shell rejects with "<path>: <io error>" in English.
+ */
+export function fileError(action: "open" | "save", path: string, e: unknown): Error {
+  const raw = e instanceof Error ? e.message : String(e);
+  const why = reasonText(raw.startsWith(`${path}: `) ? raw.slice(path.length + 2) : raw);
+  const name = baseName(path);
+  return new Error(action === "open"
+    ? tr(`Could not open ${name}: ${why}`, `無法開啟 ${name}：${why}`, `${name} を開けませんでした：${why}`)
+    : tr(`Could not save ${name}: ${why}`, `無法儲存 ${name}：${why}`, `${name} を保存できませんでした：${why}`));
+}
+
+/** The io errors people meet most, in words; anything else as the OS said it. */
+function reasonText(msg: string): string {
+  // Rust's io::Error text ends in "(os error N)": 13 is EACCES on Unix, 5 is
+  // ERROR_ACCESS_DENIED on Windows, 2 is "not found" on both.
+  if (/\(os error (13|5)\)$/.test(msg)) return tr("permission denied", "沒有權限", "アクセス権がありません");
+  if (/\(os error 2\)$/.test(msg)) return tr("the file does not exist", "檔案不存在", "ファイルが存在しません");
+  if (/did not contain valid UTF-8/.test(msg)) return tr("it is not UTF-8 text", "不是 UTF-8 文字檔", "UTF-8 のテキストではありません");
+  return msg;
+}
+
+async function readTextFile(path: string): Promise<string> {
+  try {
+    return await invoke<string>("read_text_file", { path });
+  } catch (e) {
+    throw fileError("open", path, e);
+  }
+}
+
 // Desktop file I/O goes through the shell's own commands (apps/desktop/src-tauri/src/lib.rs).
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const core = await import("@tauri-apps/api/core");
@@ -36,7 +67,7 @@ export async function openTextFile(filters: FileFilter[]): Promise<OpenedFile | 
     const { open } = await import("@tauri-apps/plugin-dialog");
     const path = await open({ multiple: false, directory: false, filters });
     if (typeof path !== "string") return null;
-    return { path, text: await invoke<string>("read_text_file", { path }) };
+    return { path, text: await readTextFile(path) };
   }
   return new Promise((resolve) => {
     const input = document.createElement("input");
@@ -60,7 +91,7 @@ export async function launchFile(): Promise<OpenedFile | null> {
   if (!isDesktop) return null;
   const path = await invoke<string | null>("launch_file");
   if (!path) return null;
-  return { path, text: await invoke<string>("read_text_file", { path }) };
+  return { path, text: await readTextFile(path) };
 }
 
 /**
@@ -76,7 +107,11 @@ export async function saveFile(data: string | Uint8Array, opts: { path?: string 
       if (!path) return null;
     }
     const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
-    await invoke("write_file", { path, contents: Array.from(bytes) });
+    try {
+      await invoke("write_file", { path, contents: Array.from(bytes) });
+    } catch (e) {
+      throw fileError("save", path, e);
+    }
     return path;
   }
   const name = opts.path ? baseName(opts.path) : opts.suggestedName;

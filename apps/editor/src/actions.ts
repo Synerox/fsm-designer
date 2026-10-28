@@ -2,7 +2,7 @@
 
 import { autoLayout, ensureLayout, fitStateSizes, importVerilogLaidOut, parseDiagram, prettyText, renderLatex, renderSvg, stateRadius } from "@fsm/core";
 import type { FsmDiagram, ImportOptions, ImportResult, LayoutIssue } from "@fsm/core";
-import { FSM_FILTER, baseName, confirmDialog, launchFile, openTextFile, saveFile } from "./platform.ts";
+import { FSM_FILTER, baseName, confirmDialog, fileError, launchFile, openTextFile, saveFile } from "./platform.ts";
 import { DEFAULT_NAME, drawOptions, newDiagram, useEditor } from "./store.ts";
 
 import { tr } from "./i18n.ts";
@@ -36,7 +36,13 @@ function upgradeLabels(d: FsmDiagram): FsmDiagram {
 }
 
 export async function loadText(text: string, path: string | null): Promise<void> {
-  const d = upgradeLabels(parseDiagram(JSON.parse(text)));
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    throw new Error(tr("it is not a valid JSON file", "不是有效的 JSON 檔案", "有効な JSON ファイルではありません"));
+  }
+  const d = upgradeLabels(parseDiagram(json));
   // A file whose states are all placed (everything the editor saves) opens as
   // it was saved: in the editor text never resizes a state, so its circles and
   // positions are the user's. Files made elsewhere (agents) can come without
@@ -67,7 +73,12 @@ export async function newFile(): Promise<void> {
 export async function openFile(): Promise<void> {
   if (!(await confirmDiscard())) return;
   const f = await openTextFile([FSM_FILTER]);
-  if (f) await loadText(f.text, f.path);
+  if (!f) return;
+  try {
+    await loadText(f.text, f.path);
+  } catch (e) {
+    throw fileError("open", f.path, e);
+  }
 }
 
 /**
