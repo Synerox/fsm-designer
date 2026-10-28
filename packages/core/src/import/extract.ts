@@ -387,10 +387,12 @@ function findCandidates(c: Ctx, blocks: Block[]): Candidate[] {
     }
     // Usage: case subject (alone or in a concatenation: case ({state, in})),
     // comparisons with constants, one-hot bit tests (state[IDLE], or st[0]
-    // with a plain index, which counts as a use but not as evidence alone:
-    // any vector is bit-tested that way).
+    // with a plain index). Any vector is bit-tested with plain indices (msb =
+    // data[7]), so those count only on two or more bits of a register whose
+    // values are all one-hot or zero, and never as evidence alone.
     const names = new Set([name, ...(next ? [next] : [])]);
-    let caseUses = 0, compares = 0, bitTests = 0, numericBitTests = 0;
+    let caseUses = 0, compares = 0, bitTests = 0;
+    const numericBits = new Set<string>();
     for (const b of blocks) {
       eachStmt(b.stmt, (x) => {
         if (x.k === "case" && x.subject.k === "id" && names.has(x.subject.name)) {
@@ -406,15 +408,17 @@ function findCandidates(c: Ctx, blocks: Block[]): Candidate[] {
       eachExpr(b.stmt, (e) => subExprs(e, (s) => {
         if (s.k === "bin" && (s.op === "==" || s.op === "!=") && s.a.k === "id" && names.has(s.a.name) && constOf(s.b)) compares++;
         if (s.k === "idx" && s.a.k === "id" && names.has(s.a.name) && paramIndex(s.i, c)) bitTests++;
-        else if (s.k === "idx" && s.a.k === "id" && names.has(s.a.name) && s.i.k === "num" && constOf(s.i)) numericBitTests++;
+        else if (s.k === "idx" && s.a.k === "id" && names.has(s.a.name) && s.i.k === "num" && constOf(s.i)) numericBits.add(s.i.v.toString());
       }));
     }
+    const oneHotValues = [...values].every((k) => { const v = BigInt(k); return (v & (v - 1n)) === 0n; });
+    const numericBitTests = numericBits.size >= 2 && oneHotValues;
     const enumTyped = decl?.enumType !== undefined;
     score = values.size * 2 + caseUses * 3 + compares + bitTests + (STATE_NAME.test(name) ? 3 : 0) + (enumTyped ? 3 : 0) + (next ? 2 : 0);
     if (counter) score -= 20;
     if (decl?.dir === "output") score -= 2;
     const enough = values.size >= 2 || bitTests >= 2 || (enumTyped && caseUses > 0);
-    if (enough && (caseUses > 0 || compares > 0 || bitTests > 0 || numericBitTests > 0)) out.push({ name, next, score, values });
+    if (enough && (caseUses > 0 || compares > 0 || bitTests > 0 || numericBitTests)) out.push({ name, next, score, values });
   }
   return out.sort((a, b) => b.score - a.score);
 }

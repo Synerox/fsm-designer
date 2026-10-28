@@ -364,6 +364,24 @@ endmodule`);
   assert.deepEqual(stateOutputs(t.diagram).RUN, { run: 1 });
 });
 
+test("a data register that is bit-tested with plain indices is not taken for a state machine", () => {
+  const src = `
+module flags(input clk, input rst, input set, input clr, input [7:0] d, output msb, output lsb);
+  reg [7:0] data;
+  always @(posedge clk) if (rst) data <= 8'h00; else if (set) data <= 8'hFF; else if (clr) data <= 8'h00; else data <= d;
+  assign msb = data[7];
+  assign lsb = data[0];
+endmodule
+module cz(input clk, input rst, input a, output y);
+  localparam S0 = 1'b0, S1 = 1'b1;
+  reg state;
+  always @(posedge clk) if (rst) state <= S0; else case (state) S0: if (a) state <= S1; S1: state <= S0; endcase
+  assign y = state == S1;
+endmodule`;
+  assert.deepEqual(listStateMachines(src), [{ module: "cz", stateVar: "state" }]);
+  assert.equal(importVerilog(src).module, "cz");
+});
+
 test("bit selects follow the declared range: [0:2] counts from the MSB, [4:3] starts at bit 3", () => {
   const r = importVerilog(`
 module m(input clk, input rst, input go, output busy);
