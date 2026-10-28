@@ -485,13 +485,23 @@ function findReset(c: Ctx, stateBlocks: Block[], stateVar: string): { reset?: Re
     if (edge && edges.length > 1) {
       reset = { name: lit.name, activeLow: lit.activeLow, async: true };
     } else if (!edge && c.m.decls.get(lit.name)?.dir !== "output") {
-      // Without a reset-like name, only an if that sets the state to a
-      // constant (if (go) state <= S1; else ...) counts as a synchronous
-      // reset: if (en) state <= next; else state <= state; is an enable.
+      // Without a reset-like name, a guess, and said so: only an if that
+      // sets the state to a constant while its else follows a computed next
+      // state (if (go) s <= S1; else s <= n;) counts as a synchronous reset.
+      // if (en) s <= n; else s <= s; is an enable; if (start) s <= RUN; else
+      // if (done) s <= IDLE; is the machine itself; and a declared initial
+      // value (reg s = IDLE) already gives the start state.
       const pctx: EvalCtx = { lookup: (n) => c.params.get(n), width: (n) => c.widths.get(n) };
+      const isConstRhs = (a: { rhs: Expr }) => isConst(simplify(a.rhs, pctx));
       const sets = assignsTo(ifs!.t, stateVar);
-      const setsConst = sets.length > 0 && sets.every((a) => isConst(simplify(a.rhs, pctx)));
-      if (RESET_NAME.test(lit.name) || (setsConst && ifs!.e)) reset = { name: lit.name, activeLow: lit.activeLow, async: false };
+      const setsConst = sets.length > 0 && sets.every(isConstRhs);
+      const elseFollows = !!ifs!.e && assignsTo(ifs!.e, stateVar).some((a) => !isConstRhs(a));
+      const declaredInit = c.m.decls.get(stateVar)?.init !== undefined || c.m.always.some((x) => x.kind === "initial" && assignsTo(x.body, stateVar).length > 0);
+      if (RESET_NAME.test(lit.name)) reset = { name: lit.name, activeLow: lit.activeLow, async: false };
+      else if (setsConst && elseFollows && !declaredInit) {
+        reset = { name: lit.name, activeLow: lit.activeLow, async: false };
+        c.warn(`Taking "${lit.name}" for a synchronous reset because it sets "${stateVar}" to a constant`);
+      }
     }
   }
   const clockEdge = edges.find((e) => e.sig !== reset?.name && e.edge === "posedge") ?? edges.find((e) => e.sig !== reset?.name);

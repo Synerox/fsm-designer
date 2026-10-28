@@ -163,6 +163,33 @@ module g(input clk, input go, input a, output y);
   assign y = s;
 endmodule`);
   assert.deepEqual(g.diagram.reset, { name: "go", activeLow: false, async: false });
+  assert.ok(g.warnings.includes('Taking "go" for a synchronous reset because it sets "s" to a constant'), g.warnings.join("\n"));
+  // The same with a declared initial value: that is the start state, and go stays an input.
+  const gi = importVerilog(`
+module g(input clk, input go, input a, output y);
+  localparam S0 = 0, S1 = 1; reg s = S0, n;
+  always @(posedge clk) if (go) s <= S1; else s <= n;
+  always @* begin n = s; case (s) S0: if (a) n = S1; S1: n = S0; endcase end
+  assign y = s;
+endmodule`);
+  assert.notEqual(gi.diagram.reset.name, "go");
+  assert.ok(gi.diagram.states.find((s) => s.name === "S0")!.isInitial);
+  assert.ok(edges(gi.diagram).includes("S1->S1: go"), edges(gi.diagram).join("\n"));
+  // A one-block machine with no reset whose first if is its own logic, past a counter.
+  const p = importVerilog(`
+module p(input clk, input start, input done, output busy);
+  localparam IDLE = 1'b0, RUN = 1'b1;
+  reg state = IDLE; reg [3:0] cnt;
+  always @(posedge clk) begin
+    cnt <= cnt + 1;
+    if (start) state <= RUN;
+    else if (done) state <= IDLE;
+  end
+  assign busy = state == RUN;
+endmodule`);
+  assert.notEqual(p.diagram.reset.name, "start");
+  assert.ok(p.diagram.states.find((s) => s.name === "IDLE")!.isInitial);
+  assert.deepEqual(edges(p.diagram), ["IDLE->RUN: start", "IDLE->IDLE: !start", "RUN->RUN: start || !done", "RUN->IDLE: !start && done"]);
 });
 
 test("the reset is found past statements before it in the clocked block", () => {
