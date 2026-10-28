@@ -38,7 +38,8 @@ node dist\index.js --help | --version
 （例如 Claude Desktop 與 Claude Code 同時連到同一個工作資料夾），所以同時呼叫多個
 工具不會互相蓋掉。另一個程序最多等 30 秒；持有鎖的程序已結束時，鎖會自動接手，
 不必手動刪除。寫檔採先寫暫存檔再改名，桌面版不會讀到寫到一半的檔案；工作資料夾裡
-以捷徑（symlink）連到別處的 `.fsm.json` 會寫回原本的檔案。
+以捷徑（symlink）連到別處的 `.fsm.json` 會寫回原本的檔案；硬連結（hard link）的圖可以讀取與匯出，
+但不會被修改（請改用 symlink 或複本）。
 
 ## 在 Windows 上連接 Claude
 

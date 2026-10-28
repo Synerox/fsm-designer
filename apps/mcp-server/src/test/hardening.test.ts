@@ -421,7 +421,7 @@ test("locks: a live breaker's guard is never taken over; a dead one's is", { ski
   assert.equal((await load("guarded")).states.length, 3);
 });
 
-test("files: linked names share one lock, devices and pipes are refused, hard links and file modes are kept, odd entries are explained", { skip: process.platform === "win32" }, async () => {
+test("files: linked names share one lock, devices and pipes are refused, hard-linked diagrams are not edited, file modes are kept, odd entries are explained", { skip: process.platform === "win32" }, async () => {
   const { symlink, link, chmod, mkdir, readdir } = await import("node:fs/promises");
   const { execFileSync } = await import("node:child_process");
   await ok("create_fsm", { name: "real", states: [{ name: "S" }] });
@@ -437,8 +437,8 @@ test("files: linked names share one lock, devices and pipes are refused, hard li
   await mkdir(other, { recursive: true });
   await link(join(dir, "real.fsm.json"), join(other, "copy.fsm.json"));
   await chmod(join(dir, "real.fsm.json"), 0o600);
-  await ok("add_state", { fsm: "real", name: "HARD" });
-  assert.match(await readFile(join(other, "copy.fsm.json"), "utf8"), /"HARD"/);
+  await fails("add_state", { fsm: "real", name: "HARD" }, /hard-linked under 2 names[\s\S]*nothing was changed/);
+  assert.doesNotMatch(await readFile(join(other, "copy.fsm.json"), "utf8"), /"HARD"/);
   await rm(join(other, "copy.fsm.json"));
   await ok("add_state", { fsm: "real", name: "MODE" });
   assert.equal((await stat(join(dir, "real.fsm.json"))).mode & 0o777, 0o600);
@@ -479,15 +479,16 @@ test("locks are fair: a server editing back to back does not starve another serv
   }
 });
 
-test("files: hard-linked names share one lock; saving into a pipe is refused; lock files cannot be export targets; temp files of killed servers are cleared", { skip: process.platform === "win32" }, async () => {
+test("files: hard-linked diagrams are read but not edited; saving into a pipe is refused; lock files cannot be export targets; temp files of killed servers are cleared", { skip: process.platform === "win32" }, async () => {
   const { link, symlink, readdir } = await import("node:fs/promises");
   const { execFileSync, spawnSync } = await import("node:child_process");
   const { hostname } = await import("node:os");
   await ok("create_fsm", { name: "hl", states: [{ name: "A" }] });
   await link(join(dir, "hl.fsm.json"), join(dir, "hl2.fsm.json"));
-  const rs = await Promise.all(Array.from({ length: 16 }, (_, i) => call("add_state", { fsm: i % 2 ? "hl2" : "hl", name: `H${i}` })));
-  for (const r of rs) assert.ok(!r.isError, textOf(r));
-  assert.equal((await load("hl")).states.length, 17);
+  const rs = await Promise.all(Array.from({ length: 6 }, (_, i) => call("add_state", { fsm: i % 2 ? "hl2" : "hl", name: `H${i}` })));
+  for (const r of rs) assert.ok(r.isError && /hard-linked/.test(textOf(r)), textOf(r));
+  assert.equal((await load("hl")).states.length, 1);
+  assert.match(await ok("get_fsm", { name: "hl2" }), /1 states?/);
   await rm(join(dir, "hl2.fsm.json"));
 
   const out = await mkdtemp(join(tmpdir(), "fsm-mcp-fifo-"));
@@ -503,8 +504,25 @@ test("files: hard-linked names share one lock; saving into a pipe is refused; lo
   await fails("export_fsm", { name: "hl", format: "svg", path: "hl.fsm.json.lock" }, /coordinate edits/);
 
   const dead = spawnSync(process.execPath, ["-e", ""]).pid!;
-  const leftover = `.hl.fsm.json.tmp-${hostname().replace(/[^A-Za-z0-9_]/g, "_").slice(0, 40)}-${dead}-1`;
+  const { readlinkSync } = await import("node:fs");
+  let ns = "";
+  try { ns = readlinkSync("/proc/self/ns/pid").replace(/\D/g, ""); } catch { /* not Linux */ }
+  const leftover = `.hl.fsm.json.tmp-${hostname().replace(/[^A-Za-z0-9_]/g, "_").slice(0, 40)}${ns ? `_${ns}` : ""}-${dead}-1`;
   await writeFile(join(dir, leftover), "{}");
   await ok("add_state", { fsm: "hl", name: "AFTER" });
   assert.ok(!(await readdir(dir)).includes(leftover));
+});
+
+test("locks: a waiter that stalls loses its place after a short lease", { skip: process.platform === "win32" }, async () => {
+  const { hostname } = await import("node:os");
+  const { utimes } = await import("node:fs/promises");
+  await ok("create_fsm", { name: "leased", states: [{ name: "A" }] });
+  // A live waiter's ticket (this test process) that is not being renewed.
+  const ticket = join(dir, "leased.fsm.json.lock.wait");
+  await writeFile(ticket, JSON.stringify({ pid: process.pid, host: hostname(), token: "stalled", time: Date.now() }));
+  const old = new Date(Date.now() - 10_000);
+  await utimes(ticket, old, old);
+  const t0 = Date.now();
+  await ok("add_state", { fsm: "leased", name: "B" });
+  assert.ok(Date.now() - t0 < 5000, "a lapsed ticket does not hold the lock back");
 });

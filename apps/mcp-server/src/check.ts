@@ -58,7 +58,7 @@ export async function exportTarget(workspace: string, p: string, format: keyof t
         "To copy a diagram use create_fsm with the JSON from get_fsm; to export elsewhere give a path outside the workspace folder or a sub-folder");
   }
   // The workspace's lock, wait and temp files belong to the server.
-  if (/\.fsm\.json\.|^\.fsm-inode-/i.test(basename(file)) && (await inWorkspace(workspace, file)))
+  if (/\.fsm\.json\./i.test(basename(file)) && (await inWorkspace(workspace, file)))
     throw new Error(`Refusing to write ${file}: the server uses that file to coordinate edits. Pick another file name`);
   // A device or pipe (the server's own stdout, /dev/...) is never an export target.
   const existing = await stat(file).catch(() => undefined);

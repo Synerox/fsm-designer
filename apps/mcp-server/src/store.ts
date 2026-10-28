@@ -2,7 +2,7 @@
 // interface, so a "live document" backend (the desktop app over its local
 // WebSocket) can replace the file store without touching the tools.
 
-import { access, chmod, chown, constants, link, lstat, mkdir, readdir, readFile, realpath, rm, writeFile, rename, open, stat, unlink } from "node:fs/promises";
+import { access, chmod, chown, constants, link, lstat, mkdir, readdir, readFile, realpath, rm, writeFile, rename, open, stat, unlink, utimes } from "node:fs/promises";
 import { readFileSync, readlinkSync, unlinkSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir, hostname } from "node:os";
@@ -67,6 +67,8 @@ const LOCK_WAIT_MS = 30_000;
 const FOREIGN_STALE_MS = 10 * 60_000;
 /** A lock file that is still empty or unreadable this long after it was created is abandoned. */
 const BROKEN_STALE_MS = 30_000;
+/** A wait ticket not renewed for this long is ignored (its waiter stalled or is gone). */
+const TICKET_LEASE_MS = 2_000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const HOST = hostname();
 /**
@@ -177,7 +179,8 @@ async function claim(path: string, token: string): Promise<boolean> {
       return true;
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code ?? "";
-      if (code === "EEXIST") {
+      // ENOENT: our temp file was removed under us (another tool cleaning up); try again.
+      if (code === "EEXIST" || code === "ENOENT") {
         ours.delete(token);
         return false;
       }
@@ -272,7 +275,8 @@ async function withFileLock<T>(lockPath: string, fn: () => Promise<T>, deadline:
   try {
     for (let attempt = 0; ; attempt++) {
       if (!(await queuedBehind(waitPath, token)) && (await claim(lockPath, token))) break;
-      if (!waiting) waiting = await claim(waitPath, token);
+      if (waiting) waiting = await renewTicket(waitPath, token);
+      else waiting = await claim(waitPath, token);
       const cur = await readLock(lockPath);
       if (cur) {
         last = cur.info ?? last;
@@ -280,6 +284,9 @@ async function withFileLock<T>(lockPath: string, fn: () => Promise<T>, deadline:
         if (why) await breakStale(lockPath, cur, why);
       }
       if (Date.now() > deadline) {
+        const ticket = cur ? undefined : (await readLock(waitPath))?.info;
+        if (ticket && ticket.token !== token)
+          throw new Error(`The diagram ${lockPath.replace(/\.lock$/, "")} is free, but a call of process ${ticket.pid} on ${ticket.host} has been waiting for it first and has not taken it; waited ${Math.round(LOCK_WAIT_MS / 1000)} s. Try again.`);
         const who = last ? `process ${last.pid} on ${last.host}` : "another process";
         throw new Error(`The diagram is locked by ${who} (${lockPath}); waited ${Math.round((Date.now() - deadline + LOCK_WAIT_MS) / 1000)} s. ` +
           "Another FSM server may be busy with a long auto_layout or many edits of this diagram; try again later, or delete the lock file if that server is gone.");
@@ -296,12 +303,26 @@ async function withFileLock<T>(lockPath: string, fn: () => Promise<T>, deadline:
   }
 }
 
+/** Renew our wait ticket; false when it is no longer ours (it lapsed and was cleared). */
+async function renewTicket(waitPath: string, token: string): Promise<boolean> {
+  const w = await readLock(waitPath);
+  if (w?.info?.token !== token) {
+    held.delete(waitPath);
+    ours.delete(token);
+    return false;
+  }
+  const now = new Date();
+  await utimes(waitPath, now, now).catch(() => {});
+  return true;
+}
+
 /** Whether another live waiter holds the wait ticket, so this call must let it go first. A dead or overdue ticket is cleared. */
 async function queuedBehind(waitPath: string, token: string): Promise<boolean> {
   const w = await readLock(waitPath);
   if (!w || w.info?.token === token) return false;
-  // A waiter gives up after LOCK_WAIT_MS and removes its ticket; an older one was left behind.
-  if (staleReason(w) || Math.abs(Date.now() - w.mtime) > LOCK_WAIT_MS + 5_000) {
+  // The ticket is a lease its waiter renews on every try (at least every ~0.3 s);
+  // one not renewed for TICKET_LEASE_MS belongs to a waiter that stalled or is gone.
+  if (staleReason(w) || Math.abs(Date.now() - w.mtime) > TICKET_LEASE_MS) {
     const again = await readLock(waitPath);
     if (again && sameLock(w, again)) await unlink(waitPath).catch(() => {});
     return false;
@@ -324,7 +345,7 @@ async function renameRetry(from: string, to: string): Promise<void> {
 
 let tmpCounter = 0;
 /** Host name as it appears in temp file names, so only this computer's leftovers are cleared. */
-const TMP_HOST = HOST.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 40);
+const TMP_HOST = `${HOST.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 40)}${PID_NS.replace(/\D/g, "") ? `_${PID_NS.replace(/\D/g, "")}` : ""}`;
 
 /** Remove temp files named `<prefix><pid>-<n>` left by processes on this computer that have exited (killed mid-write). */
 async function clearTemps(dir: string, prefix: string): Promise<void> {
@@ -458,15 +479,15 @@ export class FileStore implements DiagramStore {
     // Write then rename so a watching editor never sees a half-written file.
     // The temp name is unique per write, so overlapping saves cannot share it.
     if (old && !old.isFile()) throw new Error(`Cannot save ${target}: it is ${old.isDirectory() ? "a folder" : "not a regular file"}`);
+    // A hard link makes one file appear under several names (maybe in several
+    // folders); edits through different names could not be kept in step, and
+    // saving would split them. Symbolic links work instead.
+    if (old && old.nlink > 1)
+      throw new Error(`Cannot save ${target}: the file is hard-linked under ${old.nlink} names. Use a symbolic link or a separate copy instead; nothing was changed`);
     const tmp = join(dirname(target), `.${d.name}${EXT}.tmp-${TMP_HOST}-${process.pid}-${++tmpCounter}`);
     await clearTemps(dirname(target), `.${d.name}${EXT}.tmp-${TMP_HOST}-`);
     temps.add(tmp);
     try {
-      if (old && old.nlink > 1) {
-        // Hard-linked: a rename would split the names into two diagrams, so write in place.
-        await writeFile(target, text);
-        return;
-      }
       await writeFile(tmp, text, old ? { mode: old.mode & 0o7777 } : {});
       if (old) {
         await chmod(tmp, old.mode & 0o7777).catch(() => {});
@@ -491,14 +512,11 @@ export class FileStore implements DiagramStore {
     // The wait counts from the call, not from the turn in this process's queue.
     const deadline = Date.now() + LOCK_WAIT_MS;
     await mkdir(this.dir, { recursive: true });
-    // Lock the real file, so names that link to one diagram share one lock. A
-    // hard-linked file is saved in place (see save), so its inode is stable and
-    // names the lock that all its names share.
+    // Lock the real file, so names that symlink to one diagram share one lock.
+    // (Hard-linked diagrams are refused when saving; see save.)
     const real = await realpath(this.file(name)).catch(() => this.file(name));
-    const st = await stat(real).catch(() => undefined);
-    const key = st && st.isFile() && st.nlink > 1 ? join(dirname(real), `.fsm-inode-${st.dev}-${st.ino}`) : real;
     // Lower-cased: on Windows and macOS "Seq" and "seq" are the same file.
-    return this.queue.run(key.toLowerCase(), () => withFileLock(`${key}.lock`, fn, deadline));
+    return this.queue.run(real.toLowerCase(), () => withFileLock(`${real}.lock`, fn, deadline));
   }
   resolvePath(p: string) {
     return resolve(this.dir, userPath(p));
