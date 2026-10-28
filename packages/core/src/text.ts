@@ -99,10 +99,28 @@ const TEX_GREEK: Record<string, string> = {
   epsilon: "$\\varepsilon$", phi: "$\\varphi$", omicron: "$o$",
   Alpha: "A", Beta: "B", Epsilon: "E", Zeta: "Z", Eta: "H", Iota: "I", Kappa: "K", Mu: "M", Nu: "N", Omicron: "O", Rho: "P", Tau: "T", Chi: "X",
 };
+// Other characters a label may hold that pdflatex's UTF-8 input cannot
+// typeset, with their TeX spelling: the other Greek letter forms and the
+// symbols conditions are written with.
+const TEX_CHAR: Record<string, string> = {
+  "ϵ": "\\epsilon", "ϕ": "\\phi", "ϑ": "\\vartheta", "ϖ": "\\varpi", "ϱ": "\\varrho", "ς": "\\varsigma",
+  "→": "\\rightarrow", "←": "\\leftarrow", "↔": "\\leftrightarrow", "⇒": "\\Rightarrow", "⇐": "\\Leftarrow", "⇔": "\\Leftrightarrow", "↑": "\\uparrow", "↓": "\\downarrow",
+  "≥": "\\geq", "≤": "\\leq", "≠": "\\neq", "≈": "\\approx", "≡": "\\equiv", "±": "\\pm", "×": "\\times", "÷": "\\div", "·": "\\cdot", "∘": "\\circ",
+  "¬": "\\neg", "∧": "\\wedge", "∨": "\\vee", "⊕": "\\oplus", "⊗": "\\otimes", "∑": "\\sum", "∏": "\\prod", "∞": "\\infty",
+  "∈": "\\in", "∉": "\\notin", "∅": "\\emptyset", "∀": "\\forall", "∃": "\\exists", "∩": "\\cap", "∪": "\\cup", "⊂": "\\subset", "⊆": "\\subseteq",
+};
+const TEX_CHAR_RUN = new RegExp(`[${Object.keys(TEX_CHAR).join("")}]`, "g");
+// Invisible direction and joiner marks (and the BOM) draw nothing but stop pdflatex.
+const FORMAT_MARKS = /[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
 
-/** Label text for LaTeX text mode: β becomes $\beta$, S₀ becomes S$_{0}$, everything else is escaped as typed. */
+/**
+ * Label text for LaTeX text mode: β becomes $\beta$, S₀ becomes S$_{0}$, ≥
+ * becomes $\geq$, everything else is escaped as typed. Text pdflatex cannot
+ * set (CJK, Hangul, emoji) is kept; renderLatex's preamble handles it.
+ */
 export function latexText(raw: string): string {
-  return pieces(raw, false).map((p) => (p.kind === "greek" ? TEX_GREEK[p.value] ?? `$\\${p.value}$` : p.kind === "sub" ? `$_{${p.value}}$` : texEscape(p.value))).join("");
+  const text = (t: string) => texEscape(t.replace(FORMAT_MARKS, "")).replace(TEX_CHAR_RUN, (c) => `$${TEX_CHAR[c]}$`);
+  return pieces(raw, false).map((p) => (p.kind === "greek" ? TEX_GREEK[p.value] ?? `$\\${p.value}$` : p.kind === "sub" ? `$_{${p.value}}$` : text(p.value))).join("");
 }
 
 /** The raw text a state shows: its free-form label if set, else its identifier. */

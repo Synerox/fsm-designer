@@ -91,9 +91,34 @@ test("latex loop angles stay within one turn whatever loopAngle holds", () => {
 
 test("latexText writes Greek with the TeX letter that looks like the screen", () => {
   // Unicode ε and φ are TeX's \varepsilon and \varphi; ϵ and ϕ are \epsilon and \phi.
-  assert.equal(latexText("ε φ"), "$\\varepsilon$ $\\varphi$");
+  assert.equal(latexText("ε φ ϵ ϕ"), "$\\varepsilon$ $\\varphi$ $\\epsilon$ $\\phi$");
   // Capitals that look like Latin letters (and omicron) have no macro: \Alpha would not compile.
   assert.equal(latexText("Α Β Ο ο Χ"), "A B O $o$ X");
   assert.equal(latexText("Γ Σ Ω β"), "$\\Gamma$ $\\Sigma$ $\\Omega$ $\\beta$");
   assert.equal(asciiText("ε φ"), "epsilon phi", "identifiers keep the plain names");
+});
+
+test("latexText turns math symbols into TeX and drops invisible direction marks", () => {
+  assert.equal(latexText("x ≥ 1 ∧ ¬y → z"), "x $\\geq$ 1 $\\wedge$ $\\neg$y $\\rightarrow$ z");
+  assert.equal(latexText("∑ ≠ ×"), "$\\sum$ $\\neq$ $\\times$");
+  assert.equal(latexText("rtl ‮evil‬"), "rtl evil");
+  assert.equal(latexText("Ñandú 狀態"), "Ñandú 狀態", "letters stay as typed");
+});
+
+test("latex asks for xelatex or lualatex, with CJK fonts, only when labels need them", () => {
+  const d = createDiagram({ name: "m" });
+  addState(d, { name: "A", label: "S₀ ≥ Ñ", x: 0, y: 0, isInitial: true });
+  addState(d, { name: "B", x: 200, y: 0 });
+  addTransition(d, { from: "A", to: "B", condition: "x ≥ 1" });
+  const plain = renderLatex(d);
+  assert.doesNotMatch(plain, /RequireTUTeX|ctex|xelatex/, "Latin text and symbols still compile with pdflatex");
+  d.states[1].label = "空闲";
+  const cjk = renderLatex(d);
+  assert.match(cjk, /^% Some labels are Chinese, Japanese or Korean: compile with xelatex or lualatex/m);
+  assert.match(cjk, /\\documentclass[^\n]*\n\\usepackage\{iftex\}\n\\RequireTUTeX\n\\usepackage\[UTF8, scheme=plain\]\{ctex\}\n/);
+  assert.match(renderLatex(d, { standalone: false }), /^% Some labels are Chinese/, "a bare picture still says what it needs");
+  d.states[1].label = "🚦";
+  const emoji = renderLatex(d);
+  assert.match(emoji, /\\RequireTUTeX/);
+  assert.doesNotMatch(emoji, /ctex/);
 });

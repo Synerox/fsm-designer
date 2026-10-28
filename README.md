@@ -109,7 +109,7 @@ pnpm dev:web      # 在瀏覽器開啟 http://localhost:5173
 | --- | --- |
 | **PNG** | 貼進簡報、文件或作業 |
 | **SVG** | 向量圖，放大不失真，可以再用 Inkscape／Illustrator 修改 |
-| **LaTeX (TikZ)** | 產生可用 `pdflatex` 編譯的 TikZ 圖，可以直接放進報告或論文 |
+| **LaTeX (TikZ)** | 產生可用 `pdflatex` 編譯的 TikZ 圖，可以直接放進報告或論文；標籤含中日韓文字時改用 `xelatex` 或 `lualatex`（檔頭會載入 `ctex`） |
 | **.fsm.json** | 專案檔，桌面版、網頁版與 MCP server 都讀寫同一種格式 |
 
 以 1011 序列偵測器為例，匯出的 LaTeX 節錄如下：

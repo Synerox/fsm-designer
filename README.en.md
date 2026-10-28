@@ -109,7 +109,7 @@ Pick a format from the **File** menu:
 | --- | --- |
 | **PNG** | Slides, documents, homework |
 | **SVG** | Vector graphics that scale cleanly and can be edited in Inkscape or Illustrator |
-| **LaTeX (TikZ)** | A TikZ picture that compiles with `pdflatex`, ready for reports and papers |
+| **LaTeX (TikZ)** | A TikZ picture that compiles with `pdflatex`, ready for reports and papers; labels in Chinese, Japanese or Korean need `xelatex` or `lualatex` (the file then loads `ctex`) |
 | **.fsm.json** | The project file; the web app, desktop app and MCP server all share this format |
 
 An excerpt of the LaTeX for a 1011 sequence detector:
