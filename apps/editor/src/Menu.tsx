@@ -3,7 +3,7 @@
 // ArrowDown on the button opens the menu with focus on its first item;
 // ArrowUp/ArrowDown/Home/End move between items, ArrowRight/ArrowLeft open
 // and close the submenu, Escape closes and returns focus to the button, and
-// Tab (focus moving elsewhere) closes the menu.
+// Tab or Shift+Tab (focus moving elsewhere) closes the menu.
 
 import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
@@ -56,6 +56,12 @@ export function Menu({ label, items: entries, disabled, testId, icon, title }: {
   const close = (refocus = false) => { setOpen(false); setSub(null); if (refocus) trigger.current?.focus(); };
   const choose = (item: MenuItem, keyboard: boolean) => { close(keyboard); item.onSelect?.(); };
   const openWith = (focus: "first" | "last" | null) => { focusNext.current = focus; setOpen(true); };
+  /** Open submenu `i` from the keyboard with focus on its first item. If hovering already opened it, setSub would not re-render, so focus it here. */
+  const enterSub = (i: number) => {
+    if (sub === i) return items(ref.current?.querySelector(".submenu"))[0]?.focus();
+    focusNext.current = "sub";
+    setSub(i);
+  };
 
   const onListKey = (e: KeyboardEvent<HTMLUListElement>, nested: boolean) => {
     const all = items(e.currentTarget);
@@ -67,8 +73,11 @@ export function Menu({ label, items: entries, disabled, testId, icon, title }: {
     else if (e.key === "ArrowUp") move(at - 1);
     else if (e.key === "Home") move(0);
     else if (e.key === "End") move(all.length - 1);
-    else if (e.key === "ArrowRight" && !nested && item?.submenu) { focusNext.current = "sub"; setSub(at); }
+    else if (e.key === "ArrowRight" && !nested && item?.submenu) enterSub(at);
     else if (e.key === "ArrowLeft" && nested) { setSub(null); e.currentTarget.parentElement?.querySelector<HTMLButtonElement>(":scope > button")?.focus(); }
+    // Shift+Tab would land on the menu button, which is inside the wrapper,
+    // so onBlur would keep the menu open; close it and focus the button here.
+    else if (e.key === "Tab" && e.shiftKey) close(true);
     else return;
     e.preventDefault(); // also tells App's shortcut handler the key is taken
   };
@@ -86,8 +95,8 @@ export function Menu({ label, items: entries, disabled, testId, icon, title }: {
             // detail is 0 for a click made with Enter or Space.
             onClick={(e) => {
               if (!item.submenu) return choose(item, e.detail === 0);
-              if (e.detail === 0) focusNext.current = "sub";
-              setSub(i);
+              if (e.detail === 0) enterSub(i);
+              else setSub(i);
             }}
           >
             {item.checked !== undefined && <span className="check" aria-hidden="true">{item.checked ? "✓" : ""}</span>}
