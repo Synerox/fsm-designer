@@ -33,7 +33,7 @@ export interface LayoutScore {
   leftOfStart: number;
   /** States lined up with no other state, in a row or a column. */
   floating: number;
-  /** Triangles of linked states, two of them linked both ways, that are not about equilateral. */
+  /** Triangles of linked states, two of them linked both ways, that are not about equilateral (not counting the slices round a state centred in an equilateral triangle). */
   uneven: number;
   /** How far lines between states run past one and a half times the shortest line, summed (in shortest lines). */
   long: number;
@@ -135,6 +135,11 @@ export function score(d: FsmDiagram, plan: DiagramPlan = planDiagram(d), step = 
       if (!twoWay) continue;
       const [p, q, r] = [a, b, c].map((id) => at.get(id)!);
       if (twoWay < 3 && Math.abs((q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)) < 1) continue;
+      // A slice of a centred hub: one corner at the centre of an equilateral
+      // triangle that the other two make with a fourth state linked to all
+      // three (four states all linked, drawn as a triangle round its centre).
+      // Only the outer triangle can be equilateral then.
+      if ([a, b, c].some((h) => [...linked.get(h)!].some((e) => e !== a && e !== b && e !== c && [a, b, c].every((x) => x === h || linked.get(e)!.has(x)) && centred(at.get(h)!, [a, b, c, e].filter((x) => x !== h).map((x) => at.get(x)!))))) continue;
       const sides = [Math.hypot(p.x - q.x, p.y - q.y), Math.hypot(q.x - r.x, q.y - r.y), Math.hypot(r.x - p.x, r.y - p.y)];
       if (Math.max(...sides) > 1.15 * Math.min(...sides)) s.uneven++;
     }
@@ -156,6 +161,13 @@ export function score(d: FsmDiagram, plan: DiagramPlan = planDiagram(d), step = 
   s.area = (w * h) / (step * step);
   s.total = (Object.keys(WEIGHTS) as Array<keyof typeof WEIGHTS>).reduce((sum, k) => sum + WEIGHTS[k] * s[k], 0);
   return s;
+}
+
+/** Whether p sits at the centre of the about equilateral triangle t (within a fifth of a side, for the grid). */
+function centred(p: Pt, t: Pt[]): boolean {
+  const sides = t.map((q, i) => Math.hypot(q.x - t[(i + 1) % 3].x, q.y - t[(i + 1) % 3].y));
+  const cx = (t[0].x + t[1].x + t[2].x) / 3, cy = (t[0].y + t[1].y + t[2].y) / 3;
+  return Math.max(...sides) <= 1.15 * Math.min(...sides) && Math.hypot(p.x - cx, p.y - cy) < 0.2 * Math.min(...sides);
 }
 
 export function segDist(p: Pt, a: Pt, b: Pt): number {

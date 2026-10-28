@@ -23,6 +23,13 @@
 //      top left; each piece hanging off it (a short side loop, a lone line)
 //      as its own small shape, an equilateral triangle, square or rectangle,
 //      pointing away from the state it hangs off.
+//    - hub: a state linked to every other state, in the middle of the others
+//      when they make a loop round it (a wheel; four states all linked
+//      become an equilateral triangle round the fourth), or, being the reset
+//      state, on the left with the others above, right of and below it (a fan).
+//      Drawn as shaped (no local shapes); a shape that is the same drawing
+//      as one already made from another hub, the states only named
+//      differently, is made once.
 //    Each at two line lengths: room for the spacing, and room for the
 //    widest label.
 // 3. Local shapes. A triangle of linked states (each candidate also tried
@@ -34,9 +41,11 @@
 //    becomes an arc (back edges bow below a row, forward jumps above),
 //    opposite edges become two parallel straight lines; a line that crosses
 //    another bows round it when some arc clears every state and crosses
-//    fewer lines (the most tangled lines first, a few passes); each self loop
-//    points to its state's emptiest side, the start arrow comes in from a
-//    free side.
+//    fewer lines (the most tangled lines first, a few passes; the start
+//    arrow counts as a line, so an arc bows round it); each self loop points
+//    to its state's emptiest side, kept clear of lines (a pair drawn as two
+//    parallel lines is wider than its centre line); the start arrow comes in
+//    from a free side.
 // 5. Scoring (see layout-score.ts): crossings weigh most, then lines through states
 //    and overlapping labels, then triangles that are not equilateral,
 //    states lined up with nothing, lines much longer than the shortest,
@@ -55,11 +64,11 @@
 //    nearer its neighbours and moves wherever the score improves.
 
 import type { FsmDiagram } from "./model.ts";
-import { labelLines, planDiagram, transitionLabel } from "./export/svg.ts";
+import { PARALLEL_GAP, labelLines, planDiagram, transitionLabel } from "./export/svg.ts";
 import type { PlanOptions } from "./export/svg.ts";
 import { LABEL_SIZE, stateRadius, textWidth } from "./metrics.ts";
 
-import { GRID, WEIGHTS, crossCount, emptyScore, score, segDist } from "./layout-score.ts";
+import { GRID, WEIGHTS, crossCount, emptyScore, intersect, score, segDist } from "./layout-score.ts";
 import type { LayoutScore, Pt } from "./layout-score.ts";
 
 export { GRID, score };
@@ -89,7 +98,7 @@ export interface LayoutIssue {
 
 export interface TidyResult {
   score: LayoutScore;
-  /** The winning arrangement: grid, layers-right, layers-down, snake-k, ring-cxr, or islands (several packed side by side). */
+  /** The winning arrangement: grid, layers-right, layers-down, snake-k, ring-cxr, hub-triangle, hub-square, hub-wheel, hub-fan, or islands (several packed side by side). */
   arrangement: string;
   /** Triangles made equilateral, as their state ids. */
   triangles: string[][];
@@ -173,6 +182,9 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
   // Room for the widest label on a line between two states.
   const popts = opts.plan ?? {};
   const labelW = popts.labels === "none" ? 0 : Math.max(0, ...groupsOf(d).filter((ts) => ts[0].from !== ts[0].to).map((ts) => Math.max(...ts.flatMap((t) => labelLines(transitionLabel(d, t, popts))).map((l) => textWidth(l, LABEL_SIZE))) + 30));
+  // What is drawn from a to b (a self loop when a = b): whether there is a line, and its labels if shown.
+  const groupText = new Map(groupsOf(d).map((ts) => [`${ts[0].from}\u0000${ts[0].to}`, popts.labels === "none" ? "+" : ts.map((t) => transitionLabel(d, t, popts)).join("\n")]));
+  const drawn = (a: string, b: string) => groupText.get(`${a}\u0000${b}`) ?? "-";
   const up40 = (v: number) => Math.ceil(v / 40) * 40; // half steps stay on the grid
   const scales = new Map<string, [number, number]>();
   scales.set(`${up40(2 * R + spacing)}`, [up40(2 * R + spacing), up40(2 * R + spacing)]);
@@ -197,8 +209,9 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
   }));
   // Arrangements that land every state in the same place are drawn and scored once (the first name is kept).
   const seen = new Set<string>();
-  const consider = (arrangement: string, given: Pos, sx: number, sy: number, keepRows = false) => {
-    for (const tris of [triangles, mutual]) {
+  // asIs: drawn exactly as given (hub shapes), not reshaped round its triangles.
+  const consider = (arrangement: string, given: Pos, sx: number, sy: number, keepRows = false, asIs = false) => {
+    for (const tris of asIs ? [[]] : [triangles, mutual]) {
       const pos = equilateral(g, given, tris, 2 * R + 60, Math.min(sx, sy), keepRows, keepRows || tris === mutual);
       const key = `${sx} ` + g.ids.map((id) => { const p = pos.get(id)!; return `${Math.round(p.x / GRID)},${Math.round(p.y / GRID)}`; }).join(" ");
       if (seen.has(key)) continue;
@@ -245,6 +258,8 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
       for (const k of wrapWidths(layers, sx, sy)) consider(`snake-${k}`, snake(layers, k, sx, sy), sx, sy);
       // The main loop round a rectangle, side loops as small shapes beside the state they leave from.
       for (const [name, pos] of rings(g, sx, sy)) consider(name, pos, sx, sy, true);
+      // A state linked to all the others in their middle (or, being the reset state, on their left), drawn as shaped.
+      for (const [name, pos] of hubs(g, sx, sy, R, drawn)) consider(name, pos, sx, sy, false, true);
     }
   }
   tried.sort(byScore);
@@ -739,6 +754,102 @@ function rings(g: Graph, sx: number, sy: number): Array<[string, Pos]> {
   return out;
 }
 
+// ---- hubs -----------------------------------------------------------------------
+
+/**
+ * A state linked to every other state (a star, a wheel, four states all
+ * linked to each other) drawn in the middle of the others, so its lines are
+ * short and stay clear of the lines between the others: the others go round
+ * it in the order of their own loop, on the eight cells around it (the four
+ * level and upright ones first) or, for three, as an equilateral triangle
+ * with the hub at its centre. A hub that is the reset state, which should be
+ * the leftmost, is also tried as a fan: on the left, the others above, right
+ * of and below it. Each shape is turned so the lines between the others and
+ * the reset state's place cost least (a quick measure, as for the grid); the
+ * score then decides between these and every other arrangement.
+ */
+function hubs(g: Graph, sx: number, sy: number, R: number, drawn: (a: string, b: string) => string): Array<[string, Pos]> {
+  const n = g.ids.length;
+  if (n < 4 || n > 9) return [];
+  const edges = edgePairs(g);
+  const quick = (pos: Pos) => {
+    let c = 0;
+    const segs = edges.map(([a, b]) => [pos.get(a)!, pos.get(b)!, a, b] as const);
+    for (let i = 0; i < segs.length; i++) {
+      const [p, q, a, b] = segs[i];
+      const dx = Math.abs(p.x - q.x) / sx, dy = Math.abs(p.y - q.y) / sy, len = Math.hypot(dx, dy);
+      c += len + (dx > 0.1 && dy > 0.1 ? 0.4 : 0) + 4 * Math.max(0, len - 1.5);
+      for (const [id, s] of pos) if (id !== a && id !== b && segDist(s, p, q) < R + 10) c += 15;
+      for (let j = i + 1; j < segs.length; j++) {
+        const [r, s2, e, f] = segs[j];
+        if (e !== a && e !== b && f !== a && f !== b && intersect(p, q, r, s2)) c += 10;
+      }
+    }
+    const o = pos.get(g.init)!;
+    for (const p of pos.values()) if (p.x < o.x - GRID) c += 15; // nothing left of the reset state
+    return c;
+  };
+  // Cells round the hub, clockwise from the left (y grows downwards).
+  const L = { x: -1, y: 0 }, UL = { x: -1, y: -1 }, U = { x: 0, y: -1 }, UR = { x: 1, y: -1 }, Rt = { x: 1, y: 0 }, DR = { x: 1, y: 1 }, D = { x: 0, y: 1 }, DL = { x: -1, y: 1 };
+  const subsets = <T,>(xs: T[], k: number): T[][] => (k === 0 ? [[]] : xs.length < k ? [] : [...subsets(xs.slice(1), k - 1).map((s) => [xs[0], ...s]), ...subsets(xs.slice(1), k)]);
+  const clockwise = (cs: Pt[]) => [...cs].sort((a, b) => Math.atan2(-a.y, a.x) - Math.atan2(-b.y, b.x)).reverse();
+  const out: Array<[string, Pos]> = [];
+  const shapes = new Set<string>();
+  for (const hub of g.ids.filter((id) => g.nb.get(id)!.size === n - 1).slice(0, 4)) {
+    const rim = g.ids.filter((id) => id !== hub);
+    const m = rim.length;
+    const loop = ringOf(g, rim, rim[0]);
+    const order = loop ?? walkOrder(g, rim);
+    const families: Array<[string, Pt[][]]> = []; // name, the cell sets (px) to choose from
+    const step = (sx + sy) / 2;
+    // In the middle only when the others make a loop round it (a wheel), so
+    // the spokes stay inside the loop; a plain star the grid already draws as a plus.
+    if (loop && m === 3) {
+      // An equilateral triangle, the hub at its centre, one step from each corner; pointing left, right, up or down.
+      const tri = [0, 1, 2, 3].map((k) => [0, 1, 2].map((i) => {
+        const a = (k * Math.PI) / 2 + Math.PI + (i * 2 * Math.PI) / 3;
+        return { x: Math.cos(a) * step, y: Math.sin(a) * step };
+      }));
+      for (const t of tri) families.push(["hub-triangle", [t]]); // each way round: the score weighs their shapes
+    } else if (loop && m <= 8) {
+      const cells = (cs: Pt[]) => clockwise(cs).map((c) => ({ x: c.x * sx, y: c.y * sy }));
+      if (m === 4) families.push(["hub-square", [cells([UL, UR, DR, DL])]]);
+      families.push(["hub-wheel", subsets([UL, UR, DR, DL], m - 4).map((cs) => cells([L, U, Rt, D, ...cs]))]);
+    }
+    if (hub === g.init && m >= 3 && m <= 5) families.push(["hub-fan", subsets([UR, Rt, DR], m - 2).map((cs) => [U, ...cs, D].map((c) => ({ x: c.x * sx, y: c.y * sy })))]);
+    for (const [name, sets] of families) {
+      let best: Pos | undefined, bestCost = Infinity;
+      for (const cs of sets) for (let k = 0; k < m; k++) for (const dir of [1, -1]) {
+        const pos: Pos = new Map([[hub, { x: 0, y: 0 }]]);
+        order.forEach((id, i) => pos.set(id, cs[(((k + dir * i) % m) + m) % m]));
+        const c = quick(pos);
+        if (c < bestCost - 1e-9) { bestCost = c; best = pos; }
+      }
+      if (!best) continue;
+      // Symmetric machines (four states all linked) give the same drawing from
+      // several hubs, the states only named differently: draw it once.
+      const x0 = Math.min(...[...best.values()].map((p) => p.x)), y0 = Math.min(...[...best.values()].map((p) => p.y));
+      const cell = (id: string) => { const p = best!.get(id)!; return `${Math.round((p.x - x0) / GRID)},${Math.round((p.y - y0) / GRID)}`; };
+      const sig = `${name} ${cell(g.init)} ` + g.ids.flatMap((a) => [a, ...g.out.get(a)!].map((b) => `${cell(a)}>${cell(b)}:${drawn(a, b)}`)).sort().join(" ");
+      if (!shapes.has(sig)) { shapes.add(sig); out.push([name, best]); }
+    }
+  }
+  return out;
+}
+
+/** The states in `ids` in the order of a walk along their lines, jumping to the next unvisited one when stuck. */
+function walkOrder(g: Graph, ids: string[]): string[] {
+  const inside = new Set(ids), seen = new Set<string>(), out: string[] = [];
+  for (const s of ids) {
+    let u: string | undefined = s;
+    while (u && !seen.has(u)) {
+      seen.add(u); out.push(u);
+      u = [...g.nb.get(u)!].find((v) => inside.has(v) && !seen.has(v));
+    }
+  }
+  return out;
+}
+
 /** Undirected edges between different states, each once. */
 function edgePairs(g: Graph): Array<[string, string]> {
   const out: Array<[string, string]> = [];
@@ -1214,10 +1325,12 @@ function arc(a: Pt, b: Pt, curve: number): Pt[] {
  * state; "left of travel" first (a back edge along a row bows below it, a
  * forward jump above), the other side when that crosses fewer lines. Shorter
  * jumps go first so longer ones nest around them. Opposite edges that both
- * stay straight are drawn as two parallel lines.
+ * stay straight are drawn as two parallel lines. The start arrow counts as a
+ * line to keep clear of, so an arc bows round it rather than through it.
  */
 function routeEdges(d: FsmDiagram) {
   const at = new Map(d.states.map((s) => [s.id, { x: s.x!, y: s.y!, r: stateRadius(d, s), id: s.id }]));
+  const arrow = startArrow(d);
   const groups = groupsOf(d).filter((ts) => ts[0].from !== ts[0].to);
   const key = (a: string, b: string) => `${a}\u0000${b}`;
   const has = new Set(groups.map((ts) => key(ts[0].from, ts[0].to)));
@@ -1252,7 +1365,7 @@ function routeEdges(d: FsmDiagram) {
       for (const m of [30, 45, 60, 80, 100, 130, 160, 200, 250, 300, 360, 440]) {
         const pts = arc(a, b, side * m);
         if (!clear(pts, from, to)) continue;
-        const crossings = [...lines.values()].reduce((s, o) => s + crossCount(pts, o, circles), 0);
+        const crossings = [...lines.values()].reduce((s, o) => s + crossCount(pts, o, circles), arrow ? crossCount(pts, arrow, circles) : 0);
         const cost = crossings * 10 + m / 100 + (side < 0 ? 0.5 : 0);
         if (!best || cost < best.cost) best = { curve: side * m, pts, cost };
         break;
@@ -1262,7 +1375,15 @@ function routeEdges(d: FsmDiagram) {
     for (const t of ts) t.curve = best.curve;
     lines.set(key(from, to), best.pts);
   }
-  uncross(groups, at, lines, has, clear);
+  uncross(groups, at, lines, has, clear, arrow);
+}
+
+/** The start arrow as drawn (planDiagram): from 38 px out to the reset state's edge. */
+function startArrow(d: FsmDiagram): Pt[] | undefined {
+  const init = d.states.find((s) => s.isInitial);
+  if (!init) return undefined;
+  const r = stateRadius(d, init), a = init.initialAngle ?? Math.PI, ux = Math.cos(a), uy = Math.sin(a);
+  return [{ x: init.x! + ux * (r + 38), y: init.y! + uy * (r + 38) }, { x: init.x! + ux * (r + 1), y: init.y! + uy * (r + 1) }];
 }
 
 /**
@@ -1271,7 +1392,8 @@ function routeEdges(d: FsmDiagram) {
  * round the outside instead of cutting across, and a diagonal of a square
  * bends round its corner. Greedy, a few passes, the line with most crossings
  * first; a line is only bent while that lowers its crossings, so a drawing
- * that cannot be untangled keeps its straight lines.
+ * that cannot be untangled keeps its straight lines. Cutting across the
+ * start arrow counts as a crossing.
  */
 function uncross(
   groups: FsmDiagram["transitions"][],
@@ -1279,21 +1401,22 @@ function uncross(
   lines: Map<string, Pt[]>,
   has: Set<string>,
   clear: (pts: Pt[], a: string, b: string) => boolean,
+  arrow?: Pt[],
 ) {
   const key = (a: string, b: string) => `${a}\u0000${b}`;
   const routed = groups.filter((ts) => lines.has(key(ts[0].from, ts[0].to)));
   const circles = [...at.values()];
   const curveOf = (ts: (typeof groups)[0]) => ts[0].curve ?? 0;
   const crossings = (ts: (typeof groups)[0], pts: Pt[]) =>
-    routed.reduce((n, o) => (o === ts ? n : n + crossCount(pts, lines.get(key(o[0].from, o[0].to))!, circles)), 0);
+    routed.reduce((n, o) => (o === ts ? n : n + crossCount(pts, lines.get(key(o[0].from, o[0].to))!, circles)), arrow ? crossCount(pts, arrow, circles) : 0);
   const cost = (c: number, curve: number) => c * 10 + Math.abs(curve) / 100 + (curve < 0 ? 0.5 : 0);
   for (let pass = 0; pass < 4; pass++) {
     // Each line's crossings, each pair worked out once (crossCount is symmetric). A dense tangle
     // (more crossings than lines) will not come apart with a few bends: not worth the time, so
     // stop counting as soon as it shows.
     const pts = routed.map((ts) => lines.get(key(ts[0].from, ts[0].to))!);
-    const count = routed.map(() => 0);
-    let sum = 0;
+    const count = routed.map((_, i) => (arrow ? crossCount(pts[i], arrow, circles) : 0));
+    let sum = count.reduce((a, b) => a + b, 0);
     for (let i = 0; i < routed.length; i++)
       for (let j = i + 1; j < routed.length; j++) {
         const c = crossCount(pts[i], pts[j], circles);
@@ -1340,7 +1463,9 @@ function placeLoops(d: FsmDiagram) {
   const cx = d.states.reduce((s, p) => s + p.x!, 0) / d.states.length;
   const cy = d.states.reduce((s, p) => s + p.y!, 0) / d.states.length;
   const groups = groupsOf(d);
-  const lines: Array<{ pts: Pt[]; x0: number; y0: number; x1: number; y1: number }> = []; // each with its bounding box
+  // Each line with its bounding box, and how far it is drawn off its centre line (half the gap of a pair drawn as two parallel lines).
+  const lines: Array<{ pts: Pt[]; x0: number; y0: number; x1: number; y1: number; pad: number }> = [];
+  const straight = new Set(groups.filter((ts) => ts[0].from !== ts[0].to && ts[0].curve === 0).map((ts) => `${ts[0].from}\u0000${ts[0].to}`));
   const busy = new Map(d.states.map((s) => [s.id, [] as number[]]));
   const init = d.states.find((s) => s.isInitial);
   if (init) busy.get(init.id)!.push(init.initialAngle ?? Math.PI);
@@ -1349,7 +1474,8 @@ function placeLoops(d: FsmDiagram) {
     if (from === to) continue;
     const a = at.get(from)!, b = at.get(to)!;
     const pts = arc(a, b, ts[0].curve ?? 0);
-    lines.push({ pts, x0: Math.min(...pts.map((p) => p.x)), y0: Math.min(...pts.map((p) => p.y)), x1: Math.max(...pts.map((p) => p.x)), y1: Math.max(...pts.map((p) => p.y)) });
+    const pad = straight.has(`${from}\u0000${to}`) && straight.has(`${to}\u0000${from}`) ? PARALLEL_GAP / 2 : 0;
+    lines.push({ pts, x0: Math.min(...pts.map((p) => p.x)), y0: Math.min(...pts.map((p) => p.y)), x1: Math.max(...pts.map((p) => p.x)), y1: Math.max(...pts.map((p) => p.y)), pad });
     // Direction the line leaves each end.
     busy.get(from)!.push(Math.atan2(pts[2].y - a.y, pts[2].x - a.x));
     busy.get(to)!.push(Math.atan2(pts[18].y - b.y, pts[18].x - b.x));
@@ -1362,7 +1488,7 @@ function placeLoops(d: FsmDiagram) {
     const out = Math.hypot(s.x - cx, s.y - cy) > 20 ? Math.atan2(s.y - cy, s.x - cx) : undefined;
     const rl = 0.75 * s.r;
     // Only lines that come near the state can touch a loop on it (the loop's centre is 1.5 r away, its radius rl).
-    const reach = 1.5 * s.r + rl + 9;
+    const reach = 1.5 * s.r + rl + 9 + PARALLEL_GAP / 2;
     const near = lines.filter((l) => s.x + reach > l.x0 && s.x - reach < l.x1 && s.y + reach > l.y0 && s.y - reach < l.y1);
     let best = -Math.PI / 2, bestScore = -Infinity;
     for (let k = 0; k < 8; k++) {
@@ -1378,7 +1504,10 @@ function placeLoops(d: FsmDiagram) {
       if (k === 4 && s.y > cy + 20) sc += 0.15;
       for (const [oid, o] of at) if (oid !== id && Math.hypot(c.x - o.x, c.y - o.y) < rl + o.r + 16) sc -= 5;
       for (const l of loops) if (Math.hypot(c.x - l.x, c.y - l.y) < 2 * rl + 30) sc -= 5;
-      for (const l of near) if (c.x + rl + 8 > l.x0 && c.x - rl - 8 < l.x1 && c.y + rl + 8 > l.y0 && c.y - rl - 8 < l.y1 && l.pts.some((p) => Math.hypot(p.x - c.x, p.y - c.y) < rl + 8)) sc -= 1.5;
+      for (const l of near) {
+        const m = rl + 8 + l.pad;
+        if (c.x + m > l.x0 && c.x - m < l.x1 && c.y + m > l.y0 && c.y - m < l.y1 && l.pts.some((p) => Math.hypot(p.x - c.x, p.y - c.y) < m)) sc -= 1.5;
+      }
       if (sc > bestScore + 1e-9) { bestScore = sc; best = ang; }
     }
     loops.push({ x: s.x + 1.5 * s.r * Math.cos(best), y: s.y + 1.5 * s.r * Math.sin(best) });
