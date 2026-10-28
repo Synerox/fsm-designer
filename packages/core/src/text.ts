@@ -41,7 +41,7 @@ function pieces(raw: string, shortcuts: boolean): Piece[] {
   let last = 0;
   for (let m; (m = re.exec(raw)); ) {
     if (m[1] !== undefined && !(m[1] in GREEK_CHAR)) continue;
-    if (m[2] !== undefined && ![...m[2]].every((c) => c in SUB)) continue;
+    if (m[2] !== undefined && !(m[2] && [...m[2]].every((c) => c in SUB))) continue; // "_{}" stays as typed
     if (m.index > last) out.push({ kind: "text", value: raw.slice(last, m.index) });
     if (m[1] !== undefined) out.push({ kind: "greek", value: m[1] });
     else if (m[4] !== undefined) out.push({ kind: "sub", value: [...m[4]].map((c) => UNSUB[c]).join("") });

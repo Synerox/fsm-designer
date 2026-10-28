@@ -122,3 +122,9 @@ test("latex asks for xelatex or lualatex, with CJK fonts, only when labels need 
   assert.match(emoji, /\\RequireTUTeX/);
   assert.doesNotMatch(emoji, /ctex/);
 });
+
+test("prettyText leaves empty subscript braces as typed", () => {
+  assert.equal(prettyText("_{}"), "_{}");
+  assert.equal(prettyText("S_{}x"), "S_{}x");
+  assert.equal(prettyText("S_{12}"), "S₁₂");
+});
