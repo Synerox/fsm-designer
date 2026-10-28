@@ -13,7 +13,7 @@
 //      crossings, lines through states, diagonal and long lines (simulated
 //      annealing on a cost kept up to date move by move, single states and
 //      whole rows or columns at a time, then settled move by move, near
-//      cells only when trying every cell would cost more than the annealing;
+//      cells only when trying every cell would cost much more than annealing;
 //      of a grid and the same grid turned over its diagonal, the one whose
 //      flow leaves the reset state to the right);
 //    - layers, left to right and top to bottom (Sugiyama style): loops set
@@ -1168,10 +1168,13 @@ function improveGrid(g: Graph, starts: Array<[string[], boolean]>, cols: number,
     return ms.length > 0;
   };
   // Settle: take every move that helps until none does (a few sweeps at most).
-  // A sweep tries every state in every cell. When that costs more than the
-  // annealing (a big, dense machine: many states, few steps each), only the
-  // cells within `near` rows and columns of the state are tried.
-  const near = n * C <= iters ? Infinity : Math.max(1, Math.floor((Math.sqrt(iters / n) - 1) / 2));
+  // A sweep tries every state in every cell. When that costs more than four
+  // times the annealing (a big machine, most of all a dense one: many
+  // states, few steps each), each state only tries the cells within `near`
+  // rows and columns, as many as four annealings allow (at least the eight
+  // around it). (Near cells one row or column away cost 96 states with 2
+  // lines each a fifth more crossings; this rule keeps their full result.)
+  const near = n * C <= 4 * iters ? Infinity : Math.max(1, Math.floor((Math.sqrt((4 * iters) / n) - 1) / 2));
   const settle = (cur: number) => {
     for (let sweep = 0; sweep < 4 && (sweep === 0 || (sweep + 1) * n * C <= iters); sweep++) { // costing no more than the annealing, after the first
       const before = cur;
