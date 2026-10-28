@@ -134,7 +134,7 @@ export async function saveDoc(saveAs = false): Promise<void> {
     filters: [FSM_FILTER],
     mime: "application/json",
   });
-  if (path) markSaved(path);
+  if (path) markSaved(path, doc);
 }
 
 export function svgText(): string {

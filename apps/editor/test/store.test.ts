@@ -180,3 +180,15 @@ test("undo back to the saved document is clean again; redo away from it is not",
   undo();
   assert.equal(useEditor.getState().dirty, true);
 });
+
+test("an edit made while a save is in flight stays unsaved", () => {
+  const { load, edit, undo, markSaved } = useEditor.getState();
+  load(newDiagram(), null);
+  edit((d) => { createState(d, 0, 0); });
+  const written = useEditor.getState().doc;
+  edit((d) => { d.states[0].x = 40; }); // lands before the save returns
+  markSaved("a.fsm.json", written);
+  assert.equal(useEditor.getState().dirty, true, "the file does not have the move");
+  undo();
+  assert.equal(useEditor.getState().dirty, false, "back to what was written");
+});

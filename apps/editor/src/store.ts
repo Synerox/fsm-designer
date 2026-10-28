@@ -43,7 +43,8 @@ interface EditorState {
   undo(): void;
   redo(): void;
   load(doc: FsmDiagram, filePath: string | null): void;
-  markSaved(filePath: string): void;
+  /** `doc` is the diagram that was written; it defaults to the current one. */
+  markSaved(filePath: string, doc?: FsmDiagram): void;
 }
 
 const HISTORY_LIMIT = 500;
@@ -122,8 +123,9 @@ export const useEditor = create<EditorState>((set, get) => ({
   load(doc, filePath) {
     set({ doc, filePath, past: [], future: [], dirty: false, savedDoc: doc, selection: null, coalesce: null, loadSeq: get().loadSeq + 1 });
   },
-  markSaved(filePath) {
-    set({ filePath, dirty: false, savedDoc: get().doc, coalesce: null });
+  markSaved(filePath, doc = get().doc) {
+    // An edit made while the save was in flight is not in the file.
+    set({ filePath, dirty: get().doc !== doc, savedDoc: doc, coalesce: null });
   },
 }));
 
