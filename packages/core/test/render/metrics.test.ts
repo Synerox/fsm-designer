@@ -22,6 +22,14 @@ test("joined emoji, skin tones and combining marks add no width of their own", (
   assert.equal(em("👍🏽"), em("👍"));
   assert.equal(em("❤️"), em("❤"), "variation selector");
   assert.equal(em("é"), em("e"), "e + combining acute");
+  assert.equal(em("🇯🇵🇰🇷"), 2 * em("😀"), "two regional indicators make one flag");
+  assert.equal(em("🇯"), em("😀"), "a lone indicator is still drawn");
+});
+
+test("a zero-width joiner between letters does not hide the second one", () => {
+  // Devanagari half forms and Arabic shaping use ZWJ; the letters after it still show.
+  assert.equal(em("क्\u200Dष"), em("क्ष"));
+  assert.equal(em("ل\u200Dا"), em("لا"));
 });
 
 test("a Hangul name grows its state and the picture like a CJK one", () => {

@@ -18,14 +18,22 @@ const EMOJI = /[\u{1F000}-\u{1FAFF}]/u;
 // Combining marks, zero-width spaces and joiners, variation selectors, skin
 // tones and tag characters change the glyph before them and add no width.
 const ZERO = /[\u0300-\u036F\u200B-\u200F\u2060\u20D0-\u20FF\uFE00-\uFE0F\u{1F3FB}-\u{1F3FF}\u{E0000}-\u{E007F}]/u;
+// Characters a zero-width joiner can glue the next emoji onto.
+const PICT = /[\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u;
+// Regional indicators: two of them make one flag.
+const REGIONAL = /[\u{1F1E6}-\u{1F1FF}]/u;
 
 export function textWidth(s: string, size: number, bold = false): number {
-  let w = 0, joined = false;
+  let w = 0, joined = false, pict = false, halfFlag = false;
   for (const ch of s) {
-    if (ch < "\u0300") w += /[A-Z0-9_=]/.test(ch) ? 0.68 : /[il!.,:;'|1 ]/.test(ch) ? 0.32 : 0.56;
+    if (ch < "\u0300") { w += /[A-Z0-9_=]/.test(ch) ? 0.68 : /[il!.,:;'|1 ]/.test(ch) ? 0.32 : 0.56; pict = halfFlag = false; }
+    else if (ZERO.test(ch)) { /* modifies the glyph before it */ }
     // A character after a zero-width joiner merges into one emoji with the one before it.
-    else if (!joined && !ZERO.test(ch)) w += EMOJI.test(ch) ? 1.25 : WIDE.test(ch) ? 1 : 0.56;
-    joined = ch === "\u200D";
+    else if (joined) halfFlag = false;
+    else if (REGIONAL.test(ch)) { if (!halfFlag) w += 1.25; halfFlag = !halfFlag; pict = true; }
+    else { w += EMOJI.test(ch) ? 1.25 : WIDE.test(ch) ? 1 : 0.56; pict = PICT.test(ch); halfFlag = false; }
+    // Between letters (Indic, Arabic) a joiner only picks a letter form; both letters still show.
+    joined = ch === "\u200D" && pict;
   }
   return w * size * (bold ? 1.06 : 1);
 }
