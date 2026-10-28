@@ -119,7 +119,7 @@ export function renderLatex(d: FsmDiagram, opts: LatexOptions = {}): string {
       // border point of one circle to that of the other. (An edge shifted with
       // transform canvas leaves its ends off the circles once the gap is large.)
       const a = d.states.find((st) => st.id === from)!, b = d.states.find((st) => st.id === to)!;
-      const len = Math.hypot(b.x! - a.x!, b.y! - a.y!);
+      const len = Math.hypot(b.x! - a.x!, b.y! - a.y!) || 1e-9; // as svg.ts: states on top of each other
       const at = (s: typeof a, sign: number) => {
         const r = stateRadius(d, s), o = e.offset!;
         const along = (sign * Math.sqrt(Math.max(r * r - o.x * o.x - o.y * o.y, 0))) / len;

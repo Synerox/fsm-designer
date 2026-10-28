@@ -146,3 +146,13 @@ test("prettyText leaves empty subscript braces as typed", () => {
   assert.equal(prettyText("S_{12}"), "S₁₂");
 });
 
+test("a straight pair between states at the same place writes no NaN into the TeX", () => {
+  const d = createDiagram({ name: "same" });
+  addState(d, { name: "A", x: 0, y: 0, isInitial: true });
+  addState(d, { name: "B", x: 0, y: 0 });
+  addTransition(d, { from: "A", to: "B", curve: 0 });
+  addTransition(d, { from: "B", to: "A", curve: 0 });
+  const out = renderLatex(d);
+  assert.doesNotMatch(out, /NaN/);
+  assert.equal(out.match(/\\draw\[->\] \(s\d\.-?[\d.]+\) -- \(s\d\.-?[\d.]+\);/g)?.length, 2);
+});
