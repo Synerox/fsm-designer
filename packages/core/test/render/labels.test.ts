@@ -83,7 +83,7 @@ test("straight lines both ways run side by side instead of overlapping", () => {
   const [ab, ba] = planDiagram(d).edges;
   assert.ok(ab.path.includes(" L ") && ba.path.includes(" L "), "both stay straight");
   assert.deepEqual([ab.offset!.y, ba.offset!.y], [-8, 8], "one above, one below");
-  assert.match(renderLatex(d), /transform canvas=\{shift=/);
+  assert.equal((renderLatex(d).match(/\\draw\[->\] \(\w+\.-?[\d.]+\) -- /g) ?? []).length, 2, "latex draws the two shifted segments");
   addTransition(d, { from: a.id, to: a.id });
   d.transitions[1].curve = 20;
   assert.equal(planDiagram(d).edges[0].offset, undefined, "only when both are straight");

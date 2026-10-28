@@ -99,7 +99,19 @@ export function renderLatex(d: FsmDiagram, opts: LatexOptions = {}): string {
       const deg = Math.round((-e.loopAngle * 180) / Math.PI); // TikZ y axis points up
       shape = `loop, out=${deg + 30}, in=${deg - 30}, looseness=6`;
     } else if (e.offset) {
-      shape = `transform canvas={shift={(${(e.offset.x / k).toFixed(3)}cm, ${(-e.offset.y / k).toFixed(3)}cm)}}`;
+      // Straight lines both ways, side by side: the plan's segment, from the
+      // border point of one circle to that of the other. (An edge shifted with
+      // transform canvas leaves its ends off the circles once the gap is large.)
+      const a = d.states.find((st) => st.id === from)!, b = d.states.find((st) => st.id === to)!;
+      const len = Math.hypot(b.x! - a.x!, b.y! - a.y!);
+      const at = (s: typeof a, sign: number) => {
+        const r = stateRadius(d, s), o = e.offset!;
+        const along = (sign * Math.sqrt(Math.max(r * r - o.x * o.x - o.y * o.y, 0))) / len;
+        const x = (b.x! - a.x!) * along + o.x, y = (b.y! - a.y!) * along + o.y; // from the centre, screen axes
+        return `(${ID.get(s.id)}.${((Math.atan2(-y, x) * 180) / Math.PI).toFixed(1)})`;
+      };
+      curveLines.push(`  \\draw[->] ${at(a, 1)} -- ${at(b, -1)};`);
+      continue;
     } else if (e.curve !== 0) {
       // The SVG route as an explicit Bézier: TikZ's `bend` overflows ("Dimension
       // too large") on long edges, and this way both exports match exactly.

@@ -46,3 +46,17 @@ test("latex reports a transition with non-numeric geometry instead of crashing",
   (t as Transition & { curve: unknown }).curve = "abc"; // as a hand-edited .fsm.json can hold
   assert.throws(() => renderLatex(d), /A -> B has no valid geometry/);
 });
+
+test("straight edges both ways keep their ends on the circles in latex, whatever the gap", () => {
+  const d = createDiagram({ name: "m" });
+  addState(d, { name: "A", x: 0, y: 0, isInitial: true });
+  addState(d, { name: "B", x: 200, y: 0 });
+  addTransition(d, { from: "A", to: "B", curve: 0 });
+  addTransition(d, { from: "B", to: "A", curve: 0, gap: 48 }); // the Inspector's maximum for r = 30
+  const tex = renderLatex(d);
+  assert.doesNotMatch(tex, /transform canvas/);
+  // Each end is the border anchor of its own circle at the angle where the
+  // SVG line meets it: o = 24 px off the centre line, so asin(24 / 30) = 53.1°.
+  const segs = [...tex.matchAll(/\\draw\[->\] \((\w+)\.(-?[\d.]+)\) -- \((\w+)\.(-?[\d.]+)\);/g)].map((m) => [m[1], Number(m[2]), m[3], Number(m[4])]);
+  assert.deepEqual(segs, [["s0", 53.1, "s1", 126.9], ["s1", -126.9, "s0", -53.1]]);
+});
