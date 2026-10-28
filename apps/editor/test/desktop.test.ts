@@ -23,8 +23,8 @@ const storage = new Map<string, string>();
   removeItem: (k: string) => { storage.delete(k); },
 };
 
-const { isDesktop } = await import("../src/platform.ts");
-const { loadText, serialize } = await import("../src/actions.ts");
+const { isDesktop, launchFile } = await import("../src/platform.ts");
+const { loadText, restoreSession, serialize } = await import("../src/actions.ts");
 const { createState, newDiagram, useEditor } = await import("../src/store.ts");
 
 test("the fake shell is seen as the desktop app", () => {
@@ -36,4 +36,21 @@ test("a .fsm.json with a byte order mark opens", async () => {
   createState(d, 100, 100);
   await loadText("\uFEFF" + serialize(d), "bom.fsm.json");
   assert.equal(useEditor.getState().doc.states.length, 1);
+});
+
+test("one page load asks the shell for the launch file once, and every caller gets it", async () => {
+  calls.length = 0;
+  const d = newDiagram();
+  createState(d, 100, 100);
+  createState(d, 300, 100);
+  answer = (c) => c.cmd === "launch_file" ? "/home/u/t.fsm.json" : c.cmd === "read_text_file" ? serialize(d) : null;
+  // React's dev mode runs the restoring effect twice. The shell hands the path
+  // out once, so a second ask would get nothing and load the autosave over it.
+  const [a, b] = await Promise.all([launchFile(), launchFile()]);
+  assert.equal(a?.path, "/home/u/t.fsm.json");
+  assert.equal(b, a);
+  await restoreSession();
+  assert.equal(calls.filter((c) => c.cmd === "launch_file").length, 1);
+  assert.equal(useEditor.getState().filePath, "/home/u/t.fsm.json");
+  assert.equal(useEditor.getState().doc.states.length, 2);
 });

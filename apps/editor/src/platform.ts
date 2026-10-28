@@ -56,12 +56,21 @@ export async function openTextFile(filters: FileFilter[]): Promise<OpenedFile | 
  * or "Open with" on Windows and Linux). The installers register no .fsm.json
  * association, and macOS hands files over as an Opened event, not argv.
  */
-export async function launchFile(): Promise<OpenedFile | null> {
-  if (!isDesktop) return null;
-  const path = await invoke<string | null>("launch_file");
-  if (!path) return null;
-  return { path, text: await invoke<string>("read_text_file", { path }) };
+export function launchFile(): Promise<OpenedFile | null> {
+  if (!isDesktop) return Promise.resolve(null);
+  // The shell hands the path out once, so a reload restores the autosave (with
+  // its unsaved edits) instead of reopening the file from disk. Within one page
+  // load every caller shares that answer: React's dev mode runs the restoring
+  // effect twice, and the second must not see "no file" and load the autosave.
+  launched ??= (async () => {
+    const path = await invoke<string | null>("launch_file");
+    if (!path) return null;
+    return { path, text: await invoke<string>("read_text_file", { path }) };
+  })();
+  return launched;
 }
+
+let launched: Promise<OpenedFile | null> | undefined;
 
 /**
  * Save data. With `path` (desktop only) it overwrites that file silently;
