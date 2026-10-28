@@ -3,6 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { importVerilog, listStateMachines } from "../../src/import/index.ts";
+import { parseVerilog } from "../../src/import/parser.ts";
 import type { FsmDiagram } from "../../src/model.ts";
 
 const edges = (d: FsmDiagram) => {
@@ -202,4 +203,19 @@ endmodule`);
   assert.deepEqual(edges(r.diagram), ["S0->S1: a", "S0->S0: !a", "S1->S0: "]);
   assert.deepEqual(r.diagram.states.map((s) => [s.name, s.outputs.z]), [["S0", 0], ["S1", 1]]);
   assert.ok(r.warnings.includes("Skipped call set_out on line 10; its effect is not in the diagram"), r.warnings.join("\n"));
+});
+
+test("a missing comma in an ANSI port list keeps both ports and is reported", () => {
+  const src = `module m(input clk
+  input rst, input [1:0] a
+  input b, output reg y);
+  localparam S0 = 0, S1 = 1;
+  reg s;
+  always @(posedge clk) if (rst) s <= S0; else case (s) S0: if (a == 2 && b) s <= S1; S1: s <= S0; endcase
+  always @* y = s == S1;
+endmodule`;
+  assert.deepEqual(parseVerilog(src).modules[0].ports, ["clk", "rst", "a", "b", "y"]);
+  const r = importVerilog(src);
+  assert.deepEqual(r.diagram.inputs.map((s) => [s.name, s.width]), [["a", 2], ["b", 1]]);
+  assert.deepEqual(r.warnings, ['Skipped line 2: expected "," before "input"', 'Skipped line 3: expected "," before "input"']);
 });

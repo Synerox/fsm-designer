@@ -301,7 +301,9 @@ class Parser {
         if (NET_TYPES.has(t.text) || t.text === "signed" || t.text === "unsigned") { this.i++; sawType = true; continue; }
         if (t.text in INT_TYPES) { width = INT_TYPES[t.text]; this.i++; sawType = true; continue; }
         if (this.is("::", 1) && this.peek(2).kind === "id") { this.i += 2; continue; } // pkg::type
-        if (this.peek(1).kind === "id" || (this.peek(1).text === "[" && m.enums.has(t.text))) {
+        // A user type is followed by the name, but "input clk input rst" is a
+        // missing comma, not clk used as a type.
+        if ((this.peek(1).kind === "id" && !isDirection(this.peek(1).text)) || (this.peek(1).text === "[" && m.enums.has(t.text))) {
           enumType = m.enums.has(t.text) ? t.text : undefined;
           this.i++;
           sawType = true;
@@ -322,7 +324,10 @@ class Parser {
         m.ports.push(name);
         m.decls.set(name, { name, dir, range, width, enumType, init, line: tok.line });
       }
-      if (!this.accept(",")) break;
+      if (this.accept(",")) continue;
+      if (!isDirection(this.peek().text)) break;
+      // Read on as if the comma were there, so no port is lost, and say so.
+      m.skipped.push(`line ${this.peek().line}: expected "," before "${this.peek().text}"`);
     }
   }
 
@@ -821,6 +826,8 @@ class Parser {
     return this.selects(e);
   }
 }
+
+const isDirection = (w: string) => w === "input" || w === "output" || w === "inout";
 
 interface ValueRange {
   lo: Expr;
