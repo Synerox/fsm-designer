@@ -2,11 +2,11 @@
 // interface, so a "live document" backend (the desktop app over its local
 // WebSocket) can replace the file store without touching the tools.
 
-import { access, chmod, chown, constants, lstat, mkdir, readdir, readFile, realpath, rm, writeFile, rename, open, stat, unlink } from "node:fs/promises";
+import { access, chmod, chown, constants, link, lstat, mkdir, readdir, readFile, realpath, rm, writeFile, rename, open, stat, unlink } from "node:fs/promises";
 import { readFileSync, readlinkSync, unlinkSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir, hostname } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { parseDiagram } from "@fsm/core";
 import type { FsmDiagram } from "@fsm/core";
 
@@ -155,20 +155,56 @@ const permission = (e: unknown) => ["EACCES", "EPERM", "EROFS"].includes((e as N
 /** Create `path` with O_EXCL holding our identity; false if it already exists. */
 async function claim(path: string, token: string): Promise<boolean> {
   ours.add(token);
+  const body = JSON.stringify({ pid: process.pid, host: HOST, ns: PID_NS, token, time: Date.now() }) + "\n";
+  const fail = (e: unknown): never => {
+    ours.delete(token);
+    if (permission(e)) throw new Error(`Cannot create ${path}: the folder ${dirname(path)} is not writable (${(e as NodeJS.ErrnoException).code})`);
+    throw e;
+  };
+  // Write our identity to a file of our own, then hard-link it into place: the
+  // link either fails (taken) or appears complete, so a process killed half-way
+  // never leaves an empty lock behind for others to wait out.
+  const dir = dirname(path);
+  const prefix = `${basename(path)}.new-${TMP_HOST}-`;
+  await clearTemps(dir, prefix);
+  const tmp = join(dir, `${prefix}${process.pid}-${++tmpCounter}`);
+  temps.add(tmp);
+  try {
+    await writeFile(tmp, body, { flag: "wx" });
+    try {
+      await link(tmp, path);
+      held.set(path, token);
+      return true;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code ?? "";
+      if (code === "EEXIST") {
+        ours.delete(token);
+        return false;
+      }
+      // Some file systems (FAT, some network shares) have no hard links.
+      if (!["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV", "EMLINK"].includes(code)) throw e;
+    }
+  } catch (e) {
+    fail(e);
+  } finally {
+    await unlink(tmp).catch(() => {});
+    temps.delete(tmp);
+  }
   let fh;
   try {
     fh = await open(path, "wx");
   } catch (e) {
-    ours.delete(token);
-    if (permission(e)) throw new Error(`Cannot create ${path}: the folder ${dirname(path)} is not writable (${(e as NodeJS.ErrnoException).code})`);
-    if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
-    throw e;
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") {
+      ours.delete(token);
+      return false;
+    }
+    fail(e);
   }
   held.set(path, token);
   try {
-    await fh.writeFile(JSON.stringify({ pid: process.pid, host: HOST, ns: PID_NS, token, time: Date.now() }) + "\n");
+    await fh!.writeFile(body);
   } finally {
-    await fh.close();
+    await fh!.close();
   }
   return true;
 }
@@ -290,9 +326,8 @@ let tmpCounter = 0;
 /** Host name as it appears in temp file names, so only this computer's leftovers are cleared. */
 const TMP_HOST = HOST.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 40);
 
-/** Remove temp files of `name` left by processes on this computer that have exited (killed mid-save). */
-async function clearTemps(dir: string, name: string): Promise<void> {
-  const prefix = `.${name}${EXT}.tmp-${TMP_HOST}-`;
+/** Remove temp files named `<prefix><pid>-<n>` left by processes on this computer that have exited (killed mid-write). */
+async function clearTemps(dir: string, prefix: string): Promise<void> {
   const names = await readdir(dir).catch(() => [] as string[]);
   for (const n of names) {
     if (!n.startsWith(prefix)) continue;
@@ -424,7 +459,7 @@ export class FileStore implements DiagramStore {
     // The temp name is unique per write, so overlapping saves cannot share it.
     if (old && !old.isFile()) throw new Error(`Cannot save ${target}: it is ${old.isDirectory() ? "a folder" : "not a regular file"}`);
     const tmp = join(dirname(target), `.${d.name}${EXT}.tmp-${TMP_HOST}-${process.pid}-${++tmpCounter}`);
-    await clearTemps(dirname(target), d.name);
+    await clearTemps(dirname(target), `.${d.name}${EXT}.tmp-${TMP_HOST}-`);
     temps.add(tmp);
     try {
       if (old && old.nlink > 1) {
