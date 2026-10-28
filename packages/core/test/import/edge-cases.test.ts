@@ -441,6 +441,16 @@ module m(input clk, input rst, input go, output busy);
   assign busy = st[4];
 endmodule`);
   assert.deepEqual(stateOutputs(o.diagram), { A: { busy: 0 }, B: { busy: 0 }, C: { busy: 1 } });
+  // An input's selects are rewritten too, and the import says so.
+  const i = importVerilog(`
+module m(input clk, input rst, input [0:3] req, output busy);
+  localparam A = 1'b0, B = 1'b1;
+  reg st;
+  always @(posedge clk) if (rst) st <= A; else case (st) A: if (req[0]) st <= B; B: if (!req[3]) st <= A; endcase
+  assign busy = st;
+endmodule`);
+  assert.deepEqual(edges(i.diagram), ["A->B: req[3]", "A->A: !req[3]", "B->B: req[0]", "B->A: !req[0]"]);
+  assert.ok(i.warnings.includes('"req" is declared [0:3]; its bit selects are shown as positions from the LSB (req[0] reads req[3])'), i.warnings.join("\n"));
 });
 
 test("code nested too deeply for the stack fails with a VerilogImportError", () => {

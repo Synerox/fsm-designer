@@ -38,16 +38,23 @@ files with several FSMs (the editor shows it as a drop-down).
    chain, or through a combinational next-state variable written as
    `state <= next` or `state <= rst ? IDLE : next`) and is used as a case
    subject (also inside a concatenation, `casex ({state, in})`), compared
-   with constants or bit-tested (`state[IDLE]` or `st[0]`, one-hot).
-   Counters (`n <= n + 1`) are ruled out. Bit selects follow the declared
-   range (`reg [0:2] state`: `state[0]` is the MSB).
+   with constants or bit-tested (`state[IDLE]`, or `st[0]` and `st[1]` when
+   every value is one-hot or zero, so `msb = data[7]` on a data register
+   does not count). Counters (`n <= n + 1`) are ruled out. Bit selects
+   follow the declared range (`reg [0:2] state`: `state[0]` is the MSB); on
+   other signals they are shown as bit positions from the LSB, with a
+   warning (`input [0:3] req`: `req[0]` reads `req[3]`).
 3. **Clock and reset** come from the sensitivity list and the first `if` of the
    state register's block (`if (!rst_n)`, `if (rst)`, or
    `state <= !rst_n ? IDLE : next`; assignments to other registers before it
    are passed over); the reset state is what that block assigns with reset
    asserted. A signal without a reset-like name counts only if it sets the
-   state to a constant (`if (en) state <= next; else state <= state;` is an
-   enable, not a reset). Without a reset, an initial value is used.
+   state to a constant while its `else` follows a computed next state
+   (`if (go) state <= S1; else state <= next;`), the register has no
+   declared initial value, and a warning says so: `if (en) state <= next;
+   else state <= state;` is an enable, and `if (start) state <= RUN; else if
+   (done) state <= IDLE;` is the machine itself. Without a reset, an initial
+   value is used.
 4. **Slicing.** Only logic that matters to this FSM runs: outputs whose value
    depends on the state register (directly or through combinational logic)
    and the combinational signals that feed them. Outputs of other circuits

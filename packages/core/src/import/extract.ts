@@ -1213,6 +1213,12 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
 
   fitStateSizes(d);
 
+  // A select rewritten by bitPositions no longer reads as in the source: say why.
+  const texts = shownTexts(d);
+  for (const [n, r] of c.ranges) {
+    if (n !== R && n !== N && texts.some((t) => t.includes(`${n}[`))) c.warn(`"${n}" is declared [${r.msb}:${r.lsb}]; its bit selects are shown as positions from the LSB (${n}[${r.msb}] reads ${n}[${Math.abs(r.msb - r.lsb)}])`);
+  }
+
   const blockCount = new Set(blocks.filter((b) => b.writes.has(R) || (N && b.writes.has(N)) || allOut.some((o) => b.writes.has(o))).filter((b) => b.always)).size;
   const assigns = blocks.filter((b) => !b.always && allOut.some((o) => b.writes.has(o))).length;
   const style = `${blockCount} always block${blockCount === 1 ? "" : "s"}${assigns ? ` + ${assigns} assign${assigns === 1 ? "" : "s"}` : ""}`;
@@ -1232,13 +1238,17 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
   };
 }
 
-function namedConstants(d: FsmDiagram, c: Ctx): Record<string, string> {
-  const out: Record<string, string> = {};
-  const texts = [
+/** Every condition and output value the diagram shows as text. */
+function shownTexts(d: FsmDiagram): string[] {
+  return [
     ...d.states.flatMap((s) => Object.values(s.outputs)),
     ...d.transitions.flatMap((t) => [t.condition, ...Object.values(t.outputs)]),
   ].filter((v): v is string => typeof v === "string");
-  for (const t of texts) for (const id of t.match(/[A-Za-z_]\w*/g) ?? []) if (c.params.has(id)) out[id] = formatNum({ ...c.params.get(id)!, src: undefined, name: undefined });
+}
+
+function namedConstants(d: FsmDiagram, c: Ctx): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const t of shownTexts(d)) for (const id of t.match(/[A-Za-z_]\w*/g) ?? []) if (c.params.has(id)) out[id] = formatNum({ ...c.params.get(id)!, src: undefined, name: undefined });
   return out;
 }
 
