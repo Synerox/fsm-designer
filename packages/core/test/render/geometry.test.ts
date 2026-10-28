@@ -28,3 +28,23 @@ test("a label is not placed on the initial arrow", () => {
     assert.ok(!segmentInRect(plan.edges[0].label!, from, to), `B at (${bx}, ${by})`);
   }
 });
+
+test("an edge between touching or overlapping states still points from A to B", () => {
+  for (const bx of [110, 140, 159, 161, 175]) {
+    const d = createDiagram({ name: "m" });
+    addState(d, { name: "A", x: 100, y: 100 });
+    addState(d, { name: "B", x: bx, y: 100 });
+    addTransition(d, { from: "A", to: "B" });
+    const [x0, , x1] = planDiagram(d).edges[0].path.match(/-?[\d.]+/g)!.map(Number);
+    assert.ok(x1 - x0 >= 10, `B at x=${bx}: ${planDiagram(d).edges[0].path}`);
+    assert.equal(x1, bx - 31, "the arrow still ends at B's border");
+  }
+  // A straight line each way, drawn side by side.
+  const d = createDiagram({ name: "m" });
+  addState(d, { name: "A", x: 100, y: 100 });
+  addState(d, { name: "B", x: 130, y: 100 });
+  addTransition(d, { from: "A", to: "B", curve: 0 });
+  addTransition(d, { from: "B", to: "A", curve: 0 });
+  const [ab, ba] = planDiagram(d).edges.map((e) => e.path.match(/-?[\d.]+/g)!.map(Number));
+  assert.ok(ab[2] - ab[0] >= 10 && ba[0] - ba[2] >= 10, "both point the right way");
+});

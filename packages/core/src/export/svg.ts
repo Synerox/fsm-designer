@@ -227,20 +227,30 @@ export function planDiagram(d: FsmDiagram, opts: PlanOptions = {}): DiagramPlan 
     const gap = ts.find((t) => t.gap !== undefined)?.gap ?? back?.find((t) => t.gap !== undefined)?.gap ?? PARALLEL_GAP;
     const half = Math.min(gap / 2, Math.min(ra, rb) * 0.8);
     const straightPair = (curve: number) => curve === 0 && reverseStraight;
+    // When the circles touch or overlap, border to border would run from B
+    // back to A and the arrowhead would point the wrong way. Start the line
+    // an arrowhead's length before B's border instead: the part inside A is
+    // hidden under A's fill, since states are drawn over edges.
+    const forward = (p0: Pt, p1: Pt) =>
+      (p1.x - p0.x) * dir.x + (p1.y - p0.y) * dir.y >= 10 ? p0 : { x: p1.x - dir.x * 10, y: p1.y - dir.y * 10 };
     const build = (curve: number) => {
       if (straightPair(curve)) {
         const o = half;
         const along = (r: number) => Math.sqrt(Math.max(r * r - o * o, 0));
-        const p0 = { x: A.x + dir.x * along(ra) + n.x * o, y: A.y + dir.y * along(ra) + n.y * o };
         const p1 = { x: B.x - dir.x * along(rb + 1) + n.x * o, y: B.y - dir.y * along(rb + 1) + n.y * o };
+        const p0 = forward({ x: A.x + dir.x * along(ra) + n.x * o, y: A.y + dir.y * along(ra) + n.y * o }, p1);
         const ctrl = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
         const samples = Array.from({ length: 21 }, (_, i) => ({ x: p0.x + ((p1.x - p0.x) * i) / 20, y: p0.y + ((p1.y - p0.y) * i) / 20 }));
         return { curve, ctrl, p0, p1, samples };
       }
-      const ctrl = { x: mid.x + n.x * curve * 2, y: mid.y + n.y * curve * 2 };
+      let ctrl = { x: mid.x + n.x * curve * 2, y: mid.y + n.y * curve * 2 };
       const ua = unit(sub(ctrl, A)), ub = unit(sub(ctrl, B));
-      const p0 = { x: A.x + ua.x * ra, y: A.y + ua.y * ra };
+      let p0 = { x: A.x + ua.x * ra, y: A.y + ua.y * ra };
       const p1 = { x: B.x + ub.x * (rb + 1), y: B.y + ub.y * (rb + 1) };
+      if (curve === 0 && forward(p0, p1) !== p0) {
+        p0 = forward(p0, p1);
+        ctrl = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
+      }
       const samples = Array.from({ length: 21 }, (_, i) => quad(p0, ctrl, p1, i / 20).p);
       return { curve, ctrl, p0, p1, samples };
     };
