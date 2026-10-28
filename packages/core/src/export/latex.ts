@@ -13,7 +13,28 @@ export interface LatexOptions extends PlanOptions {
   pxPerCm?: number; // default 40
 }
 
-const ID = (id: string) => id.replace(/[^A-Za-z0-9]/g, "");
+/**
+ * TikZ node names for the states. Ids that are already plain alphanumerics
+ * (the editor's "s0", "s1", ...) are kept; any other id is stripped to
+ * alphanumerics and, if that leaves nothing or clashes with another name,
+ * numbered. Without this, ids "a-1" and "a1" (or "空闲" and "忙", both empty)
+ * named the same node and edges attached to the wrong circle.
+ */
+function nodeNames(d: FsmDiagram): Map<string, string> {
+  const safe = (id: string) => /^[A-Za-z0-9]+$/.test(id);
+  const names = new Map<string, string>();
+  const used = new Set<string>();
+  for (const s of d.states) if (safe(s.id)) { names.set(s.id, s.id); used.add(s.id); }
+  d.states.forEach((s, i) => {
+    if (names.has(s.id)) return;
+    const base = s.id.replace(/[^A-Za-z0-9]/g, "") || `state${i}`;
+    let name = base;
+    for (let k = 2; used.has(name); k++) name = `${base}x${k}`;
+    names.set(s.id, name);
+    used.add(name);
+  });
+  return names;
+}
 
 /** TikZ automata only draws the start arrow on four sides; pick the nearest. */
 function texFont(pt: number): string {
@@ -30,6 +51,7 @@ export function renderLatex(d: FsmDiagram, opts: LatexOptions = {}): string {
   const missing = d.states.filter((s) => s.x === undefined || s.y === undefined);
   if (missing.length) throw new Error(`States without positions: ${missing.map((s) => s.name).join(", ")}. Run auto layout first.`);
   const k = opts.pxPerCm ?? 40;
+  const ID = nodeNames(d);
   const lines: string[] = [];
   lines.push(`\\begin{tikzpicture}[>=Stealth, shorten >=1pt, auto, node distance=2.5cm, semithick,`);
   lines.push(`  every state/.style={draw, inner sep=0pt, font=\\footnotesize}, initial text=,`);
@@ -44,7 +66,7 @@ export function renderLatex(d: FsmDiagram, opts: LatexOptions = {}): string {
     const size = `minimum size=${((2 * stateRadius(d, s)) / k).toFixed(2)}cm`;
     // Only sizes set by hand get an explicit font; 15 px (the default) ~ \footnotesize (8 pt).
     const font = s.fontSize !== undefined ? `, font=${texFont((s.fontSize * 8) / 15)}` : "";
-    lines.push(`  \\node[${flags}, ${size}${font}] (${ID(s.id)}) at (${(s.x! / k).toFixed(2)}, ${(-s.y! / k).toFixed(2)}) {${body}};`);
+    lines.push(`  \\node[${flags}, ${size}${font}] (${ID.get(s.id)}) at (${(s.x! / k).toFixed(2)}, ${(-s.y! / k).toFixed(2)}) {${body}};`);
   }
   // Reuse the SVG renderer's routing so both exports bend and loop the same way.
   const plan = planDiagram(d, opts);
@@ -71,7 +93,7 @@ export function renderLatex(d: FsmDiagram, opts: LatexOptions = {}): string {
       curveLines.push(`  \\draw[->] ${pt(x0, y0)} .. controls ${pt(x0 + ((cx - x0) * 2) / 3, y0 + ((cy - y0) * 2) / 3)} and ${pt(x1 + ((cx - x1) * 2) / 3, y1 + ((cy - y1) * 2) / 3)} .. ${pt(x1, y1)};`);
       continue;
     }
-    edgeLines.push(`    (${ID(from)}) edge[${shape}] (${ID(to)})`);
+    edgeLines.push(`    (${ID.get(from)}) edge[${shape}] (${ID.get(to)})`);
   }
   if (edgeLines.length) lines.push(`  \\path[->]`, ...edgeLines, `  ;`);
   lines.push(...curveLines);
