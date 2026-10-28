@@ -3,6 +3,9 @@
 // `rustc --edition 2021 --test src/files.rs`.
 
 use std::ffi::OsString;
+use std::fs;
+use std::io::{self, Write};
+use std::path::Path;
 
 /// The first command-line argument that is not a flag. Argv is taken as
 /// OsString because std::env::args() panics on an argument that is not valid
@@ -22,9 +25,63 @@ pub fn decode_text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// Save `contents` to `path` so that a failed or interrupted write (disk full,
+/// a network share dropping, a crash) leaves the old file as it was: write a
+/// temporary file beside it, flush it to disk, then rename it over the old one,
+/// which replaces it in one step (std's rename replaces an existing file on
+/// Windows too). fs::write would truncate the old file first.
+pub fn write_replacing(path: &Path, contents: &[u8]) -> io::Result<()> {
+    // Through a symlink, replace the file it points at, not the link.
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let old = fs::metadata(&target).ok();
+    // A read-only file stays refused, as a plain write refuses it (a rename would not).
+    if old.as_ref().is_some_and(|m| m.permissions().readonly()) {
+        return fs::write(&target, contents);
+    }
+    let (Some(dir), Some(name)) = (target.parent(), target.file_name()) else {
+        return fs::write(&target, contents);
+    };
+    let mut tmp_name = OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(format!(".{}.tmp", std::process::id()));
+    let tmp = dir.join(tmp_name);
+    // A folder where only the file itself is writable gets the old in-place write.
+    let Ok(mut f) = fs::File::create(&tmp) else {
+        return fs::write(&target, contents);
+    };
+    let written = (|| {
+        f.write_all(contents)?;
+        // Keep the old file's permissions (a 0600 file must not become world-readable).
+        if let Some(m) = &old {
+            f.set_permissions(m.permissions())?;
+        }
+        f.sync_all()
+    })();
+    drop(f);
+    if let Err(e) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if fs::rename(&tmp, &target).is_err() {
+        // Windows refuses to replace a file another program holds open without
+        // delete sharing; writing into it in place still works there.
+        let _ = fs::remove_file(&tmp);
+        return fs::write(&target, contents);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fsm-files-test-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     #[test]
     fn launch_arg_skips_flags_and_survives_non_unicode() {
@@ -46,5 +103,70 @@ mod tests {
         assert_eq!(decode_text(b"// \xAA\xAC\xBA\x41\nmodule"), "// \u{FFFD}\u{FFFD}\u{FFFD}A\nmodule");
         // Only a leading BOM is dropped.
         assert_eq!(decode_text("a\u{FEFF}".as_bytes()), "a\u{FEFF}");
+    }
+
+    #[test]
+    fn write_replacing_creates_and_replaces_without_leftovers() {
+        let dir = scratch("replace");
+        let p = dir.join("a.fsm.json");
+        write_replacing(&p, b"one").unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"one");
+        write_replacing(&p, b"two, longer").unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"two, longer");
+        let names: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, [OsString::from("a.fsm.json")], "no temporary file is left behind");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_replacing_never_truncates_the_old_file() {
+        use std::io::Read;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = scratch("atomic");
+        let p = dir.join("a.fsm.json");
+        fs::write(&p, b"old contents").unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
+        let before = fs::metadata(&p).unwrap().ino();
+        let mut held = fs::File::open(&p).unwrap();
+        write_replacing(&p, b"new").unwrap();
+        // The old file was replaced by another one, not emptied and rewritten:
+        // a reader that had it open still sees all of it.
+        let mut s = String::new();
+        held.read_to_string(&mut s).unwrap();
+        assert_eq!(s, "old contents");
+        let after = fs::metadata(&p).unwrap();
+        assert_ne!(after.ino(), before);
+        assert_eq!(after.permissions().mode() & 0o777, 0o600, "permissions are kept");
+        assert_eq!(fs::read(&p).unwrap(), b"new");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_replacing_keeps_symlinks_and_read_only_files() {
+        let dir = scratch("links");
+        let real = dir.join("real.fsm.json");
+        let link = dir.join("link.fsm.json");
+        fs::write(&real, b"old").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_replacing(&link, b"new").unwrap();
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(&real).unwrap(), b"new");
+
+        let ro = dir.join("ro.fsm.json");
+        fs::write(&ro, b"keep").unwrap();
+        let mut perm = fs::metadata(&ro).unwrap().permissions();
+        perm.set_readonly(true);
+        fs::set_permissions(&ro, perm).unwrap();
+        // Root may write anyway; everyone else is refused, as by fs::write.
+        if write_replacing(&ro, b"x").is_err() {
+            assert_eq!(fs::read(&ro).unwrap(), b"keep");
+        }
+        let mut perm = fs::metadata(&ro).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perm.set_readonly(false);
+        fs::set_permissions(&ro, perm).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

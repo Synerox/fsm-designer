@@ -4,6 +4,7 @@
 mod files;
 
 use std::fs;
+use std::path::Path;
 use std::sync::Mutex;
 
 /// A .fsm.json path given on the command line (e.g. opening a file with the app).
@@ -23,7 +24,7 @@ fn read_text_file(path: String) -> Result<String, String> {
 
 #[tauri::command]
 fn write_file(path: String, contents: Vec<u8>) -> Result<(), String> {
-    fs::write(&path, contents).map_err(|e| format!("{path}: {e}"))
+    files::write_replacing(Path::new(&path), &contents).map_err(|e| format!("{path}: {e}"))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
