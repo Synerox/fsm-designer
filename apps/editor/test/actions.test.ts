@@ -2,7 +2,7 @@
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import { autoLayout } from "@fsm/core";
-import { importVerilogText, loadText, restoreSession, serialize, startAutosave, tidyUp } from "../src/actions.ts";
+import { discardUnsaved, importVerilogText, loadText, restoreSession, serialize, startAutosave, tidyUp } from "../src/actions.ts";
 import { createState, createTransition, drawOptions, newDiagram, setInitial, useEditor } from "../src/store.ts";
 
 // Node has no localStorage; a Map stands in for the browser's.
@@ -119,4 +119,61 @@ test("a restored unsaved session stays unsaved after an edit and its undo", asyn
   useEditor.getState().edit((d) => { d.states[0].x = 140; });
   useEditor.getState().undo();
   assert.equal(useEditor.getState().dirty, true, "the restored doc was never written to m.fsm.json");
+});
+
+/** A drawn one-state diagram as the editor would autosave it, with `patch` applied to the stored object. */
+function storeSession(patch: (s: { doc: { states: Array<Record<string, unknown>> }; filePath: unknown; dirty: unknown }) => void) {
+  const d = newDiagram();
+  createState(d, 100, 100);
+  const s = { doc: JSON.parse(serialize(d)), filePath: "m.fsm.json" as unknown, dirty: false as unknown };
+  patch(s);
+  storage.set("fsm-designer:autosave", JSON.stringify(s));
+}
+
+test("a restored session with a file path that is not a string comes back without it", async () => {
+  storeSession((s) => { s.filePath = 123; });
+  await restoreSession();
+  assert.equal(useEditor.getState().doc.states.length, 1);
+  assert.equal(useEditor.getState().filePath, null, "a number here blanked the page (baseName called .split on it)");
+});
+
+test("an autosave that cannot be drawn is set aside with a message, not loaded", async () => {
+  useEditor.getState().load(newDiagram(), null);
+  storeSession((s) => { delete s.doc.states[0].name; delete s.doc.states[0].label; });
+  const raw = storage.get("fsm-designer:autosave");
+  await assert.rejects(restoreSession(), /^Error: Could not restore the last session: the diagram cannot be drawn/);
+  assert.equal(useEditor.getState().doc.states.length, 0, "rendering it threw and left an empty page on every reload");
+  assert.equal(storage.get("fsm-designer:autosave.bad"), raw, "kept where the next edit cannot overwrite it");
+  assert.equal(storage.has("fsm-designer:autosave"), false);
+});
+
+test("an autosave that is not JSON is set aside with a message", async () => {
+  storage.set("fsm-designer:autosave", '{"doc": {"states": [');
+  await assert.rejects(restoreSession(), /Could not restore the last session/);
+  assert.equal(storage.get("fsm-designer:autosave.bad"), '{"doc": {"states": [');
+  storage.set("fsm-designer:autosave", "null");
+  await assert.rejects(restoreSession(), /Could not restore the last session: not a saved diagram/);
+});
+
+test("opening a file with a state the editor cannot draw fails instead of blanking the page", async () => {
+  useEditor.getState().load(newDiagram(), null);
+  const text = JSON.stringify({ name: "agent_made", states: [{ id: "s0", x: 100, y: 100, isInitial: true }], transitions: [] });
+  await assert.rejects(loadText(text, "agent.fsm.json"), /the diagram cannot be drawn/);
+  assert.equal(useEditor.getState().doc.states.length, 0);
+  await assert.rejects(loadText("{ not json", "bad.fsm.json"), /^Error: it is not a valid JSON file$/);
+});
+
+test("discarding on close leaves the last saved diagram in the autosave, not the discarded changes", () => {
+  const d = newDiagram();
+  createState(d, 100, 100);
+  useEditor.getState().load(d, "m.fsm.json");
+  useEditor.getState().edit((d) => { createState(d, 300, 100); });
+  storage.set("fsm-designer:autosave", JSON.stringify({ doc: useEditor.getState().doc, filePath: "m.fsm.json", dirty: true }));
+  discardUnsaved();
+  const kept = JSON.parse(storage.get("fsm-designer:autosave")!);
+  assert.deepEqual([kept.doc.states.length, kept.filePath, kept.dirty], [1, "m.fsm.json", false]);
+  // An import was never saved anywhere: nothing to go back to.
+  useEditor.setState({ savedDoc: null });
+  discardUnsaved();
+  assert.equal(storage.has("fsm-designer:autosave"), false);
 });

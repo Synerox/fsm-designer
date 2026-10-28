@@ -6,7 +6,7 @@ import { Hints } from "./Hints.tsx";
 import { Inspector } from "./Inspector.tsx";
 import { Menu } from "./Menu.tsx";
 import { ImportReport, VerilogImportDialog } from "./VerilogImport.tsx";
-import { discardMessage, exportLatex, exportPng, exportSvg, latexText, newFile, openFile, restoreSession, saveDoc, startAutosave, tidyUp } from "./actions.ts";
+import { discardMessage, discardUnsaved, exportLatex, exportPng, exportSvg, latexText, newFile, openFile, restoreSession, saveDoc, startAutosave, tidyUp } from "./actions.ts";
 import { baseName, copyText, guardWindowClose, isDesktop, setWindowTitle } from "./platform.ts";
 import { deleteCopied, deletesSelection, keyPressesButton, typedText } from "./keys.ts";
 import { modalOpen, useModal } from "./dialog.ts";
@@ -95,9 +95,9 @@ export function App() {
   };
 
   useEffect(() => {
-    restoreSession().catch(() => {});
+    restoreSession().catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
     const stopAutosave = startAutosave();
-    const unguard = guardWindowClose(() => useEditor.getState().dirty, discardMessage);
+    const unguard = guardWindowClose(() => useEditor.getState().dirty, discardMessage, discardUnsaved);
     return () => { stopAutosave(); void unguard.then((f) => f()); };
   }, []);
 

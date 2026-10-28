@@ -214,18 +214,36 @@ export async function setWindowTitle(title: string): Promise<void> {
   await getCurrentWindow().setTitle(title);
 }
 
+let confirmsOpen = 0;
+
 export async function confirmDialog(message: string): Promise<boolean> {
-  if (!isDesktop) return pageConfirm(message);
-  const { ask } = await import("@tauri-apps/plugin-dialog");
-  return ask(message, { title: "FSM Designer", kind: "warning" });
+  confirmsOpen++;
+  try {
+    if (!isDesktop) return await pageConfirm(message);
+    try {
+      const { ask } = await import("@tauri-apps/plugin-dialog");
+      return await ask(message, { title: "FSM Designer", kind: "warning" });
+    } catch {
+      // The native dialog failed (e.g. not permitted): ask in the page, or the
+      // question, and closing the window, could never be answered.
+      return await pageConfirm(message);
+    }
+  } finally {
+    confirmsOpen--;
+  }
 }
 
-/** Desktop: ask before closing the window while `isDirty()` is true. */
-export async function guardWindowClose(isDirty: () => boolean, message: () => string): Promise<() => void> {
+/** Desktop: ask before closing the window while `isDirty()` is true; `onDiscard` runs when the user agrees to lose the changes. */
+export async function guardWindowClose(isDirty: () => boolean, message: () => string, onDiscard: () => void): Promise<() => void> {
   if (!isDesktop) return () => {}; // the browser build keeps work in localStorage instead
   const { getCurrentWindow } = await import("@tauri-apps/api/window");
   return getCurrentWindow().onCloseRequested(async (e) => {
-    if (isDirty() && !(await confirmDialog(message()))) e.preventDefault();
+    if (!isDirty()) return;
+    // A question is already open (an earlier close request, or New/Open's):
+    // that one is answered first. Stacked asks closed the window on any Yes.
+    if (confirmsOpen) { e.preventDefault(); return; }
+    if (await confirmDialog(message())) onDiscard();
+    else e.preventDefault();
   });
 }
 

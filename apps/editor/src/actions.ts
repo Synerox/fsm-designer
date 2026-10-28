@@ -1,13 +1,16 @@
 // File and export commands shared by the toolbar and keyboard shortcuts.
 
-import { autoLayout, ensureLayout, fitStateSizes, importVerilogLaidOut, parseDiagram, prettyText, renderLatex, renderSvg, stateRadius } from "@fsm/core";
+import { autoLayout, ensureLayout, fitStateSizes, importVerilogLaidOut, parseDiagram, planDiagram, prettyText, renderLatex, renderSvg, stateRadius } from "@fsm/core";
 import type { FsmDiagram, ImportOptions, ImportResult, LayoutIssue } from "@fsm/core";
 import { FSM_FILTER, baseName, confirmDialog, fileError, launchFile, openTextFile, saveFile } from "./platform.ts";
+import type { OpenedFile } from "./platform.ts";
 import { DEFAULT_NAME, drawOptions, newDiagram, useEditor } from "./store.ts";
 
 import { tr } from "./i18n.ts";
 
 const AUTOSAVE_KEY = "fsm-designer:autosave";
+/** Where an autosave that could not be restored is kept, so the next edit does not destroy it. */
+const SET_ASIDE_KEY = "fsm-designer:autosave.bad";
 
 export function serialize(d: FsmDiagram): string {
   return JSON.stringify(d, null, 2) + "\n";
@@ -35,6 +38,21 @@ function upgradeLabels(d: FsmDiagram): FsmDiagram {
   return d;
 }
 
+/**
+ * Throws, in words, if the diagram cannot be drawn. parseDiagram lets through
+ * some docs the drawing code chokes on (a state without a name), and a throw
+ * while rendering would blank the whole page.
+ */
+function checkDrawable(d: FsmDiagram): void {
+  try {
+    planDiagram(d, drawOptions());
+  } catch (e) {
+    throw new Error(tr(`the diagram cannot be drawn (${errorText(e)})`, `無法畫出這張圖（${errorText(e)}）`, `図を描画できません（${errorText(e)}）`));
+  }
+}
+
+const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
 export async function loadText(text: string, path: string | null): Promise<void> {
   let json: unknown;
   try {
@@ -55,6 +73,7 @@ export async function loadText(text: string, path: string | null): Promise<void>
     if (grown && crowded(d)) await autoLayout(d, { draw: drawOptions() });
     else await ensureLayout(d);
   }
+  checkDrawable(d);
   useEditor.getState().load(d, path);
 }
 
@@ -193,37 +212,108 @@ export async function exportPng(scale = 2): Promise<void> {
 
 // ---- Autosave: the open diagram survives a reload or crash, like Evan's editor ----
 
+let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
+
+function writeAutosave(): void {
+  const { doc, filePath, dirty } = useEditor.getState();
+  try {
+    localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({ doc, filePath, dirty }));
+  } catch { /* storage full or unavailable */ }
+}
+
 export function startAutosave(): () => void {
-  let timer: ReturnType<typeof setTimeout> | undefined;
   const unsub = useEditor.subscribe((s, prev) => {
     // dirty counts too: an import or restore sets it in a second update after
     // load(), and a save to the same path changes nothing else.
     if (s.doc === prev.doc && s.filePath === prev.filePath && s.dirty === prev.dirty) return;
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      // Write the state as it is now, not as it was when the timer started.
-      const { doc, filePath, dirty } = useEditor.getState();
-      try {
-        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({ doc, filePath, dirty }));
-      } catch { /* storage full or unavailable */ }
-    }, 300);
+    clearTimeout(autosaveTimer);
+    // Write the state as it is when the timer fires, not as it was when it started.
+    autosaveTimer = setTimeout(writeAutosave, 300);
   });
-  return () => { clearTimeout(timer); unsub(); };
+  return () => { clearTimeout(autosaveTimer); unsub(); };
 }
 
-export async function restoreSession(): Promise<void> {
-  const launched = await launchFile().catch(() => null);
-  if (launched) return loadText(launched.text, launched.path);
+/**
+ * The user closed the window and chose to discard the unsaved changes, so the
+ * next launch must not bring them back: it opens what was last saved.
+ */
+export function discardUnsaved(): void {
+  clearTimeout(autosaveTimer);
+  const { savedDoc, filePath } = useEditor.getState();
   try {
-    const raw = localStorage.getItem(AUTOSAVE_KEY);
-    // First visit: keep the blank diagram the store starts with.
-    if (!raw) return;
-    const saved = JSON.parse(raw) as { doc: unknown; filePath: string | null; dirty: boolean };
-    const d = upgradeLabels(parseDiagram(saved.doc));
-    // Older versions opened an example under its own name; an unsaved copy takes the default.
-    if (!saved.filePath && d.name === "seq_detector_1011") d.name = DEFAULT_NAME;
-    await ensureLayout(d);
-    useEditor.getState().load(d, saved.filePath);
-    if (saved.dirty) useEditor.setState({ dirty: true, savedDoc: null });
-  } catch { /* ignore a corrupt autosave */ }
+    // No savedDoc: an import or restored session that was never written anywhere.
+    if (savedDoc) localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({ doc: savedDoc, filePath, dirty: false }));
+    else localStorage.removeItem(AUTOSAVE_KEY);
+  } catch { /* storage off: nothing kept anyway */ }
+}
+
+/** Move the autosave out of the way (kept under SET_ASIDE_KEY), so the next start is a blank diagram. */
+export function setAsideAutosave(raw?: string): void {
+  try {
+    raw ??= localStorage.getItem(AUTOSAVE_KEY) ?? undefined;
+    if (raw !== undefined) localStorage.setItem(SET_ASIDE_KEY, raw);
+    localStorage.removeItem(AUTOSAVE_KEY);
+  } catch { /* storage off */ }
+}
+
+interface Session { doc: FsmDiagram; filePath: string | null; dirty: boolean }
+
+/** The stored session as a drawable diagram; throws if it is not one. */
+async function parseSession(raw: string): Promise<Session> {
+  const saved = JSON.parse(raw) as { doc?: unknown; filePath?: unknown; dirty?: unknown } | null;
+  if (typeof saved !== "object" || saved === null) throw new Error(tr("not a saved diagram", "不是存下來的圖", "保存された図ではありません"));
+  const d = upgradeLabels(parseDiagram(saved.doc));
+  // Only this editor writes the slot, but an older build, or a hand edit, can leave anything in it.
+  const filePath = typeof saved.filePath === "string" ? saved.filePath : null;
+  // Older versions opened an example under its own name; an unsaved copy takes the default.
+  if (!filePath && d.name === "seq_detector_1011") d.name = DEFAULT_NAME;
+  await ensureLayout(d);
+  checkDrawable(d);
+  return { doc: d, filePath, dirty: saved.dirty === true };
+}
+
+/**
+ * Start-up: open the file the desktop app was launched with, else bring back
+ * the autosaved session. Throws (after doing what it could) to say what failed.
+ */
+export async function restoreSession(): Promise<void> {
+  let raw: string | null = null;
+  try { raw = localStorage.getItem(AUTOSAVE_KEY); } catch { /* storage off: nothing to restore */ }
+  let session: Session | null = null;
+  let problem: Error | null = null;
+  // null on a first visit: keep the blank diagram the store starts with.
+  if (raw !== null) {
+    try {
+      session = await parseSession(raw);
+    } catch (e) {
+      // Kept for repair by hand: the first edit overwrites the autosave slot.
+      setAsideAutosave(raw);
+      problem = new Error(tr(`Could not restore the last session: ${errorText(e)}`, `無法還原上次的工作：${errorText(e)}`, `前回のセッションを復元できませんでした：${errorText(e)}`));
+    }
+  }
+  let launched: OpenedFile | null = null;
+  try {
+    launched = await launchFile();
+  } catch (e) {
+    // Read errors already say which file (fileError); the session comes back instead.
+    problem = e instanceof Error ? e : new Error(String(e));
+  }
+  // The autosave is the only copy of work that a crash or kill left unsaved,
+  // and opening the file replaces it 300 ms later: ask first.
+  if (launched && (!session?.dirty || await confirmDialog(tr(
+    `The last session has unsaved changes. Discard them and open ${baseName(launched.path)}?`,
+    `上次的工作有尚未儲存的變更。要放棄這些變更並開啟 ${baseName(launched.path)} 嗎？`,
+    `前回のセッションに保存されていない変更があります。破棄して ${baseName(launched.path)} を開きますか？`)))) {
+    try {
+      await loadText(launched.text, launched.path);
+      session = null;
+    } catch (e) {
+      problem = fileError("open", launched.path, e);
+    }
+  }
+  if (session) {
+    useEditor.getState().load(session.doc, session.filePath);
+    if (session.dirty) useEditor.setState({ dirty: true, savedDoc: null });
+  }
+  if (problem) throw problem;
 }

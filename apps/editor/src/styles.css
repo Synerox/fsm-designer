@@ -138,6 +138,8 @@ kbd {
 .modal h3 { margin: 0; font-size: 14px; }
 .modal textarea { height: 50vh; font: 12px/1.45 ui-monospace, "SF Mono", Menlo, Consolas, monospace; padding: 8px; border: 1px solid var(--border-strong); border-radius: var(--radius); resize: vertical; background: var(--chrome-bg); color: var(--text); }
 .modal .row { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.crash { max-width: 640px; margin: 48px auto; padding: 0 16px; }
+.crash pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 8px; background: var(--surface-muted); border-radius: var(--radius); }
 .modal.confirm { width: min(380px, 92vw); }
 .modal.confirm p { margin: 0; line-height: 1.6; }
 
