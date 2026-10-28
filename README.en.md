@@ -182,7 +182,7 @@ fsm-designer/
 
 Some Verilog tests simulate the original code with [Icarus Verilog](https://steveicarus.github.io/iverilog/) and compare it with the diagram cycle by cycle; they skip themselves when `iverilog` isn't installed.
 
-Pushing to `main` runs the tests and deploys the web app to GitHub Pages. Pushing a `v*` tag builds the Windows installers and publishes them on Releases.
+GitHub Actions runs every test (with Icarus Verilog installed) on each pull request. Pushing to `main` runs the tests and deploys the web app to GitHub Pages. Pushing a `v*` tag runs the tests, checks that the tag matches the app version, then builds the Windows installers and publishes them on Releases.
 
 ## Contributing
 

@@ -182,7 +182,7 @@ fsm-designer/
 
 部分 Verilog 測試會用 [Icarus Verilog](https://steveicarus.github.io/iverilog/) 逐拍比對狀態圖與原始程式碼，沒有安裝 `iverilog` 時會自動略過。
 
-推送到 `main` 時，GitHub Actions 會執行測試並把網頁版部署到 GitHub Pages；推送 `v*` 標籤時會建置 Windows 安裝檔並發布到 Releases。
+GitHub Actions 會在每個 pull request 執行全部測試（裝好 Icarus Verilog）；推送到 `main` 時會執行測試並把網頁版部署到 GitHub Pages；推送 `v*` 標籤時會先執行測試、確認標籤和版本號一致，再建置 Windows 安裝檔並發布到 Releases。
 
 ## 參與貢獻
 
