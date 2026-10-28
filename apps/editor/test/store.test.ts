@@ -34,6 +34,31 @@ test("one transition per ordered pair, self loops keep their angle", () => {
   assert.equal(d.transitions.length, 0);
 });
 
+test("a new transition goes before the state's unconditional fallback, not after it", async () => {
+  const { addState, addTransition, createDiagram, outgoing, validate } = await import("@fsm/core");
+  // Imported with priorities: A->B "a" (1), A->C always (2). Delete A->B and draw it again.
+  const d = createDiagram({ name: "m", inputs: ["a"] });
+  const A = addState(d, { name: "A", x: 0, y: 0 }), B = addState(d, { name: "B", x: 100, y: 0 }), C = addState(d, { name: "C", x: 0, y: 100 });
+  addTransition(d, { from: A.id, to: B.id, condition: "a", priority: 1 });
+  addTransition(d, { from: A.id, to: C.id, priority: 2 });
+  addTransition(d, { from: B.id, to: A.id, priority: 1 });
+  deleteSelection(d, { kind: "edge", from: A.id, to: B.id });
+  createTransition(d, A.id, B.id);
+  d.transitions.find((t) => t.from === A.id && t.to === B.id)!.condition = "a";
+  assert.deepEqual(outgoing(d, A.id).map((t) => [t.to, t.condition, t.priority]), [[B.id, "a", 2], [C.id, "", 3]]);
+  assert.deepEqual(validate(d), []);
+  assert.equal(d.transitions.find((t) => t.from === B.id)!.priority, 1, "other states' priorities stay");
+
+  // Without priorities: array order, and creation order among blank sketch lines.
+  const e = newDiagram();
+  const [p, q, r, s] = [0, 1, 2, 3].map((i) => createState(e, i * 100, 0));
+  createTransition(e, p.id, q.id);
+  createTransition(e, p.id, r.id);
+  createTransition(e, p.id, s.id);
+  assert.deepEqual(e.transitions.map((t) => t.to), [r.id, s.id, q.id]);
+  assert.ok(e.transitions.every((t) => t.priority === undefined));
+});
+
 test("start arrow moves to the chosen state", () => {
   const d = newDiagram();
   const a = createState(d, 0, 0), b = createState(d, 100, 0);

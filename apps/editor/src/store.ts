@@ -3,7 +3,7 @@
 
 import { create } from "zustand";
 import { current, isDraft, produce } from "immer";
-import { addState, addTransition, asciiText, createDiagram, labelLines, planDiagram, removeState, stateText, transitionLabel } from "@fsm/core";
+import { addState, addTransition, asciiText, createDiagram, isUnconditional, labelLines, outgoing, planDiagram, removeState, stateText, transitionLabel } from "@fsm/core";
 import type { FsmDiagram, MachineType, PlanOptions, Signal, State, Transition } from "@fsm/core";
 
 export type Selection =
@@ -164,9 +164,27 @@ export function createState(d: FsmDiagram, x: number, y: number): State {
   return addState(d, { name: freeStateName(d), label: "", x: Math.round(x), y: Math.round(y), isInitial: false });
 }
 
+/**
+ * New transition from `from` to `to`. A state's unconditional transition is
+ * its fallback, checked last; a line drawn after it would come later in
+ * evaluation order and be shadowed (nothing on the canvas shows the order,
+ * and imported diagrams carry priorities the editor can't show either). So
+ * the new one is put just before that fallback: in the array, and in
+ * priority when the fallback has one (the fallback and those after it move
+ * down by one).
+ */
 export function createTransition(d: FsmDiagram, from: string, to: string, loopAngle?: number): void {
   if (edgeTransitions(d, from, to).length) return;
-  addTransition(d, { from, to, ...(loopAngle !== undefined ? { loopAngle } : {}) });
+  // The last one, if several: the earlier ones are blank lines of a sketch.
+  const fallback = outgoing(d, from).reverse().find(isUnconditional);
+  const t = addTransition(d, { from, to, ...(loopAngle !== undefined ? { loopAngle } : {}) });
+  if (!fallback) return;
+  d.transitions.pop();
+  d.transitions.splice(d.transitions.indexOf(fallback), 0, t);
+  const p = fallback.priority;
+  if (p === undefined) return;
+  for (const x of d.transitions) if (x.from === from && x !== t && x.priority !== undefined && x.priority >= p) x.priority++;
+  t.priority = p;
 }
 
 /**
