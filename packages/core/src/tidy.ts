@@ -11,7 +11,8 @@
 //      reset state in the left column, states moved between cells to reduce
 //      crossings, lines through states, diagonal and long lines (simulated
 //      annealing on a cost kept up to date move by move, single states and
-//      whole rows or columns at a time);
+//      whole rows or columns at a time; of a grid and the same grid turned
+//      over its diagonal, the one whose flow leaves the reset state to the right);
 //    - layers, left to right and top to bottom (Sugiyama style): loops set
 //      aside, each state one layer past its furthest predecessor, the reset
 //      state in the first layer, each layer ordered to reduce crossings and
@@ -62,7 +63,7 @@
 //    through states, and would lead with those gone (at most five), are tried
 //    spread out a little; whatever cannot be fixed is reported in
 //    TidyResult.issues.
-// 7. Polish. In the best four, if within half again of the best score, a
+// 7. Polish. In the best two, if within half again of the best score, a
 //    state with a long line tries the three free grid spots nearest its
 //    neighbours and moves to the one that improves the score most (the
 //    reset state never moves right of another).
@@ -291,10 +292,13 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
   // Polish: a state with a long line moves to a free spot on the grid nearer
   // its neighbours, wherever that improves the score (a fixed number of
   // tries, so big machines stay quick). Of the three nearest spots the best
-  // is taken, not the first that helps. Only the best four are polished, and
-  // only those near the best: polish fixes a drawing, it should not make a new one.
+  // is taken, not the first that helps. Only the best two are polished, and
+  // only those near the best: polish fixes a drawing, it should not make a
+  // new one. (Polishing the best four turned traffic_three_block, labels
+  // shown, from the clockwise square into new shapes with the reset state
+  // at the bottom left or a state below the middle.)
   let budget = Math.min(48, Math.round(4e4 / Math.max(1, edgePairs(g).length) ** 2));
-  for (const cand of tried.slice(0, 4).filter((c) => c.score.total <= 1.5 * tried[0].score.total)) {
+  for (const cand of tried.slice(0, 2).filter((c) => c.score.total <= 1.5 * tried[0].score.total)) {
     let cur = cand;
     const gap = 2 * R + 40;
     for (let round = 0; round < 3 && budget > 0; round++) {
@@ -1118,6 +1122,10 @@ function improveGrid(g: Graph, starts: Array<[string[], boolean]>, cols: number,
     }
     return cur;
   };
+  // How far right the reset state's lines leave it, its successors in file order: compared first to last.
+  const succ = g.out.get(g.init)!.map((id) => index.get(id)!);
+  const rightward = (slot: ArrayLike<number>) => succ.map((t) => { const o = cells[slot[0]], p = cells[slot[t]]; return (p.x - o.x) / (Math.hypot(p.x - o.x, p.y - o.y) || 1); });
+  const further = (a: number[], b: number[]) => { for (let i = 0; i < a.length; i++) if (Math.abs(a[i] - b[i]) > 1e-6) return a[i] > b[i]; return false; };
   const found = new Map<string, [Int32Array, number]>();
   for (const [start, loop] of starts) {
     // Fill row by row, every other row right to left, so a path snakes through the grid.
@@ -1152,7 +1160,19 @@ function improveGrid(g: Graph, starts: Array<[string[], boolean]>, cols: number,
       } else gc.undo();
     }
     gc.reset(best);
-    const cost = settle(bestCost);
+    let cost = settle(bestCost);
+    // The grid turned over its diagonal (rows for columns), when it still
+    // fits, costs the same if the reset state is in the top left corner;
+    // keep the way round whose flow leaves the reset state further to the
+    // right (its successors in file order), so a loop runs clockwise along the top.
+    if (gc.slot[0] === 0 && Array.from(gc.slot).every((k) => k % cols < rows && Math.floor(k / cols) < cols)) {
+      const turned = Int32Array.from(gc.slot, (k) => (k % cols) * cols + Math.floor(k / cols));
+      if (further(rightward(turned), rightward(gc.slot))) {
+        const was = Int32Array.from(gc.slot);
+        const c = gc.reset(turned);
+        if (c <= cost) cost = c; else gc.reset(was);
+      }
+    }
     const key = gc.slot.join();
     if (!found.has(key)) found.set(key, [Int32Array.from(gc.slot), cost]);
   }
