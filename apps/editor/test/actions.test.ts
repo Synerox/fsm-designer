@@ -120,3 +120,10 @@ test("a restored unsaved session stays unsaved after an edit and its undo", asyn
   useEditor.getState().undo();
   assert.equal(useEditor.getState().dirty, true, "the restored doc was never written to m.fsm.json");
 });
+
+test("an autosave that cannot be loaded is reported and kept, not silently replaced", async () => {
+  const bad = JSON.stringify({ doc: { name: "m", type: "moore", outputs: [], states: [{ id: "s0", name: "A", isInitial: true, outputs: { light: 2 } }] }, filePath: null, dirty: true });
+  storage.set("fsm-designer:autosave", bad);
+  await assert.rejects(restoreSession(), /could not be restored.*Unknown output "light"/);
+  assert.equal(storage.get("fsm-designer:autosave:unreadable"), bad, "a copy survives the next autosave");
+});

@@ -95,7 +95,7 @@ export function App() {
   };
 
   useEffect(() => {
-    restoreSession().catch(() => {});
+    run(restoreSession)();
     const stopAutosave = startAutosave();
     const unguard = guardWindowClose(() => useEditor.getState().dirty, discardMessage);
     return () => { stopAutosave(); void unguard.then((f) => f()); };

@@ -8,6 +8,8 @@ import { DEFAULT_NAME, drawOptions, newDiagram, useEditor } from "./store.ts";
 import { tr } from "./i18n.ts";
 
 const AUTOSAVE_KEY = "fsm-designer:autosave";
+/** Where an autosave that failed to load is kept, before the next autosave replaces it. */
+const UNREADABLE_KEY = "fsm-designer:autosave:unreadable";
 
 export function serialize(d: FsmDiagram): string {
   return JSON.stringify(d, null, 2) + "\n";
@@ -203,10 +205,11 @@ export function startAutosave(): () => void {
 export async function restoreSession(): Promise<void> {
   const launched = await launchFile().catch(() => null);
   if (launched) return loadText(launched.text, launched.path);
+  let raw: string | null = null;
+  try { raw = localStorage.getItem(AUTOSAVE_KEY); } catch { /* storage off */ }
+  // First visit: keep the blank diagram the store starts with.
+  if (!raw) return;
   try {
-    const raw = localStorage.getItem(AUTOSAVE_KEY);
-    // First visit: keep the blank diagram the store starts with.
-    if (!raw) return;
     const saved = JSON.parse(raw) as { doc: unknown; filePath: string | null; dirty: boolean };
     const d = upgradeLabels(parseDiagram(saved.doc));
     // Older versions opened an example under its own name; an unsaved copy takes the default.
@@ -214,5 +217,15 @@ export async function restoreSession(): Promise<void> {
     await ensureLayout(d);
     useEditor.getState().load(d, saved.filePath);
     if (saved.dirty) useEditor.setState({ dirty: true, savedDoc: null });
-  } catch { /* ignore a corrupt autosave */ }
+  } catch (e) {
+    // The blank diagram shown instead is autosaved over this one at the first
+    // edit: keep a copy under its own key, and say what happened.
+    try { localStorage.setItem(UNREADABLE_KEY, raw); } catch { /* storage full */ }
+    const why = e instanceof Error ? e.message : String(e);
+    throw new Error(tr(
+      `The last session could not be restored (${why}). A copy was kept in this browser's storage as "${UNREADABLE_KEY}".`,
+      `無法還原上次的工作階段（${why}）。已在瀏覽器儲存空間保留一份副本，名稱為「${UNREADABLE_KEY}」。`,
+      `前回のセッションを復元できませんでした（${why}）。ブラウザのストレージに「${UNREADABLE_KEY}」としてコピーを残しました。`,
+    ));
+  }
 }
