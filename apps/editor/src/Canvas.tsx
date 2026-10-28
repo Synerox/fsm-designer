@@ -132,6 +132,9 @@ export function Canvas({ view, setView, grid }: { view: View; setView: Dispatch<
   }, [setView]);
 
   const onPointerDown = (e: RPointerEvent<SVGSVGElement>) => {
+    // Focus that came from the mouse shows no ring, even once keys are typed
+    // (Chrome turns :focus-visible on at the first key press); onBlur clears it.
+    svgRef.current!.dataset.pointer = "";
     if (e.button !== 0 && e.button !== 1) return;
     svgRef.current!.setPointerCapture(e.pointerId);
     const p = toWorld(e);
@@ -327,6 +330,7 @@ export function Canvas({ view, setView, grid }: { view: View; setView: Dispatch<
       role="application"
       aria-label={tr("State diagram canvas", "狀態圖畫布", "状態遷移図のキャンバス")}
       tabIndex={0}
+      onBlur={(e) => { delete e.currentTarget.dataset.pointer; }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}

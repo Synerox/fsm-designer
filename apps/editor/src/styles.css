@@ -66,6 +66,10 @@ button.chip[aria-pressed="true"] { border-color: transparent; background: var(--
 .main { flex: 1; display: flex; min-height: 0; }
 .canvas-wrap { position: relative; flex: 1; display: flex; min-width: 0; }
 .canvas { flex: 1; display: block; background: var(--surface); touch-action: none; user-select: none; cursor: default; }
+/* Ring only when the canvas was reached with Tab: a click sets data-pointer, so
+   typing a name after clicking a state does not outline the whole drawing. */
+.canvas:focus { outline: none; }
+.canvas:focus-visible:not([data-pointer]) { outline: 2px solid var(--accent); outline-offset: -2px; }
 .canvas .state, .canvas .edge { cursor: pointer; }
 .canvas .resize-handle { cursor: nwse-resize; }
 .caret, .caret-line { animation: blink 1s steps(1) infinite; fill: var(--accent); font-weight: 400; }
