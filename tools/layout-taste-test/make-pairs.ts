@@ -8,11 +8,14 @@
 // Default out-dir: tools/layout-taste-test/out.
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { layoutCandidates, renderSvg } from "../../packages/core/src/index.ts";
 import type { FsmDiagram, LayoutCandidate } from "../../packages/core/src/index.ts";
 import { machines } from "./machines.ts";
 
-const out = process.argv[2] ?? new URL("./out/", import.meta.url).pathname;
+// fileURLToPath, not URL.pathname: the pathname stays percent-encoded (a checkout
+// under "my dir" would write to a new "my%20dir" folder) and is "/D:/..." on Windows.
+const out = process.argv[2] ?? fileURLToPath(new URL("./out/", import.meta.url));
 mkdirSync(out, { recursive: true });
 
 const family = (a: string) => a.split(/[- (]/)[0];
@@ -66,6 +69,11 @@ const page = pairs.map((p) => {
   return { id: p.id, machine: p.machine, states: p.states, a: sized(sa, W, H), b: sized(sb, W, H) };
 });
 const tpl = readFileSync(new URL("./page.html", import.meta.url), "utf8");
-writeFileSync(`${out}/index.html`, tpl.replace("__PAIRS__", JSON.stringify(page).replace(/<\//g, "<\\/")));
+// Replace the script's placeholder only (the template's header comment names it
+// too), and through a function, so "$&" or "$'" in the data is not read as a
+// replacement pattern.
+const filled = tpl.replace("const PAIRS = __PAIRS__;", () => `const PAIRS = ${JSON.stringify(page).replace(/<\//g, "<\\/")};`);
+if (filled === tpl) throw new Error("page.html has no `const PAIRS = __PAIRS__;` line to fill in");
+writeFileSync(`${out}/index.html`, filled);
 writeFileSync(`${out}/pairs.json`, JSON.stringify(pairs.map((p) => ({ id: p.id, machine: p.machine, a: { arrangement: p.a.arrangement, step: p.a.step, diagram: p.a.diagram }, b: { arrangement: p.b.arrangement, step: p.b.step, diagram: p.b.diagram } }))));
 console.log(`${pairs.length} pairs from ${new Set(pairs.map((p) => p.machine)).size} machines -> ${out}`);

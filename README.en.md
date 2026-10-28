@@ -57,7 +57,7 @@ Download `FSM Designer_x.y.z_x64-setup.exe` from [Releases](https://github.com/S
 
 ### From source
 
-Requires [Node.js](https://nodejs.org/) 22+ and [pnpm](https://pnpm.io/).
+Requires [Node.js](https://nodejs.org/) 22.18 or later (the tests and tools run `.ts` files directly, which Node does without a flag from 22.18) and [pnpm](https://pnpm.io/) 10.
 
 ```sh
 git clone https://github.com/Synerox/fsm-designer.git
@@ -182,7 +182,7 @@ fsm-designer/
 
 Some Verilog tests simulate the original code with [Icarus Verilog](https://steveicarus.github.io/iverilog/) and compare it with the diagram cycle by cycle; they skip themselves when `iverilog` isn't installed.
 
-Pushing to `main` runs the tests and deploys the web app to GitHub Pages. Pushing a `v*` tag builds the Windows installers and publishes them on Releases.
+GitHub Actions runs every test (with Icarus Verilog installed) on each pull request. Pushing to `main` runs the tests and deploys the web app to GitHub Pages. Pushing a `v*` tag runs the tests, checks that the tag matches the app version, then builds the Windows installers and publishes them on Releases.
 
 ## Contributing
 

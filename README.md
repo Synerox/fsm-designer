@@ -57,7 +57,7 @@ FSM Designer 專門做這一件事：
 
 ### 從原始碼執行
 
-需要 [Node.js](https://nodejs.org/) 22 以上與 [pnpm](https://pnpm.io/)。
+需要 [Node.js](https://nodejs.org/) 22.18 以上（測試和工具直接執行 `.ts` 檔，22.18 起才不用加參數）與 [pnpm](https://pnpm.io/) 10。
 
 ```sh
 git clone https://github.com/Synerox/fsm-designer.git
@@ -182,7 +182,7 @@ fsm-designer/
 
 部分 Verilog 測試會用 [Icarus Verilog](https://steveicarus.github.io/iverilog/) 逐拍比對狀態圖與原始程式碼，沒有安裝 `iverilog` 時會自動略過。
 
-推送到 `main` 時，GitHub Actions 會執行測試並把網頁版部署到 GitHub Pages；推送 `v*` 標籤時會建置 Windows 安裝檔並發布到 Releases。
+GitHub Actions 會在每個 pull request 執行全部測試（裝好 Icarus Verilog）；推送到 `main` 時會執行測試並把網頁版部署到 GitHub Pages；推送 `v*` 標籤時會先執行測試、確認標籤和版本號一致，再建置 Windows 安裝檔並發布到 Releases。
 
 ## 參與貢獻
 
