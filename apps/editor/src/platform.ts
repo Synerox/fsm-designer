@@ -128,6 +128,8 @@ function saveError(e: unknown): Error {
     : tr(`This page can't save files right now (${code ?? String(e)}).`, `這個頁面目前無法儲存檔案（${code ?? String(e)}）。`, `このページは現在ファイルを保存できません（${code ?? String(e)}）。`));
 }
 
+let confirmCount = 0; // gives each confirm's text a unique id for aria-labelledby
+
 /**
  * Yes/no question drawn inside the page (embedded pages can't show
  * window.confirm). It is modal for the keyboard too: Escape cancels, Tab
@@ -162,10 +164,8 @@ function pageConfirm(message: string): Promise<boolean> {
     backdrop.append(box);
     document.body.append(backdrop);
     release = modalKeys(box, () => done(false)); // focuses Cancel, the first button
-
   });
 }
-let confirmCount = 0;
 
 export async function setWindowTitle(title: string): Promise<void> {
   document.title = title;
