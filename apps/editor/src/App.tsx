@@ -407,7 +407,7 @@ function loadGridOptions(): GridOptions {
   try {
     const v = JSON.parse(localStorage.getItem(GRID_KEY) ?? "null") as Partial<GridOptions> | null;
     const style = GRID_STYLE_IDS.some((s) => s === v?.style) ? v!.style! : "line";
-    return { style, snap: v?.snap ?? true };
+    return { style, snap: typeof v?.snap === "boolean" ? v.snap : true };
   } catch {
     return { style: "line", snap: true };
   }
