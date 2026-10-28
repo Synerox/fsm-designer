@@ -178,6 +178,17 @@ test("an autosave that is not JSON is set aside with a message", async () => {
   await assert.rejects(restoreSession(), /Could not restore the last session: not a saved diagram/);
 });
 
+test("with storage full, a bad autosave is still cleared out of the slot", async () => {
+  storage.set("fsm-designer:autosave", "null");
+  storageFull = true;
+  try {
+    await assert.rejects(restoreSession(), /Could not restore the last session/);
+  } finally {
+    storageFull = false;
+  }
+  assert.equal(storage.has("fsm-designer:autosave"), false, "copying it aside threw first, so every start failed on it again");
+});
+
 test("opening a file with a state the editor cannot draw fails instead of blanking the page", async () => {
   useEditor.getState().load(newDiagram(), null);
   const text = JSON.stringify({ name: "agent_made", states: [{ id: "s0", x: 100, y: 100, isInitial: true }], transitions: [] });

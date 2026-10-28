@@ -275,13 +275,18 @@ export function discardUnsaved(): void {
   } catch { /* storage off: nothing kept anyway */ }
 }
 
-/** Move the autosave out of the way (kept under SET_ASIDE_KEY), so the next start is a blank diagram. */
+/**
+ * Move the autosave out of the way (kept under SET_ASIDE_KEY, which holds only
+ * the latest one), so the next start is a blank diagram. The slot is emptied
+ * first: with storage full the copy can fail, and a bad autosave left in place
+ * would fail again on every start.
+ */
 export function setAsideAutosave(raw?: string): void {
   try {
     raw ??= localStorage.getItem(AUTOSAVE_KEY) ?? undefined;
-    if (raw !== undefined) localStorage.setItem(SET_ASIDE_KEY, raw);
     localStorage.removeItem(AUTOSAVE_KEY);
-  } catch { /* storage off */ }
+    if (raw !== undefined) localStorage.setItem(SET_ASIDE_KEY, raw);
+  } catch { /* storage off or full: no copy, but the slot is clear */ }
 }
 
 interface Session { doc: FsmDiagram; filePath: string | null; dirty: boolean }
