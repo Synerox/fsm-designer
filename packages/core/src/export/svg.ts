@@ -64,10 +64,14 @@ export interface PlanOptions {
 function edgeLines(d: FsmDiagram, ts: Transition[], opts: PlanOptions, hidden: boolean): string[] {
   const shown = opts.shownEdge?.from === ts[0].from && opts.shownEdge.to === ts[0].to;
   if (hidden && !shown) return [];
+  // Stacked labels read top to bottom in the order the transitions are
+  // checked (priority, then file order), as outgoing() evaluates them.
+  const order = outgoing(d, ts[0].from);
+  const checked = [...ts].sort((a, b) => order.indexOf(a) - order.indexOf(b));
   // Wrap the condition and the outputs separately: a condition can hold a
   // division (" / "), which re-splitting the joined label would take for the
   // outputs separator.
-  return ts.flatMap((t) => {
+  return checked.flatMap((t) => {
     const { cond, outs } = labelParts(d, t, opts);
     const text = joinLabel(cond, outs);
     if (text.length <= WRAP_CHARS) return text ? [text] : [];
