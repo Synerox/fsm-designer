@@ -106,7 +106,8 @@ button.chip[aria-pressed="true"] { border-color: transparent; background: var(--
 .statusbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 36px; padding: 0 12px; border-top: 1px solid var(--border); background: var(--surface); }
 .statusbar .status { margin: 0; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .statusbar .muted { color: var(--muted); }
-.statusbar .storage-warn { margin: 0; color: var(--danger); font-size: 12px; }
+/* Shares the line with .status; both shrink, each to an ellipsis, so neither squeezes the other out. */
+.statusbar .storage-warn { margin: 0; min-width: 0; color: var(--danger); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .statusbar .storage-warn:empty { display: none; }
 .statusbar .view-controls { display: flex; align-items: center; gap: 6px; flex: none; }
 .zoom-controls { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border-radius: 999px; background: var(--surface-muted); border: 1px solid var(--border); }

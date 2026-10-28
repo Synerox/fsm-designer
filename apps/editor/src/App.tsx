@@ -72,6 +72,10 @@ export function App() {
   const { undo, redo } = useEditor.getState();
   // The browser build relies on its autosave; say so when that copy is not this tab's work.
   const storageProblem = useAutosave((a) => (isDesktop ? null : a.failed ? "failed" : a.otherTab ? "otherTab" : null));
+  // The status bar can cut it short, so the title keeps it readable in full.
+  const storageWarn = storageProblem === "failed" ? tr("This browser is not keeping your changes; save the file to keep them", "瀏覽器沒有保存你的變更，請存檔以免遺失", "このブラウザーには変更が保存されていません。ファイルを保存してください")
+    : storageProblem === "otherTab" ? tr("Another tab has also autosaved here: a reload brings back the diagram edited last", "另一個分頁也在這裡自動保存過：重新整理後只會還原最後編輯的那張圖", "別のタブもここに自動保存しました。再読み込みすると最後に編集した図が戻ります")
+    : null;
 
   // Fit the drawing in the window (zooming in at most to 200%).
   const fit = () => {
@@ -304,10 +308,7 @@ export function App() {
       </main>
       <footer className="statusbar">
         <p className="status" data-testid="status">{statusText(doc, selection)}{!isDesktop && <span className="muted"> · {tr("Saving and exporting download the file", "存檔與匯出會以下載方式儲存")}</span>}</p>
-        <p className="storage-warn" role="status" data-testid="storage-warn">
-          {storageProblem === "failed" && tr("This browser is not keeping your changes; save the file to keep them", "瀏覽器沒有保存你的變更，請存檔以免遺失", "このブラウザーには変更が保存されていません。ファイルを保存してください")}
-          {storageProblem === "otherTab" && tr("Also open in another tab: a reload brings back the diagram edited last", "另一個分頁也開著：重新整理後只會還原最後編輯的那張圖", "別のタブでも開いています。再読み込みすると最後に編集した図が戻ります")}
-        </p>
+        <p className="storage-warn" role="status" data-testid="storage-warn" title={storageWarn ?? undefined}>{storageWarn}</p>
         <div className="view-controls">
           <span className="seg" role="group" aria-label={tr("Grid style", "格線樣式")} title={tr("Grid style", "格線樣式")}>
             {GRID_STYLES().map(([style, name]) => (
