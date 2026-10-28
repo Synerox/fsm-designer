@@ -81,7 +81,8 @@ export function score(d: FsmDiagram, plan: DiagramPlan = planDiagram(d), step = 
     for (let j = i + 1; j < edges.length; j++) s.crossings += crossCount(edges[i].points, edges[j].points, st);
   for (const e of edges) {
     const ends = new Set([e.transitions[0].from, e.transitions[0].to]);
-    for (const [id, c] of at) if (!ends.has(id) && e.points.some((p) => Math.hypot(p.x - c.x, p.y - c.y) < c.r + 2)) s.throughStates++;
+    const b = box(e.points); // a state outside the line's box (by its radius) is not on it
+    for (const [id, c] of at) if (!ends.has(id) && c.x > b.x0 - c.r - 2 && c.x < b.x1 + c.r + 2 && c.y > b.y0 - c.r - 2 && c.y < b.y1 + c.r + 2 && e.points.some((p) => Math.hypot(p.x - c.x, p.y - c.y) < c.r + 2)) s.throughStates++;
   }
   const labels = edges.filter((e) => e.label);
   for (const [i, e] of labels.entries()) {
@@ -94,7 +95,11 @@ export function score(d: FsmDiagram, plan: DiagramPlan = planDiagram(d), step = 
       const q = f.label!;
       if (Math.abs(r.x - q.x) * 2 < r.w + q.w && Math.abs(r.y - q.y) * 2 < r.h + q.h) s.labelOverlaps++;
     }
-    for (const f of edges) if (f !== e && f.points.some((p) => Math.abs(p.x - r.x) < r.w / 2 && Math.abs(p.y - r.y) < r.h / 2)) s.labelOnEdges++;
+    for (const f of edges) {
+      if (f === e) continue;
+      const b = box(f.points); // a line whose box misses the label is not under it
+      if (b.x1 > r.x - r.w / 2 && b.x0 < r.x + r.w / 2 && b.y1 > r.y - r.h / 2 && b.y0 < r.y + r.h / 2 && f.points.some((p) => Math.abs(p.x - r.x) < r.w / 2 && Math.abs(p.y - r.y) < r.h / 2)) s.labelOnEdges++;
+    }
   }
   for (let i = 0; i < st.length; i++)
     for (let j = i + 1; j < st.length; j++) if (Math.hypot(st[i].x - st[j].x, st[i].y - st[j].y) < st[i].r + st[j].r + 40) s.tooClose++;
