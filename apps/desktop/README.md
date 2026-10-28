@@ -4,7 +4,7 @@
 
 ## 執行
 
-需要 Node 22、pnpm、Rust（`rustup`），以及 [Tauri 的系統需求](https://tauri.app/start/prerequisites/)（Windows 需 WebView2，macOS 需 Xcode Command Line Tools，Linux 需 webkit2gtk-4.1）。
+需要 Node 22.18 以上、pnpm 10、Rust（`rustup`），以及 [Tauri 的系統需求](https://tauri.app/start/prerequisites/)（Windows 需 WebView2，macOS 需 Xcode Command Line Tools，Linux 需 webkit2gtk-4.1）。
 
 ```sh
 pnpm install

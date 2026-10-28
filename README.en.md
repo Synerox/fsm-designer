@@ -57,7 +57,7 @@ Download `FSM Designer_x.y.z_x64-setup.exe` from [Releases](https://github.com/S
 
 ### From source
 
-Requires [Node.js](https://nodejs.org/) 22+ and [pnpm](https://pnpm.io/).
+Requires [Node.js](https://nodejs.org/) 22.18 or later (the tests and tools run `.ts` files directly, which Node does without a flag from 22.18) and [pnpm](https://pnpm.io/) 10.
 
 ```sh
 git clone https://github.com/Synerox/fsm-designer.git

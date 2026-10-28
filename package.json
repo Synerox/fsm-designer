@@ -3,6 +3,9 @@
   "private": true,
   "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
   "scripts": {
     "dev": "pnpm --filter @fsm/desktop dev",
     "dev:web": "pnpm --filter @fsm/editor dev",

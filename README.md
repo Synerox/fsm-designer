@@ -57,7 +57,7 @@ FSM Designer 專門做這一件事：
 
 ### 從原始碼執行
 
-需要 [Node.js](https://nodejs.org/) 22 以上與 [pnpm](https://pnpm.io/)。
+需要 [Node.js](https://nodejs.org/) 22.18 以上（測試和工具直接執行 `.ts` 檔，22.18 起才不用加參數）與 [pnpm](https://pnpm.io/) 10。
 
 ```sh
 git clone https://github.com/Synerox/fsm-designer.git
