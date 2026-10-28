@@ -250,15 +250,33 @@ function freeForState(d: FsmDiagram, s: State, name: string): boolean {
  * name; anything else ("S₀", "β", "q 1", "") is kept as a display label, and
  * its ASCII spelling ("S_0", "beta") becomes the name when that is usable
  * (see freeForState; text that isn't, such as an input's name, is a label too).
+ * `before` is the name the state had when this typing began: when the text
+ * can't be the name, the state goes back to it, so a prefix typed on the way
+ * ("cl" on the way to "clk") doesn't stick as the identifier.
  */
-export function setStateText(d: FsmDiagram, id: string, text: string): void {
+export function setStateText(d: FsmDiagram, id: string, text: string, before?: string): void {
   const s = d.states.find((x) => x.id === id);
   if (!s) return;
   const ascii = asciiText(text);
   const usable = freeForState(d, s, ascii);
   if (usable) s.name = ascii;
+  else if (before !== undefined && before !== s.name && freeForState(d, s, before)) s.name = before;
   if (usable && ascii === text) delete s.label;
   else s.label = text;
+}
+
+/**
+ * Typing on a state (canvas or Inspector): one undo step per typing session,
+ * and the name it started with is what setStateText falls back to. The
+ * session's first edit pushed the doc as it was onto `past`, so while the
+ * session lasts that is past's last entry.
+ */
+export function typeStateText(id: string, text: string): void {
+  const { doc, past, coalesce, edit } = useEditor.getState();
+  const key = `text:${id}`;
+  const start = coalesce === key ? past[past.length - 1] ?? doc : doc;
+  const before = start.states.find((x) => x.id === id)?.name;
+  edit((d) => setStateText(d, id, text, before), key);
 }
 
 export function getStateText(s: State): string {

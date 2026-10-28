@@ -243,6 +243,17 @@ test("a pasted state never shows the same text as another; typed text never name
   }
   setStateText(g, s.id, "x1");
   assert.deepEqual([g.states[0].name, g.states[0].label], ["x1", undefined]);
+
+  // Typed a key at a time, "clk" passes through "c" and "cl", which are
+  // usable names: the state goes back to the name it had, not "cl".
+  const { typeStateText } = await import("../src/store.ts");
+  const h = newDiagram();
+  const q = createState(h, 0, 0);
+  setStateText(h, q.id, "WAIT");
+  useEditor.getState().load(h, null);
+  for (const text of ["", "c", "cl", "clk"]) typeStateText(q.id, text);
+  assert.deepEqual([useEditor.getState().doc.states[0].name, useEditor.getState().doc.states[0].label], ["WAIT", "clk"]);
+  assert.equal(useEditor.getState().past.length, 1, "one undo step");
 });
 
 test("the canvas and inspector share one plan, and an edit that moves nothing reuses it", async () => {

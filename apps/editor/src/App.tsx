@@ -10,7 +10,7 @@ import { discardMessage, exportLatex, exportPng, exportSvg, latexText, newFile, 
 import { baseName, copyText, guardWindowClose, isDesktop, setWindowTitle } from "./platform.ts";
 import { deleteCopied, deletesSelection, keyPressesButton, typedText } from "./keys.ts";
 import { modalOpen, useModal } from "./dialog.ts";
-import { drawOptions, selectionParts, copySelection, deleteSelection, editedTransition, getStateText, hasClipboard, pasteClipboard, selectAll, setEdgeText, setStateText, useEditor } from "./store.ts";
+import { drawOptions, selectionParts, copySelection, deleteSelection, editedTransition, getStateText, hasClipboard, pasteClipboard, selectAll, setEdgeText, typeStateText, useEditor } from "./store.ts";
 import type { Selection } from "./store.ts";
 import type { ImportResult, LayoutIssue } from "@fsm/core";
 import { drewText, statusText } from "./summary.ts";
@@ -193,7 +193,7 @@ export function App() {
         const s = doc.states.find((v) => v.id === selection.id);
         if (!s) return;
         cur = getStateText(s);
-        apply = (text) => edit((d) => setStateText(d, s.id, text), `text:${s.id}`);
+        apply = (text) => typeStateText(s.id, text);
       } else {
         const t = editedTransition(doc, selection);
         if (!t) return;

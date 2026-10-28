@@ -6,7 +6,7 @@ import { PARALLEL_GAP, transitionLabel } from "@fsm/core";
 import type { FsmDiagram } from "@fsm/core";
 import { useId, useLayoutEffect, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
-import { DRAW, alignStates, canvasOptions, deleteSelection, editedTransition, edgeTransitions, setEdgeShape, getStateText, setEdgeText, setStateText, useEditor, viewPlan } from "./store.ts";
+import { DRAW, alignStates, canvasOptions, deleteSelection, editedTransition, edgeTransitions, setEdgeShape, getStateText, setEdgeText, typeStateText, useEditor, viewPlan } from "./store.ts";
 
 import { snapToGrid } from "./geometry.ts";
 import { MOD, tr } from "./i18n.ts";
@@ -221,8 +221,8 @@ export function Inspector({ snap }: { snap: boolean }) {
           <input
             value={text}
             placeholder={tr("Enter label", "輸入標籤")}
-            onKeyDown={(e) => expandOnSpace(e, true, (v) => edit((d) => setStateText(d, s.id, v), `text:${s.id}`))}
-            onChange={(e) => edit((d) => setStateText(d, s.id, e.target.value), `text:${s.id}`)}
+            onKeyDown={(e) => expandOnSpace(e, true, (v) => typeStateText(s.id, v))}
+            onChange={(e) => typeStateText(s.id, e.target.value)}
           />
         </label>
         <SizeControls doc={doc} states={[s.id]} edges={[]} edit={edit} keyPrefix={s.id} />
