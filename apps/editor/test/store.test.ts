@@ -215,10 +215,14 @@ test("a pasted state never shows the same text as another; typed text never name
   setStateText(d, a.id, "S₀");
   setStateText(d, b.id, "IDLE");
   copySelection(d, { kind: "multi", states: [a.id, b.id], edges: [], initial: false });
-  pasteClipboard(d);
-  pasteClipboard(d);
-  assert.deepEqual(d.states.map(stateText), ["S₀", "IDLE", "S₀_1", "IDLE_1", "S₀_2", "IDLE_2"]);
-  assert.deepEqual(d.states.map((s) => s.name), ["S_0", "IDLE", "S_0_1", "IDLE_1", "S_0_2", "IDLE_2"]);
+  for (let i = 0; i < 4; i++) pasteClipboard(d);
+  assert.deepEqual(d.states.map(stateText), ["S₀", "IDLE", "S₀′", "IDLE_1", "S₀″", "IDLE_2", "S₀‴", "IDLE_3", "S₀′′′′", "IDLE_4"]);
+  assert.deepEqual(d.states.map((s) => s.name), ["S_0", "IDLE", "S_0_1", "IDLE_1", "S_0_2", "IDLE_2", "S_0_3", "IDLE_3", "S_0_4", "IDLE_4"]);
+  // Opening the file again runs the old shortcut syntax through prettyText:
+  // a label like "S₀_1" would come back as "S₀₁".
+  const { loadText, serialize } = await import("../src/actions.ts");
+  await loadText(serialize(d), null);
+  assert.deepEqual(useEditor.getState().doc.states.map(stateText), d.states.map(stateText), "labels survive a reload");
   // An unlabelled state whose name another state shows as its label.
   const e = newDiagram();
   const c = createState(e, 0, 0);

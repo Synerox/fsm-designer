@@ -469,7 +469,7 @@ export function hasClipboard(): boolean {
 
 /**
  * Paste the clipboard into `d`, offset down-right a little more each time,
- * with fresh ids, names and labels (S0 -> S0_1 when S0 exists). Pasted states are
+ * with fresh ids, names and labels (S0 -> S0_1, S₀ -> S₀′ when taken). Pasted states are
  * never initial. Returns the selection of what was pasted.
  *
  * The clipboard outlives File > New and Open, so the target may not declare
@@ -499,18 +499,22 @@ export function pasteClipboard(d: FsmDiagram): Selection {
   const shown = new Set(d.states.map((s) => stateText(s)));
   const ids = new Set(d.states.map((s) => s.id));
   const idMap = new Map<string, string>();
-  const fresh = (base: string, taken: Set<string>) => {
+  // Names take "_1", "_2"; labels take primes (S₀′, S₀″): "S₀_1" would turn
+  // into "S₀₁" when the file is opened again (old shortcut syntax, see upgradeLabels).
+  const PRIMES = ["′", "″", "‴"];
+  const fresh = (base: string, taken: Set<string>, suffix = (i: number) => `_${i}`) => {
     if (!taken.has(base)) return base;
     let i = 1;
-    while (taken.has(`${base}_${i}`)) i++;
-    return `${base}_${i}`;
+    while (taken.has(base + suffix(i))) i++;
+    return base + suffix(i);
   };
+  const prime = (i: number) => PRIMES[i - 1] ?? "′".repeat(i);
   for (const src of clipboard.states) {
     const s = structuredClone(src);
     s.id = fresh(`s${d.states.length}`, ids);
-    // A label ("S₀") gets the same kind of suffix as a name ("S₀_1"); a state
-    // drawn by its name keeps clear of other states' labels too.
-    if (src.label) s.label = fresh(src.label, shown);
+    // A label ("S₀") gets a prime ("S₀′"); a state drawn by its name keeps
+    // clear of other states' labels too.
+    if (src.label) s.label = fresh(src.label, shown, prime);
     s.name = fresh(src.name, src.label ? names : new Set([...names, ...shown]));
     s.x = (src.x ?? 0) + off;
     s.y = (src.y ?? 0) + off;
