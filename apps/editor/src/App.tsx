@@ -8,7 +8,7 @@ import { Menu } from "./Menu.tsx";
 import { ImportReport, VerilogImportDialog } from "./VerilogImport.tsx";
 import { autosaveLost, discardMessage, discardUnsaved, exportLatex, exportPng, exportSvg, latexText, newFile, openFile, restoreSession, saveDoc, startAutosave, tidyUp, useAutosave } from "./actions.ts";
 import { baseName, copyText, guardWindowClose, isDesktop, setWindowTitle } from "./platform.ts";
-import { deleteCopied, deletesSelection, keyPressesButton, typedText } from "./keys.ts";
+import { PRESSABLE, deleteCopied, deletesSelection, keyPressesButton, ownsKeys, snapCaret, stepCaret, typedText } from "./keys.ts";
 import { modalOpen, useModal } from "./dialog.ts";
 import { drawOptions, selectionParts, copySelection, deleteSelection, editedTransition, getStateText, hasClipboard, pasteClipboard, selectAll, setEdgeText, typeStateText, useEditor } from "./store.ts";
 import type { Selection } from "./store.ts";
@@ -120,21 +120,38 @@ export function App() {
   }), []);
 
   useEffect(() => {
-    // The last button clicked with the mouse: Chromium leaves focus on it, and
-    // Space after that is typing, not pressing it again (see keyPressesButton).
-    // Forgotten once focus moves anywhere else, so a button reached again by
-    // Tab/Shift+Tab is pressed by Space like any keyboard-focused one.
+    // The last button or checkbox clicked with the mouse: Chromium leaves focus
+    // on it, and Space after that is typing, not pressing it again (see
+    // keyPressesButton). Forgotten once focus moves anywhere else, so a control
+    // reached again by Tab/Shift+Tab is pressed by Space like any
+    // keyboard-focused one. A click on a checkbox's label focuses the checkbox.
     let clicked: Element | null = null;
-    const onPointer = (e: PointerEvent) => { clicked = (e.target as Element).closest?.("button") ?? null; };
+    const onPointer = (e: PointerEvent) => {
+      const t = e.target as Element;
+      const label = t.closest?.("label");
+      clicked = t.closest?.(PRESSABLE) ?? (label instanceof HTMLLabelElement ? label.control : null) ?? null;
+    };
     const onFocus = (e: FocusEvent) => { if (e.target !== clicked) clicked = null; };
     const onKey = (e: KeyboardEvent) => {
       // A menu that handled the key itself (arrow keys) already prevented it.
       if (e.defaultPrevented) return;
       const mod = e.ctrlKey || e.metaKey;
       const target = e.target instanceof Element ? e.target : document.body;
-      const inField = target.closest("input, textarea, select, [role=menu]");
+      const inField = ownsKeys(target);
       const k = e.key.toLowerCase();
-      if (mod && k === "s") { e.preventDefault(); run(() => saveDoc(e.shiftKey))(); return; }
+      if (mod && k === "s") {
+        e.preventDefault();
+        // A field that keeps its value only on blur (the diagram's name) must
+        // be committed first, or the file gets the old value and the typed one
+        // is lost with no unsaved marker. Focus goes back to it if it is still there.
+        const el = document.activeElement;
+        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+          el.blur();
+          if (el.isConnected) el.focus();
+        }
+        run(() => saveDoc(e.shiftKey))();
+        return;
+      }
       // An open dialog (LaTeX, Import, Discard changes?) owns the keyboard; it
       // handles Escape and Tab itself, and nothing may change the diagram behind it.
       if (inField || modalOpen()) return;
@@ -208,16 +225,17 @@ export function App() {
         apply = (text) => edit((d) => setEdgeText(d, selection.from, selection.to, text, t.id), `text:${t.id}`);
       }
       const { caret: stored, setCaret } = useEditor.getState();
-      const caret = Math.min(stored ?? cur.length, cur.length);
+      // Whole characters only: an emoji is two code units and must not be split.
+      const caret = snapCaret(cur, Math.min(stored ?? cur.length, cur.length));
       const put = (text: string, at: number) => { apply(text); setCaret(at); };
       switch (e.key) {
-        case "ArrowLeft": e.preventDefault(); setCaret(Math.max(0, caret - 1)); return;
-        case "ArrowRight": e.preventDefault(); setCaret(Math.min(cur.length, caret + 1)); return;
+        case "ArrowLeft": e.preventDefault(); setCaret(stepCaret(cur, caret, -1)); return;
+        case "ArrowRight": e.preventDefault(); setCaret(stepCaret(cur, caret, 1)); return;
         case "ArrowUp": case "Home": e.preventDefault(); setCaret(0); return;
         case "ArrowDown": case "End": e.preventDefault(); setCaret(cur.length); return;
         case "Backspace":
           e.preventDefault();
-          if (caret > 0) put(cur.slice(0, caret - 1) + cur.slice(caret), caret - 1);
+          if (caret > 0) { const at = stepCaret(cur, caret, -1); put(cur.slice(0, at) + cur.slice(caret), at); }
           return;
         case " ": {
           e.preventDefault();
@@ -231,7 +249,7 @@ export function App() {
       }
       if (typed === null) return;
       e.preventDefault();
-      put(cur.slice(0, caret) + typed + cur.slice(caret), caret + 1);
+      put(cur.slice(0, caret) + typed + cur.slice(caret), caret + typed.length);
     };
     window.addEventListener("pointerdown", onPointer, true);
     window.addEventListener("focusin", onFocus, true);

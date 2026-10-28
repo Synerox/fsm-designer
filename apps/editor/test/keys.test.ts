@@ -2,7 +2,7 @@
 // when Space presses a button, and what Cut removes.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { deleteCopied, deletesSelection, keyPressesButton, typedText } from "../src/keys.ts";
+import { deleteCopied, deletesSelection, keyPressesButton, ownsKeys, snapCaret, stepCaret, typedText } from "../src/keys.ts";
 import { copySelection, createState, createTransition, hasClipboard, multiSelection, newDiagram, pasteClipboard, setInitial } from "../src/store.ts";
 
 const key = (k: string, mods: { ctrl?: boolean; alt?: boolean; meta?: boolean } = {}) =>
@@ -34,13 +34,51 @@ test("Backspace deletes a multiple selection or the start arrow, but edits text 
 
 test("Space presses a button reached from the keyboard, but types after a mouse click on it", () => {
   const button = { tagName: "BUTTON" } as unknown as Element;
-  const target = { closest: (sel: string) => (sel === "button" ? button : null) };
+  const target = { closest: (sel: string) => (sel.split(",").some((s) => s.trim() === "button") ? button : null) };
   const body = { closest: () => null };
   assert.equal(keyPressesButton(" ", target, null), true);
   assert.equal(keyPressesButton("Enter", target, null), true);
   assert.equal(keyPressesButton(" ", target, button), false, "the user clicked it, then typed");
   assert.equal(keyPressesButton("a", target, null), false);
   assert.equal(keyPressesButton(" ", body, null), false);
+});
+
+test("Space toggles a checkbox reached from the keyboard, but types after a mouse click on it", () => {
+  const box = { tagName: "INPUT", type: "checkbox" } as unknown as Element;
+  const target = { closest: (sel: string) => (sel.includes("input[type=checkbox]") ? box : null) };
+  assert.equal(keyPressesButton(" ", target, null), true);
+  assert.equal(keyPressesButton(" ", target, box), false);
+});
+
+test("only text-entry controls take the editor's keys; a checkbox does not", () => {
+  // A stand-in for Element.closest on a single focused element.
+  const focused = (tagName: string, type?: string) => {
+    const el = { tagName, type } as unknown as Element;
+    return { closest: (sel: string) => (sel.split(",").some((s) => s.trim().toUpperCase() === tagName) ? el : null) };
+  };
+  assert.equal(ownsKeys(focused("INPUT", "text")), true);
+  assert.equal(ownsKeys(focused("INPUT", "number")), true, "the size boxes");
+  assert.equal(ownsKeys(focused("TEXTAREA")), true);
+  assert.equal(ownsKeys(focused("SELECT")), true);
+  assert.equal(ownsKeys(focused("INPUT", "checkbox")), false, "Ctrl+Z after ticking Accepting undoes it");
+  assert.equal(ownsKeys(focused("INPUT", "radio")), false);
+  assert.equal(ownsKeys(focused("BUTTON")), false);
+  const inMenu = { closest: (sel: string) => (sel.includes("[role=menu]") ? ({ tagName: "DIV" } as unknown as Element) : null) };
+  assert.equal(ownsKeys(inMenu), true, "an open menu handles its own keys");
+});
+
+test("canvas text editing steps and deletes whole characters, not halves of an emoji", () => {
+  const go = "Go\u{1F680}"; // "Go" and a rocket: 4 UTF-16 code units
+  assert.equal(stepCaret(go, 4, -1), 2, "Backspace or ArrowLeft after the rocket skips both halves");
+  assert.equal(stepCaret(go, 2, 1), 4);
+  assert.equal(stepCaret(go, 2, -1), 1);
+  assert.equal(stepCaret(go, 0, -1), 0);
+  assert.equal(stepCaret(go, 4, 1), 4);
+  assert.equal(snapCaret(go, 3), 2, "a stored caret inside the pair moves to its start");
+  assert.equal(snapCaret(go, 4), 4);
+  const flag = "a\u{1F1F9}\u{1F1FC}"; // a flag: two regional indicators, one character
+  assert.equal(stepCaret(flag, flag.length, -1), 1);
+  assert.equal(stepCaret("", 0, -1), 0);
 });
 
 test("cut removes only what it copied; a lone line and the start arrow stay", () => {

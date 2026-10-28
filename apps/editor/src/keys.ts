@@ -39,8 +39,57 @@ export function deletesSelection(key: string, sel: Selection): boolean {
  */
 export function keyPressesButton(key: string, target: Pick<Element, "closest">, clicked: Element | null): boolean {
   if (key !== " " && key !== "Enter") return false;
-  const button = target.closest("button");
+  // Space toggles a focused checkbox the same way it presses a button.
+  const button = target.closest(PRESSABLE);
   return button !== null && button !== clicked;
+}
+
+/** Controls that Space presses (the focus a mouse click leaves is remembered as `clicked`). */
+export const PRESSABLE = "button, input[type=checkbox], input[type=radio]";
+
+// <input> types that take no typing: the editor's shortcuts still apply while
+// one has focus (Chromium leaves focus on a checkbox after a click on it).
+const KEYLESS_INPUTS = new Set(["checkbox", "radio", "button", "submit", "reset", "range", "color", "file", "image"]);
+
+/**
+ * Whether the focused element takes keys for itself, so the editor's
+ * shortcuts and typing must leave them alone: a text or number field, a
+ * select list, or an open menu. A checkbox does not: Ctrl+Z after toggling
+ * one undoes the toggle, as after any button.
+ */
+export function ownsKeys(target: Pick<Element, "closest">): boolean {
+  const el = target.closest("input, textarea, select, [role=menu]");
+  if (!el) return false;
+  return !(el.tagName === "INPUT" && KEYLESS_INPUTS.has((el as HTMLInputElement).type));
+}
+
+// Text is edited on the canvas by whole characters as the user sees them: an
+// emoji is two UTF-16 code units (or more, joined), and stepping or deleting
+// one unit would leave half a character in the saved file.
+const graphemes = typeof Intl.Segmenter === "function" ? new Intl.Segmenter(undefined, { granularity: "grapheme" }) : null;
+
+/** Offsets in `text` where the caret may stand, in order (0 and text.length included). */
+function caretStops(text: string): number[] {
+  if (graphemes) return [...[...graphemes.segment(text)].map((s) => s.index), text.length];
+  // Without Intl.Segmenter, keep at least surrogate pairs whole.
+  const stops = [0];
+  for (const ch of text) stops.push(stops[stops.length - 1] + ch.length);
+  return stops;
+}
+
+/** `caret` moved back onto a character boundary, if it was inside one. */
+export function snapCaret(text: string, caret: number): number {
+  const stops = caretStops(text);
+  let at = 0;
+  for (const s of stops) if (s <= caret) at = s;
+  return at;
+}
+
+/** The caret one whole character to the left (dir -1) or right (dir 1). */
+export function stepCaret(text: string, caret: number, dir: -1 | 1): number {
+  const stops = caretStops(text);
+  if (dir < 0) return stops.filter((s) => s < caret).pop() ?? 0;
+  return stops.find((s) => s > caret) ?? text.length;
 }
 
 /**
