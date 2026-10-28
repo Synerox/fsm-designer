@@ -206,7 +206,9 @@ export function createState(d: FsmDiagram, x: number, y: number): State {
  * and imported diagrams carry priorities the editor can't show either). So
  * the new one is put just before that fallback: in the array, and in
  * priority when the fallback has one (the fallback and those after it move
- * down by one).
+ * down by one). Of several blank lines from one state, the last in the array
+ * stays the fallback, so with blank lines drawn first and labelled later,
+ * the first-drawn one that is left blank is the "else".
  */
 export function createTransition(d: FsmDiagram, from: string, to: string, loopAngle?: number): void {
   if (edgeTransitions(d, from, to).length) return;
