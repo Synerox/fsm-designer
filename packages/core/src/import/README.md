@@ -31,16 +31,30 @@ files with several FSMs (the editor shows it as a drop-down).
    (ANSI and non-ANSI ports, `#(parameter …)`), declarations, `parameter`,
    `localparam`, `typedef enum`, `assign`, and `always` / `always_ff` /
    `always_comb` blocks with `begin/end`, `if/else`, `case/casez/casex`,
-   `unique/priority`. Instances, functions and loops are skipped and reported.
+   `unique/priority`. Instances, functions, tasks, generate blocks and loops
+   are skipped and reported.
 2. **Find the state register**: a register written in a clocked block that
-   takes two or more constant values (directly, or through a combinational
-   next-state variable written as `state <= next`) and is used as a case
-   subject, compared with constants or bit-tested (`state[IDLE]`, one-hot).
-   Counters (`n <= n + 1`) are ruled out.
+   takes two or more constant values (directly, as the leaves of a `?:`
+   chain, or through a combinational next-state variable written as
+   `state <= next` or `state <= rst ? IDLE : next`) and is used as a case
+   subject (also inside a concatenation, `casex ({state, in})`), compared
+   with constants or bit-tested (`state[IDLE]`, or `st[0]` and `st[1]` when
+   every value is one-hot or zero, so `msb = data[7]` on a data register
+   does not count). Counters (`n <= n + 1`) are ruled out. Bit selects
+   follow the declared range (`reg [0:2] state`: `state[0]` is the MSB); on
+   other signals they are shown as bit positions from the LSB, with a
+   warning (`input [0:3] req`: `req[0]` reads `req[3]`).
 3. **Clock and reset** come from the sensitivity list and the first `if` of the
    state register's block (`if (!rst_n)`, `if (rst)`, or
-   `state <= !rst_n ? IDLE : next`); the reset state is what that block
-   assigns with reset asserted. Without a reset, an initial value is used.
+   `state <= !rst_n ? IDLE : next`; assignments to other registers before it
+   are passed over); the reset state is what that block assigns with reset
+   asserted. A signal without a reset-like name counts only if it sets the
+   state to a constant while its `else` follows a computed next state
+   (`if (go) state <= S1; else state <= next;`), the register has no
+   declared initial value, and a warning says so: `if (en) state <= next;
+   else state <= state;` is an enable, and `if (start) state <= RUN; else if
+   (done) state <= IDLE;` is the machine itself. Without a reset, an initial
+   value is used.
 4. **Slicing.** Only logic that matters to this FSM runs: outputs whose value
    depends on the state register (directly or through combinational logic)
    and the combinational signals that feed them. Outputs of other circuits
@@ -52,8 +66,12 @@ files with several FSMs (the editor shows it as a drop-down).
    fixed to that state; statements that write nothing of interest are passed
    over. An `if`/`case`/`?:` on a signal that is still unknown
    splits the run in two (one per truth value of the smallest sub-condition),
-   and impossible combinations (`sel == 1` and `sel == 2`) are pruned by
-   checking each signal's values. Every finished run is a set of input
+   and impossible combinations (`sel == 1` and `sel == 2`, or `cnt > 4'd15`
+   on a 4-bit `cnt`) are pruned by checking each signal's values (a
+   condition those values cannot decide, such as `$onehot(d)` or a
+   compare with x bits, is never pruned); signed
+   signals, `'s` literals and `$signed()` compare as two's complement, as in
+   Verilog. Every finished run is a set of input
    conditions with a next state and output values. New states found this way
    are explored too. XOR chains stay whole, and a state whose conditions
    still have too many parts to enumerate keeps them as written.
@@ -64,10 +82,15 @@ files with several FSMs (the editor shows it as a drop-down).
    A value computed from internal data (`tx = shreg[0]`) is shown as written.
    A registered output (written in a clocked block, e.g. a one-block FSM) that
    always takes the same value when entering a state is that state's Moore
-   output; otherwise it goes on the transitions, with a warning.
+   output; otherwise it goes on the transitions, with a warning. One that
+   copies an input (`y <= b`) holds the value sampled at the transition, so
+   it goes on the transitions too (`y=1` on `b`, `y=0` on `!b`).
 7. **Conditions.** Runs with the same next state and Mealy outputs are merged
    and the condition is minimised (Quine–McCluskey, `boolmin.ts`), so the
-   conditions out of a state are mutually exclusive and cover every case.
+   conditions out of a state are mutually exclusive and cover every case; a
+   branch no input value can reach is left out. With more than 10 atoms the
+   runs are listed as they are, without literals an equality already decides
+   (a case with many labels lists each label once).
 
 ## Tests
 
@@ -80,3 +103,7 @@ over the examples in every style and state encoding and checks the imported
 diagrams against the hand-written vectors. `stress.test.ts` covers a big
 UART module with two FSMs, two FSMs in one module, an FSM in a submodule, a
 16-input parity, one-hot `case (1'b1)` and 32-state machines.
+`edge-cases.test.ts` covers less common styles and corner cases: dead and
+signed compares, reset look-alikes, `?:`-only next states, concatenated case
+subjects, plain one-hot indices, ascending and offset ranges, registered
+outputs that copy an input, long case statements and deep nesting.

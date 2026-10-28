@@ -1,7 +1,7 @@
 // File commands: autosave, opening files, auto layout.
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
-import { autoLayout } from "@fsm/core";
+import { autoLayout, renderSvg } from "@fsm/core";
 import { MAX_DRAFT, autosaveLost, discardUnsaved, importVerilogText, loadText, loadVerilogDraft, restoreSession, saveVerilogDraft, serialize, startAutosave, tidyUp, useAutosave } from "../src/actions.ts";
 import { createState, createTransition, drawOptions, newDiagram, setInitial, useEditor } from "../src/store.ts";
 
@@ -99,6 +99,21 @@ test("a file without coordinates still gets circles that fit its names, and a la
   assert.ok(st.every((s) => s.x !== undefined && s.y !== undefined));
 });
 
+test("a hand-edited file with a null or NaN coordinate opens with every state placed", async () => {
+  // JSON has no NaN; a script writing one gives null. A null coordinate means
+  // "not placed" (parseDiagram), so opening must place such a state.
+  const text = JSON.stringify({ name: "m", states: [
+    { id: "s0", name: "A", x: 100, y: 100 },
+    { id: "s1", name: "B", x: 300, y: 100 },
+    { id: "s2", name: "C", x: null, y: 200 },
+  ], transitions: [{ id: "t0", from: "s0", to: "s2", condition: "" }] });
+  await loadText(text, "hand.fsm.json");
+  const st = useEditor.getState().doc.states;
+  assert.ok(st.every((s) => Number.isFinite(s.x) && Number.isFinite(s.y)), JSON.stringify(st));
+  assert.deepEqual(st.slice(0, 2).map((s) => [s.x, s.y]), [[100, 100], [300, 100]], "placed states stay where they were");
+  assert.ok(renderSvg(useEditor.getState().doc).includes("<svg"), "the canvas can draw it");
+});
+
 test("Auto Layout applies the start-arrow side the layout chose", async () => {
   // The user turned the start arrow to the right, where the line to S1 will run.
   const d = newDiagram();
@@ -148,7 +163,8 @@ test("an autosave that cannot be drawn is set aside with a message, not loaded",
   useEditor.getState().load(newDiagram(), null);
   storeSession((s) => { delete s.doc.states[0].name; delete s.doc.states[0].label; });
   const raw = storage.get("fsm-designer:autosave");
-  await assert.rejects(restoreSession(), /^Error: Could not restore the last session: the diagram cannot be drawn/);
+  // parseDiagram now refuses the nameless state itself; before that, checkDrawable caught it.
+  await assert.rejects(restoreSession(), /^Error: Could not restore the last session: /);
   assert.equal(useEditor.getState().doc.states.length, 0, "rendering it threw and left an empty page on every reload");
   assert.equal(storage.get("fsm-designer:autosave.bad"), raw, "kept where the next edit cannot overwrite it");
   assert.equal(storage.has("fsm-designer:autosave"), false);
@@ -165,7 +181,7 @@ test("an autosave that is not JSON is set aside with a message", async () => {
 test("opening a file with a state the editor cannot draw fails instead of blanking the page", async () => {
   useEditor.getState().load(newDiagram(), null);
   const text = JSON.stringify({ name: "agent_made", states: [{ id: "s0", x: 100, y: 100, isInitial: true }], transitions: [] });
-  await assert.rejects(loadText(text, "agent.fsm.json"), /the diagram cannot be drawn/);
+  await assert.rejects(loadText(text, "agent.fsm.json"));
   assert.equal(useEditor.getState().doc.states.length, 0);
   await assert.rejects(loadText("{ not json", "bad.fsm.json"), /^Error: it is not a valid JSON file$/);
 });

@@ -3,7 +3,7 @@
 // and printing back to Verilog text.
 
 export type Expr =
-  | { k: "num"; v: bigint; w: number | null; x: bigint; z: bigint; src?: string; name?: string }
+  | { k: "num"; v: bigint; w: number | null; x: bigint; z: bigint; src?: string; name?: string; signed?: boolean; index?: string }
   | { k: "id"; name: string }
   | { k: "un"; op: string; a: Expr }
   | { k: "bin"; op: string; a: Expr; b: Expr }
@@ -53,9 +53,10 @@ export function parseNumber(text: string): Num {
   if (!m) {
     const v = text.replace(/_/g, "");
     if (/[.eE]/.test(v)) return num(BigInt(Math.trunc(Number(v))), null, { src });
-    return num(BigInt(v), null, { src });
+    return num(BigInt(v), null, { src, signed: true }); // a plain decimal is a signed integer
   }
   const w = m[1] ? Number(m[1].replace(/_/g, "")) : null;
+  const signed = m[2] ? { signed: true } : {};
   const base = m[3].toLowerCase();
   const digits = m[4].replace(/_/g, "").toLowerCase();
   if (base === "d") {
@@ -63,7 +64,7 @@ export function parseNumber(text: string): Num {
       const width = w ?? 32;
       return { k: "num", v: 0n, w, x: digits.includes("x") ? ONES(width) : 0n, z: /[z?]/.test(digits) ? ONES(width) : 0n, src };
     }
-    return num(BigInt(digits), w, { src });
+    return num(BigInt(digits), w, { src, ...signed });
   }
   const bits = base === "b" ? 1 : base === "o" ? 3 : 4;
   let v = 0n, x = 0n, z = 0n;
@@ -84,7 +85,7 @@ export function parseNumber(text: string): Num {
     }
     v = mask(v, w); x = mask(x, w); z = mask(z, w);
   }
-  return { k: "num", v, w, x, z, src };
+  return { k: "num", v, w, x, z, src, ...signed };
 }
 
 const COMPARE = new Set(["==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||", "==?", "!=?"]);
@@ -107,8 +108,13 @@ export function widthOf(e: Expr, ctx: EvalCtx): number {
     }
     case "cat": return e.parts.reduce((s, p) => s + widthOf(p, ctx), 0);
     case "rep": return (isConst(e.n) ? Number(e.n.v) : 1) * e.parts.reduce((s, p) => s + widthOf(p, ctx), 0);
-    case "call": return 32;
+    case "call": return (e.name === "$signed" || e.name === "$unsigned") && e.args.length === 1 ? widthOf(e.args[0], ctx) : 32;
   }
+}
+
+/** v (w bits) read as two's complement. */
+export function toSigned(v: bigint, w: number): bigint {
+  return w > 0 && (v >> BigInt(w - 1)) & 1n ? v - (1n << BigInt(w)) : v;
 }
 
 /** The width an operand really has, for folding: unsized literals adopt the other side's. */
@@ -119,11 +125,12 @@ function opWidth(a: Num, b: Num): number {
 
 function foldUnary(op: string, a: Num, w: number): Num {
   const v = a.w === null ? mask(a.v, w) : a.v;
+  const signed = a.signed ? { signed: true } : {};
   switch (op) {
     case "!": return bool(v === 0n);
-    case "~": return num(~v, w);
-    case "-": return num(-v, w);
-    case "+": return num(v, w);
+    case "~": return num(~v, w, signed);
+    case "-": return num(-v, w, signed);
+    case "+": return num(v, w, signed);
     case "&": return bool(v === ONES(w));
     case "~&": return bool(v !== ONES(w));
     case "|": return bool(v !== 0n);
@@ -142,26 +149,36 @@ function popcount(v: bigint): number {
 
 function foldBinary(op: string, a: Num, b: Num): Num | undefined {
   const w = opWidth(a, b);
-  const x = mask(a.v, w), y = mask(b.v, w);
+  // Verilog compares and computes in two's complement only when both operands
+  // are signed (signed declarations, 8'sd30, plain decimals, $signed(x));
+  // the narrower one is then sign-extended.
+  const both = !!a.signed && !!b.signed;
+  const signed = both ? { signed: true } : {};
+  const x = both ? mask(toSigned(mask(a.v, a.w ?? 32), a.w ?? 32), w) : mask(a.v, w);
+  const y = both ? mask(toSigned(mask(b.v, b.w ?? 32), b.w ?? 32), w) : mask(b.v, w);
+  const [sx, sy] = both ? [toSigned(x, w), toSigned(y, w)] : [x, y];
   switch (op) {
-    case "+": return num(x + y, w);
-    case "-": return num(x - y, w);
-    case "*": return num(x * y, w);
-    case "/": return y === 0n ? undefined : num(x / y, w);
-    case "%": return y === 0n ? undefined : num(x % y, w);
+    case "+": return num(x + y, w, signed);
+    case "-": return num(x - y, w, signed);
+    case "*": return num(x * y, w, signed);
+    // (BigInt / and % truncate toward zero, as Verilog's signed ones do.)
+    case "/": return y === 0n ? undefined : num(sx / sy, w, signed);
+    case "%": return y === 0n ? undefined : num(sx % sy, w, signed);
     case "**": return num(x ** y, a.w);
-    case "&": return num(x & y, w);
-    case "|": return num(x | y, w);
-    case "^": return num(x ^ y, w);
+    case "&": return num(x & y, w, signed);
+    case "|": return num(x | y, w, signed);
+    case "^": return num(x ^ y, w, signed);
     case "~^": case "^~": return num(~(x ^ y), w);
-    case "<<": case "<<<": return num(a.v << b.v, a.w ?? 32);
-    case ">>": case ">>>": return num(a.v >> b.v, a.w ?? 32);
+    // A shift keeps the left operand's width and sign; >>> fills with its sign bit when signed.
+    case "<<": case "<<<": return num(a.v << b.v, a.w ?? 32, a.signed ? { signed: true } : {});
+    case ">>": return num(mask(a.v, a.w ?? 32) >> b.v, a.w ?? 32, a.signed ? { signed: true } : {});
+    case ">>>": return num((a.signed ? toSigned(mask(a.v, a.w ?? 32), a.w ?? 32) : mask(a.v, a.w ?? 32)) >> b.v, a.w ?? 32, a.signed ? { signed: true } : {});
     case "==": case "===": return bool(x === y);
     case "!=": case "!==": return bool(x !== y);
-    case "<": return bool(x < y);
-    case "<=": return bool(x <= y);
-    case ">": return bool(x > y);
-    case ">=": return bool(x >= y);
+    case "<": return bool(sx < sy);
+    case "<=": return bool(sx <= sy);
+    case ">": return bool(sx > sy);
+    case ">=": return bool(sx >= sy);
     case "&&": return bool(a.v !== 0n && b.v !== 0n);
     case "||": return bool(a.v !== 0n || b.v !== 0n);
   }
@@ -321,7 +338,12 @@ function simplify1(e: Expr, ctx: EvalCtx): Expr {
         while ((1n << BigInt(n)) < args[0].v) n++;
         return num(n);
       }
-      if ((e.name === "$signed" || e.name === "$unsigned") && args.length === 1) return args[0];
+      // $signed(x) changes how x compares: fold it for a constant, keep it
+      // (and so in the printed condition) otherwise.
+      if ((e.name === "$signed" || e.name === "$unsigned") && args.length === 1 && isConst(args[0])) {
+        const a = args[0];
+        return { ...a, w: a.w ?? 32, signed: e.name === "$signed", src: undefined, name: undefined };
+      }
       return { ...e, args };
     }
   }

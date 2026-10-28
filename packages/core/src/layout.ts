@@ -44,7 +44,7 @@ function roundPositions(states: State[]) {
  * so the agent's (or user's) manual placement is kept.
  */
 export async function ensureLayout(d: FsmDiagram): Promise<void> {
-  const missing = d.states.filter((s) => s.x === undefined || s.y === undefined);
+  const missing = d.states.filter((s) => !Number.isFinite(s.x) || !Number.isFinite(s.y)); // null/NaN too: planDiagram rejects them
   if (missing.length === 0) return;
   if (missing.length === d.states.length) { await autoLayout(d); return; }
   const placed = d.states.filter((s) => !missing.includes(s));

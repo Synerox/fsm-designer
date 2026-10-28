@@ -41,7 +41,7 @@ function pieces(raw: string, shortcuts: boolean): Piece[] {
   let last = 0;
   for (let m; (m = re.exec(raw)); ) {
     if (m[1] !== undefined && !(m[1] in GREEK_CHAR)) continue;
-    if (m[2] !== undefined && ![...m[2]].every((c) => c in SUB)) continue;
+    if (m[2] !== undefined && !(m[2] && [...m[2]].every((c) => c in SUB))) continue; // "_{}" stays as typed
     if (m.index > last) out.push({ kind: "text", value: raw.slice(last, m.index) });
     if (m[1] !== undefined) out.push({ kind: "greek", value: m[1] });
     else if (m[4] !== undefined) out.push({ kind: "sub", value: [...m[4]].map((c) => UNSUB[c]).join("") });
@@ -90,9 +90,38 @@ export function texEscape(s: string): string {
   })[c]!);
 }
 
-/** Label text for LaTeX text mode: β becomes $\beta$, S₀ becomes S$_{0}$, everything else is escaped as typed. */
+// Greek in LaTeX, by the name pieces() gives each letter. Unicode ε and φ are
+// the shapes TeX calls \varepsilon and \varphi (TeX's \epsilon and \phi are
+// the lunate ϵ and the closed ϕ), and capitals that look like Latin letters
+// have no macro at all (there is no \Alpha or \omicron), so they are written
+// as that letter: upright like \Gamma, italic like the other lowercase.
+const TEX_GREEK: Record<string, string> = {
+  epsilon: "$\\varepsilon$", phi: "$\\varphi$", omicron: "$o$",
+  Alpha: "A", Beta: "B", Epsilon: "E", Zeta: "Z", Eta: "H", Iota: "I", Kappa: "K", Mu: "M", Nu: "N", Omicron: "O", Rho: "P", Tau: "T", Chi: "X",
+};
+// Other characters a label may hold that pdflatex's UTF-8 input cannot
+// typeset, with their TeX spelling: the other Greek letter forms and the
+// symbols conditions are written with.
+const TEX_CHAR: Record<string, string> = {
+  "ϵ": "\\epsilon", "ϕ": "\\phi", "ϑ": "\\vartheta", "ϖ": "\\varpi", "ϱ": "\\varrho", "ς": "\\varsigma",
+  "→": "\\rightarrow", "←": "\\leftarrow", "↔": "\\leftrightarrow", "⇒": "\\Rightarrow", "⇐": "\\Leftarrow", "⇔": "\\Leftrightarrow", "↑": "\\uparrow", "↓": "\\downarrow",
+  "≥": "\\geq", "≤": "\\leq", "≠": "\\neq", "≈": "\\approx", "≡": "\\equiv", "±": "\\pm", "×": "\\times", "÷": "\\div", "·": "\\cdot", "∘": "\\circ",
+  "¬": "\\neg", "∧": "\\wedge", "∨": "\\vee", "⊕": "\\oplus", "⊗": "\\otimes", "∑": "\\sum", "∏": "\\prod", "∞": "\\infty",
+  "′": "'", "″": "''", "‴": "'''", // primes (S′): OT1 pdflatex has no text glyph for them
+  "∈": "\\in", "∉": "\\notin", "∅": "\\emptyset", "∀": "\\forall", "∃": "\\exists", "∩": "\\cap", "∪": "\\cup", "⊂": "\\subset", "⊆": "\\subseteq",
+};
+const TEX_CHAR_RUN = new RegExp(`[${Object.keys(TEX_CHAR).join("")}]`, "g");
+// Invisible direction and joiner marks (and the BOM) draw nothing but stop pdflatex.
+const FORMAT_MARKS = /[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
+
+/**
+ * Label text for LaTeX text mode: β becomes $\beta$, S₀ becomes S$_{0}$, ≥
+ * becomes $\geq$, everything else is escaped as typed. Text pdflatex cannot
+ * set (CJK, Hangul, emoji) is kept; renderLatex's preamble handles it.
+ */
 export function latexText(raw: string): string {
-  return pieces(raw, false).map((p) => (p.kind === "greek" ? `$\\${p.value}$` : p.kind === "sub" ? `$_{${p.value}}$` : texEscape(p.value))).join("");
+  const text = (t: string) => texEscape(t.replace(FORMAT_MARKS, "")).replace(TEX_CHAR_RUN, (c) => `$${TEX_CHAR[c]}$`);
+  return pieces(raw, false).map((p) => (p.kind === "greek" ? TEX_GREEK[p.value] ?? `$\\${p.value}$` : p.kind === "sub" ? `$_{${p.value}}$` : text(p.value))).join("");
 }
 
 /** The raw text a state shows: its free-form label if set, else its identifier. */

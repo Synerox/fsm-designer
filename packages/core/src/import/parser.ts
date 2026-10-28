@@ -32,6 +32,8 @@ export interface Decl {
   range?: Range;
   /** Fixed width for types like integer (32) or a typedef'd enum. */
   width?: number;
+  /** Declared signed (`signed`, or integer / int / byte ...): compares are two's complement. */
+  signed?: boolean;
   enumType?: string;
   init?: Expr;
   line: number;
@@ -84,6 +86,8 @@ export interface Module {
   assigns: ContAssign[];
   /** Constructs that were skipped, for warnings. */
   skipped: string[];
+  /** Syntax errors that made the parser skip code (they are in skipped too). */
+  errors: string[];
 }
 
 export interface SourceFile {
@@ -99,22 +103,29 @@ const BINARY_PREC: Record<string, number> = {
 };
 const NET_TYPES = new Set(["wire", "reg", "logic", "bit", "var", "tri", "wand", "wor", "supply0", "supply1", "uwire", "tri0", "tri1"]);
 const INT_TYPES: Record<string, number> = { integer: 32, int: 32, shortint: 16, longint: 64, byte: 8, genvar: 32, time: 64 };
+const SIGNED_TYPES = new Set(["integer", "int", "shortint", "longint", "byte", "genvar"]);
+/** What a type keyword says about signedness, if anything. */
+const signedness = (t: string): boolean | undefined => (t === "signed" || SIGNED_TYPES.has(t) ? true : t === "unsigned" ? false : undefined);
 const SKIP_BLOCKS: Record<string, string> = {
   function: "endfunction", task: "endtask", generate: "endgenerate", specify: "endspecify",
   covergroup: "endgroup", property: "endproperty", sequence: "endsequence", clocking: "endclocking",
   interface: "endinterface", program: "endprogram", class: "endclass", checker: "endchecker",
 };
 
+const PROCEDURAL = new Set(["always", "always_ff", "always_comb", "always_latch", "initial", "final"]);
+const ITEM_START = new Set([
+  ...PROCEDURAL, "assign", "module", "macromodule", "endmodule", "package", "endpackage", "parameter", "localparam",
+  "typedef", "input", "output", "inout", "function", "task", "generate",
+]);
+
 export function parseVerilog(source: string): SourceFile {
-  const pre = preprocess(source);
+  // Only a body that parses as a whole expression keeps its name; anything
+  // else is expanded as text where it is used, as a Verilog compiler would.
+  const isExpr = (body: string) => { try { parseExpression(body); return true; } catch { return false; } };
+  const pre = preprocess(source, isExpr);
   const p = new Parser(tokenize(pre.text));
   const globals: Param[] = [];
-  for (const [name, body] of pre.constants) {
-    try {
-      const value = new Parser(tokenize(body)).expr();
-      globals.push({ name, value, local: true, line: 0, origin: "define" });
-    } catch { /* not an expression after all */ }
-  }
+  for (const [name, body] of pre.constants) globals.push({ name, value: parseExpression(body), local: true, line: 0, origin: "define" });
   return p.file(globals);
 }
 
@@ -230,23 +241,28 @@ class Parser {
 
   private paramList(m: Module, end: string) {
     let local = false;
+    // The type and range of a list apply to every name in it
+    // (localparam [1:0] X = 0, Y = ~0: Y is 2'b11), up to the next keyword.
+    let range: Range | undefined;
     while (!this.is(end) && !this.done()) {
-      if (this.accept("parameter")) local = false;
-      else if (this.accept("localparam")) local = true;
-      this.oneParam(m, local);
+      if (this.accept("parameter")) { local = false; range = undefined; }
+      else if (this.accept("localparam")) { local = true; range = undefined; }
+      range = this.oneParam(m, local, range);
       if (!this.accept(",")) break;
     }
   }
 
-  private oneParam(m: Module, local: boolean) {
-    // [type] [signed] [range] NAME = value
-    if (this.is("type")) { this.skipStatement(); return; }
-    let range: Range | undefined;
+  /** One `[type] [signed] [range] NAME = value`; returns the range for the names after it. */
+  private oneParam(m: Module, local: boolean, listRange: Range | undefined): Range | undefined {
+    if (this.is("type")) { this.skipStatement(); return undefined; }
+    let range = listRange;
+    let typed = false;
+    const newType = () => { if (!typed) { typed = true; range = undefined; } };
     for (;;) {
       const t = this.peek();
-      if (t.kind === "id" && (NET_TYPES.has(t.text) || t.text in INT_TYPES || t.text === "signed" || t.text === "unsigned" || t.text === "real")) { this.i++; continue; }
-      if (t.kind === "id" && this.peek(1).kind === "id") { this.i++; continue; } // user type
-      if (this.is("[")) { range = this.range(); continue; }
+      if (t.kind === "id" && (NET_TYPES.has(t.text) || t.text in INT_TYPES || t.text === "signed" || t.text === "unsigned" || t.text === "real")) { newType(); this.i++; continue; }
+      if (t.kind === "id" && this.peek(1).kind === "id") { newType(); this.i++; continue; } // user type
+      if (this.is("[")) { newType(); range = this.range(); continue; }
       break;
     }
     const tok = this.peek();
@@ -255,6 +271,7 @@ class Parser {
     this.expect("=");
     const value = this.expr();
     m.params.push({ name, value, range, local, line: tok.line, origin: "param" });
+    return range;
   }
 
   private range(): Range {
@@ -275,20 +292,24 @@ class Parser {
     let range: Range | undefined;
     let enumType: string | undefined;
     let width: number | undefined;
+    let signed: boolean | undefined;
     while (!this.is(")") && !this.done()) {
       const start = this.peek();
       let sawType = false;
       if (start.text === "input" || start.text === "output" || start.text === "inout") {
         dir = start.text;
         this.i++;
-        range = undefined; enumType = undefined; width = undefined; sawType = true;
+        range = undefined; enumType = undefined; width = undefined; signed = undefined; sawType = true;
       }
       for (;;) {
         const t = this.peek();
         if (t.kind !== "id") break;
-        if (NET_TYPES.has(t.text) || t.text === "signed" || t.text === "unsigned") { this.i++; sawType = true; continue; }
-        if (t.text in INT_TYPES) { width = INT_TYPES[t.text]; this.i++; sawType = true; continue; }
-        if (this.peek(1).kind === "id" || (this.peek(1).text === "[" && m.enums.has(t.text))) {
+        if (NET_TYPES.has(t.text) || t.text === "signed" || t.text === "unsigned") { signed = signedness(t.text) ?? signed; this.i++; sawType = true; continue; }
+        if (t.text in INT_TYPES) { width = INT_TYPES[t.text]; signed = signedness(t.text); this.i++; sawType = true; continue; }
+        if (this.is("::", 1) && this.peek(2).kind === "id") { this.i += 2; continue; } // pkg::type
+        // A user type is followed by the name, but "input clk input rst" is a
+        // missing comma, not clk used as a type.
+        if ((this.peek(1).kind === "id" && !isDirection(this.peek(1).text)) || (this.peek(1).text === "[" && m.enums.has(t.text))) {
           enumType = m.enums.has(t.text) ? t.text : undefined;
           this.i++;
           sawType = true;
@@ -307,9 +328,12 @@ class Parser {
         m.ports.push(name); // non-ANSI: declared in the body
       } else {
         m.ports.push(name);
-        m.decls.set(name, { name, dir, range, width, enumType, init, line: tok.line });
+        m.decls.set(name, { name, dir, range, width, ...(signed ? { signed } : {}), enumType, init, line: tok.line });
       }
-      if (!this.accept(",")) break;
+      if (this.accept(",")) continue;
+      if (!isDirection(this.peek().text)) break;
+      // Read on as if the comma were there, so no port is lost, and say so.
+      m.skipped.push(`line ${this.peek().line}: expected "," before "${this.peek().text}"`);
     }
   }
 
@@ -326,19 +350,50 @@ class Parser {
 
   private items(m: Module, end: string) {
     while (!this.done() && !this.is(end)) {
+      // The next module starts before this one ended: stop here, or the next
+      // module's blocks would be read as this one's.
+      if (this.is("module") || this.is("macromodule") || this.is("package")) {
+        m.skipped.push(`line ${this.peek().line}: "${this.peek().text}" before "${end}" of ${m.name}`);
+        return;
+      }
       const at = this.i;
       try {
         this.item(m);
       } catch (e) {
         if (!(e instanceof VerilogSyntaxError)) throw e;
         m.skipped.push(e.message);
+        m.errors.push(e.message);
         this.i = at;
-        this.skipStatement();
+        // A broken always block holds statements of its own: resyncing at the
+        // next `;` would land inside it and read the rest of it as module
+        // items (`instance of else`), so skip to the next module item instead.
+        if (PROCEDURAL.has(this.peek().text)) this.skipToItem(end);
+        else this.skipStatement();
       }
       if (this.i === at) this.i++;
     }
+    if (this.done()) m.skipped.push(`line ${this.peek().line}: "${end}" of ${m.name} missing at the end of the file`);
     this.accept(end);
     if (this.accept(":")) this.i++;
+  }
+
+  /** Skip past the current token to the next keyword that starts a module item. */
+  private skipToItem(end: string) {
+    this.i++;
+    while (!this.done()) {
+      const t = this.peek();
+      if (t.kind === "id" && (t.text === end || ITEM_START.has(t.text) || NET_TYPES.has(t.text) || t.text in INT_TYPES)) return;
+      this.i++;
+    }
+  }
+
+  /**
+   * At a keyword that cannot be inside a statement: an unclosed begin or case
+   * ran into the next always block, so the error is reported where it opened.
+   */
+  private atItem() {
+    const t = this.peek();
+    return t.kind === "id" && (PROCEDURAL.has(t.text) || t.text === "endmodule" || t.text === "module" || t.text === "macromodule" || t.text === "endpackage");
   }
 
   private item(m: Module) {
@@ -382,7 +437,11 @@ class Parser {
       this.stmt();
       return;
     }
+    // import pkg::*; the package's constants and types are already known.
+    if (w === "import") { this.skipStatement(); return; }
     if (m.enums.has(w) && this.peek(1).kind === "id") return this.declaration(m);
+    // pkg::state_t s, n;
+    if (this.is("::", 1) && m.enums.has(this.peek(2).text) && (this.peek(3).kind === "id" || this.is("[", 3))) return this.declaration(m);
     if (this.peek(1).kind === "id" || this.peek(1).text === "#") {
       m.skipped.push(`instance of ${w} (line ${t.line})`);
     }
@@ -434,11 +493,12 @@ class Parser {
     let range: Range | undefined;
     let width: number | undefined;
     let enumType: string | undefined;
+    let signed: boolean | undefined;
     for (;;) {
       const t = this.peek();
       if (t.kind !== "id") break;
-      if (NET_TYPES.has(t.text) || t.text === "signed" || t.text === "unsigned" || t.text === "automatic" || t.text === "static") { this.i++; continue; }
-      if (t.text in INT_TYPES) { width = INT_TYPES[t.text]; this.i++; continue; }
+      if (NET_TYPES.has(t.text) || t.text === "signed" || t.text === "unsigned" || t.text === "automatic" || t.text === "static") { signed = signedness(t.text) ?? signed; this.i++; continue; }
+      if (t.text in INT_TYPES) { width = INT_TYPES[t.text]; signed = signedness(t.text); this.i++; continue; }
       if (t.text === "enum") {
         const e = this.enumBody(m);
         const anon = `$enum${m.enums.size}`;
@@ -448,6 +508,7 @@ class Parser {
         enumType = anon;
         continue;
       }
+      if (this.is("::", 1) && this.peek(2).kind === "id") { this.i += 2; continue; } // pkg::type: the type is what counts
       if (m.enums.has(t.text) && (this.peek(1).kind === "id" || this.peek(1).text === "[")) { enumType = t.text; this.i++; continue; }
       break;
     }
@@ -465,6 +526,7 @@ class Parser {
         dir: dir ?? old?.dir,
         range: range ?? old?.range,
         width: width ?? old?.width,
+        ...((signed ?? old?.signed) ? { signed: true } : {}),
         enumType: enumType ?? old?.enumType,
         init: init ?? old?.init,
         line: old?.line ?? tok.line,
@@ -529,7 +591,7 @@ class Parser {
       const body: Stmt[] = [];
       const end = w === "begin" ? ["end"] : ["join", "join_any", "join_none"];
       while (!end.includes(this.peek().text)) {
-        if (this.done()) throw new VerilogSyntaxError(`"${w}" without "${end[0]}"`, t.line);
+        if (this.done() || this.atItem()) throw new VerilogSyntaxError(`"${w}" without "${end[0]}"`, t.line);
         // Local declarations inside a block.
         if (this.peek().kind === "id" && (NET_TYPES.has(this.peek().text) || this.peek().text in INT_TYPES)) { this.skipStatement(); continue; }
         body.push(this.stmt());
@@ -554,21 +616,28 @@ class Parser {
       this.expect("(");
       const subject = this.expr();
       this.expect(")");
-      this.accept("inside");
-      const items: CaseItem[] = [];
+      const inside = this.accept("inside");
+      const items: Array<{ labels: Array<Expr | ValueRange> | null; body: Stmt }> = [];
       while (!this.accept("endcase")) {
-        if (this.done()) throw new VerilogSyntaxError(`"${w}" without "endcase"`, t.line);
+        if (this.done() || this.atItem()) throw new VerilogSyntaxError(`"${w}" without "endcase"`, t.line);
         if (this.accept("default")) {
           this.accept(":");
           items.push({ labels: null, body: this.stmt() });
           continue;
         }
-        const labels: Expr[] = [];
-        do labels.push(this.expr()); while (this.accept(","));
+        const labels: Array<Expr | ValueRange> = [];
+        do labels.push(inside ? this.insideItem() : this.expr()); while (this.accept(","));
         this.expect(":");
         items.push({ labels, body: this.stmt() });
       }
-      return { k: "case", kind: w, subject, items, line: t.line };
+      // A [lo:hi] label of `case (x) inside` matches a range, which a case
+      // label compared for equality cannot say, so such a case becomes
+      // case (1'b1) with each label turned into its condition.
+      if (items.some((it) => it.labels?.some((l) => "lo" in l))) {
+        const labels = (ls: Array<Expr | ValueRange> | null) => ls && ls.map((l) => insideMatch(subject, l));
+        return { k: "case", kind: w, subject: num(1, 1), items: items.map((it) => ({ labels: labels(it.labels), body: it.body })), line: t.line };
+      }
+      return { k: "case", kind: w, subject, items: items as CaseItem[], line: t.line };
     }
     if (w === "for" || w === "while" || w === "repeat" || w === "foreach") {
       this.i++;
@@ -598,8 +667,8 @@ class Parser {
       return { k: "skip", what: t.text, line: t.line };
     }
     if (w === "assign" || w === "force") this.i++;
-    // Task call: name(...);
-    if (t.kind === "id" && this.peek(1).text === "(") {
+    // Task call: name(...); or, for a task without arguments, name;
+    if (t.kind === "id" && (this.is("(", 1) || this.is(";", 1))) {
       this.skipStatement();
       return { k: "skip", what: `call ${t.text}`, line: t.line };
     }
@@ -673,12 +742,23 @@ class Parser {
       // x inside {A, B}: equality with any member.
       this.i++;
       this.expect("{");
-      const opts: Expr[] = [];
-      do opts.push(this.expr()); while (this.accept(","));
+      const opts: Array<Expr | ValueRange> = [];
+      do opts.push(this.insideItem()); while (this.accept(","));
       this.expect("}");
-      left = opts.map((o): Expr => ({ k: "bin", op: "==", a: left, b: o })).reduce((a, b) => ({ k: "bin", op: "||", a, b }));
+      const x = left;
+      left = opts.map((o) => insideMatch(x, o)).reduce((a, b) => ({ k: "bin", op: "||", a, b }));
     }
     return left;
+  }
+
+  /** One member of an inside list or a case-inside label: a value or a [lo:hi] range. */
+  private insideItem(): Expr | ValueRange {
+    if (!this.accept("[")) return this.expr();
+    const lo = this.expr();
+    this.expect(":");
+    const hi = this.expr();
+    this.expect("]");
+    return { lo, hi };
   }
 
   private unary(): Expr {
@@ -755,6 +835,19 @@ class Parser {
   }
 }
 
+const isDirection = (w: string) => w === "input" || w === "output" || w === "inout";
+
+interface ValueRange {
+  lo: Expr;
+  hi: Expr;
+}
+
+/** x inside {item}: equal to a value, or between the bounds of a [lo:hi] range. */
+function insideMatch(x: Expr, item: Expr | ValueRange): Expr {
+  if (!("lo" in item)) return { k: "bin", op: "==", a: x, b: item };
+  return { k: "bin", op: "&&", a: { k: "bin", op: ">=", a: x, b: item.lo }, b: { k: "bin", op: "<=", a: x, b: item.hi } };
+}
+
 function emptyModule(name: string, line: number): Module {
-  return { name, line, ports: [], decls: new Map(), params: [], enums: new Map(), always: [], assigns: [], skipped: [] };
+  return { name, line, ports: [], decls: new Map(), params: [], enums: new Map(), always: [], assigns: [], skipped: [], errors: [] };
 }
