@@ -456,3 +456,55 @@ test("files: linked names share one lock, devices and pipes are refused, hard li
   assert.ok(!(await readdir(dir)).includes("loopa.fsm.json"));
   for (const f of ["pipe.fsm.json", "loopb.fsm.json", "alias.fsm.json"]) await rm(join(dir, f), { force: true });
 });
+
+test("locks are fair: a server editing back to back does not starve another server's call", async () => {
+  const other = new Client({ name: "fair", version: "0" });
+  await other.connect(new StdioClientTransport({ command: process.execPath, args: [entry, "--dir", dir], stderr: "ignore" }));
+  try {
+    await ok("create_fsm", { name: "busy", states: Array.from({ length: 200 }, (_, i) => ({ name: `S${i}`, x: (i % 20) * 120, y: Math.floor(i / 20) * 120 })) });
+    let stop = false;
+    const loops = [0, 1].map(async (w) => {
+      for (let i = 0; !stop; i++) await call("update_state", { fsm: "busy", state: "S0", label: `w${w}_${i}` });
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    const t0 = Date.now();
+    const r = (await other.callTool({ name: "add_state", arguments: { fsm: "busy", name: "FromOther" } })) as Out;
+    const took = Date.now() - t0;
+    stop = true;
+    await Promise.all(loops);
+    assert.ok(!r.isError, textOf(r));
+    assert.ok(took < 10_000, `took ${took} ms`);
+  } finally {
+    await other.close();
+  }
+});
+
+test("files: hard-linked names share one lock; saving into a pipe is refused; lock files cannot be export targets; temp files of killed servers are cleared", { skip: process.platform === "win32" }, async () => {
+  const { link, symlink, readdir } = await import("node:fs/promises");
+  const { execFileSync, spawnSync } = await import("node:child_process");
+  const { hostname } = await import("node:os");
+  await ok("create_fsm", { name: "hl", states: [{ name: "A" }] });
+  await link(join(dir, "hl.fsm.json"), join(dir, "hl2.fsm.json"));
+  const rs = await Promise.all(Array.from({ length: 16 }, (_, i) => call("add_state", { fsm: i % 2 ? "hl2" : "hl", name: `H${i}` })));
+  for (const r of rs) assert.ok(!r.isError, textOf(r));
+  assert.equal((await load("hl")).states.length, 17);
+  await rm(join(dir, "hl2.fsm.json"));
+
+  const out = await mkdtemp(join(tmpdir(), "fsm-mcp-fifo-"));
+  try {
+    execFileSync("mkfifo", [join(out, "fifo")]);
+    await symlink(join(out, "fifo"), join(dir, "piped.fsm.json"));
+    await fails("create_fsm", { name: "piped", states: [{ name: "A" }] }, /not a regular file/);
+    await rm(join(dir, "piped.fsm.json"));
+  } finally {
+    await rm(out, { recursive: true, force: true });
+  }
+
+  await fails("export_fsm", { name: "hl", format: "svg", path: "hl.fsm.json.lock" }, /coordinate edits/);
+
+  const dead = spawnSync(process.execPath, ["-e", ""]).pid!;
+  const leftover = `.hl.fsm.json.tmp-${hostname().replace(/[^A-Za-z0-9_]/g, "_").slice(0, 40)}-${dead}-1`;
+  await writeFile(join(dir, leftover), "{}");
+  await ok("add_state", { fsm: "hl", name: "AFTER" });
+  assert.ok(!(await readdir(dir)).includes(leftover));
+});

@@ -135,11 +135,18 @@ function staleReason(l: Seen): string | undefined {
 const held = new Map<string, string>();
 /** Tokens of this process's lock and guard files, including ones being created. */
 const ours = new Set<string>();
+/** Temp files of saves in progress, removed if the process exits mid-save. */
+const temps = new Set<string>();
 process.on("exit", () => {
   for (const [path, token] of held) {
     try {
-      if (readFileSync(path, "utf8").includes(token)) unlinkSync(path);
+      // Empty: we were stopped between creating it and writing our identity.
+      const text = readFileSync(path, "utf8");
+      if (text === "" || text.includes(token)) unlinkSync(path);
     } catch { /* already gone */ }
+  }
+  for (const t of temps) {
+    try { unlinkSync(t); } catch { /* already gone */ }
   }
 });
 
@@ -153,7 +160,7 @@ async function claim(path: string, token: string): Promise<boolean> {
     fh = await open(path, "wx");
   } catch (e) {
     ours.delete(token);
-    if (permission(e)) throw new Error(`Cannot create ${path}: the workspace folder is not writable (${(e as NodeJS.ErrnoException).code})`);
+    if (permission(e)) throw new Error(`Cannot create ${path}: the folder ${dirname(path)} is not writable (${(e as NodeJS.ErrnoException).code})`);
     if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
     throw e;
   }
@@ -220,27 +227,50 @@ async function breakStale(lockPath: string, seen: Seen, why: string): Promise<vo
  */
 async function withFileLock<T>(lockPath: string, fn: () => Promise<T>, deadline: number): Promise<T> {
   const token = randomUUID();
+  // Fairness: a waiter holds `<lock>.wait`, and nobody else takes the lock while
+  // it is there, so a server whose calls follow each other back to back cannot
+  // keep the lock from another server's waiting call.
+  const waitPath = `${lockPath}.wait`;
+  let waiting = false;
   let last: LockInfo | undefined;
-  for (let attempt = 0; ; attempt++) {
-    if (await claim(lockPath, token)) break;
-    const cur = await readLock(lockPath);
-    if (cur) {
-      last = cur.info ?? last;
-      const why = staleReason(cur);
-      if (why) await breakStale(lockPath, cur, why);
+  try {
+    for (let attempt = 0; ; attempt++) {
+      if (!(await queuedBehind(waitPath, token)) && (await claim(lockPath, token))) break;
+      if (!waiting) waiting = await claim(waitPath, token);
+      const cur = await readLock(lockPath);
+      if (cur) {
+        last = cur.info ?? last;
+        const why = staleReason(cur);
+        if (why) await breakStale(lockPath, cur, why);
+      }
+      if (Date.now() > deadline) {
+        const who = last ? `process ${last.pid} on ${last.host}` : "another process";
+        throw new Error(`The diagram is locked by ${who} (${lockPath}); waited ${Math.round((Date.now() - deadline + LOCK_WAIT_MS) / 1000)} s. ` +
+          "Another FSM server may be busy with a long auto_layout or many edits of this diagram; try again later, or delete the lock file if that server is gone.");
+      }
+      await sleep(Math.min(200, 20 + attempt * 10) * (0.5 + Math.random()));
     }
-    if (Date.now() > deadline) {
-      const who = last ? `process ${last.pid} on ${last.host}` : "another process";
-      throw new Error(`The diagram is locked by ${who} (${lockPath}); waited ${Math.round((Date.now() - deadline + LOCK_WAIT_MS) / 1000)} s. ` +
-        "Another FSM server may be running a long auto_layout; try again later, or delete the lock file if that server is gone.");
-    }
-    await sleep(Math.min(200, 20 + attempt * 10) * (0.5 + Math.random()));
+  } finally {
+    if (waiting) await release(waitPath, token);
   }
   try {
     return await fn();
   } finally {
     await release(lockPath, token);
   }
+}
+
+/** Whether another live waiter holds the wait ticket, so this call must let it go first. A dead or overdue ticket is cleared. */
+async function queuedBehind(waitPath: string, token: string): Promise<boolean> {
+  const w = await readLock(waitPath);
+  if (!w || w.info?.token === token) return false;
+  // A waiter gives up after LOCK_WAIT_MS and removes its ticket; an older one was left behind.
+  if (staleReason(w) || Math.abs(Date.now() - w.mtime) > LOCK_WAIT_MS + 5_000) {
+    const again = await readLock(waitPath);
+    if (again && sameLock(w, again)) await unlink(waitPath).catch(() => {});
+    return false;
+  }
+  return true;
 }
 
 /** Windows: a virus scanner or sync client briefly holding the target makes rename fail; try again. */
@@ -257,6 +287,19 @@ async function renameRetry(from: string, to: string): Promise<void> {
 }
 
 let tmpCounter = 0;
+/** Host name as it appears in temp file names, so only this computer's leftovers are cleared. */
+const TMP_HOST = HOST.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 40);
+
+/** Remove temp files of `name` left by processes on this computer that have exited (killed mid-save). */
+async function clearTemps(dir: string, name: string): Promise<void> {
+  const prefix = `.${name}${EXT}.tmp-${TMP_HOST}-`;
+  const names = await readdir(dir).catch(() => [] as string[]);
+  for (const n of names) {
+    if (!n.startsWith(prefix)) continue;
+    const pid = Number(n.slice(prefix.length).split("-")[0]);
+    if (Number.isInteger(pid) && pid !== process.pid && !alive(pid)) await unlink(join(dir, n)).catch(() => {});
+  }
+}
 const EXT = ".fsm.json";
 
 /** Headless mode: each diagram is <dir>/<name>.fsm.json. */
@@ -379,7 +422,10 @@ export class FileStore implements DiagramStore {
     const old = await stat(target).catch(() => undefined);
     // Write then rename so a watching editor never sees a half-written file.
     // The temp name is unique per write, so overlapping saves cannot share it.
-    const tmp = join(dirname(target), `.${d.name}${EXT}.tmp-${process.pid}-${++tmpCounter}`);
+    if (old && !old.isFile()) throw new Error(`Cannot save ${target}: it is ${old.isDirectory() ? "a folder" : "not a regular file"}`);
+    const tmp = join(dirname(target), `.${d.name}${EXT}.tmp-${TMP_HOST}-${process.pid}-${++tmpCounter}`);
+    await clearTemps(dirname(target), d.name);
+    temps.add(tmp);
     try {
       if (old && old.nlink > 1) {
         // Hard-linked: a rename would split the names into two diagrams, so write in place.
@@ -392,8 +438,10 @@ export class FileStore implements DiagramStore {
         if (process.getuid?.() === 0) await chown(tmp, old.uid, old.gid).catch(() => {});
       }
       await renameRetry(tmp, target);
+      temps.delete(tmp);
     } catch (e) {
       await rm(tmp, { force: true }).catch(() => {});
+      temps.delete(tmp);
       if (permission(e)) throw new Error(`Cannot save ${target}: ${(e as NodeJS.ErrnoException).code} (is the workspace folder read-only, or the file open in another program?)`);
       if ((e as NodeJS.ErrnoException).code === "EISDIR") throw new Error(`Cannot save ${target}: a folder has that name; rename or remove the folder, or pick another FSM name`);
       throw e;
@@ -408,10 +456,14 @@ export class FileStore implements DiagramStore {
     // The wait counts from the call, not from the turn in this process's queue.
     const deadline = Date.now() + LOCK_WAIT_MS;
     await mkdir(this.dir, { recursive: true });
-    // Lock the real file, so names that link to one diagram share one lock.
-    const file = await realpath(this.file(name)).catch(() => this.file(name));
+    // Lock the real file, so names that link to one diagram share one lock. A
+    // hard-linked file is saved in place (see save), so its inode is stable and
+    // names the lock that all its names share.
+    const real = await realpath(this.file(name)).catch(() => this.file(name));
+    const st = await stat(real).catch(() => undefined);
+    const key = st && st.isFile() && st.nlink > 1 ? join(dirname(real), `.fsm-inode-${st.dev}-${st.ino}`) : real;
     // Lower-cased: on Windows and macOS "Seq" and "seq" are the same file.
-    return this.queue.run(file.toLowerCase(), () => withFileLock(`${file}.lock`, fn, deadline));
+    return this.queue.run(key.toLowerCase(), () => withFileLock(`${key}.lock`, fn, deadline));
   }
   resolvePath(p: string) {
     return resolve(this.dir, userPath(p));
