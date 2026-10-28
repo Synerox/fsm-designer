@@ -192,6 +192,14 @@ export function Canvas({ view, setView, grid }: { view: View; setView: Dispatch<
   const onPointerMove = (e: RPointerEvent<SVGSVGElement>) => {
     const g = gesture.current;
     if (!g) return;
+    // An undo or redo while the button is held can take away what is being
+    // dragged: the gesture ends there.
+    const held = g.kind === "curve" ? [g.from, g.to] : g.kind === "move" || g.kind === "loop" || g.kind === "resize" || g.kind === "initial" ? [g.id] : [];
+    if (held.some((id) => !byId.has(id))) {
+      gesture.current = null;
+      setGuides([]);
+      return;
+    }
     const p = toWorld(e);
     switch (g.kind) {
       case "pan":
@@ -226,9 +234,8 @@ export function Canvas({ view, setView, grid }: { view: View; setView: Dispatch<
         const snapped = snapPoint({ x: p.x + g.dx, y: p.y + g.dy }, others, e.altKey ? 0 : SNAP_PX / view.k, grid.snap && !e.altKey);
         setGuides(snapped.guides);
         edit((d) => {
-          const s = d.states.find((v) => v.id === g.id)!;
-          s.x = snapped.p.x;
-          s.y = snapped.p.y;
+          const s = d.states.find((v) => v.id === g.id);
+          if (s) { s.x = snapped.p.x; s.y = snapped.p.y; }
         }, g.key);
         break;
       }
@@ -247,13 +254,13 @@ export function Canvas({ view, setView, grid }: { view: View; setView: Dispatch<
       case "resize": {
         const s = byId.get(g.id)!.state;
         const radius = Math.min(200, Math.max(10, Math.round(Math.hypot(p.x - s.x!, p.y - s.y!))));
-        edit((d) => { d.states.find((v) => v.id === g.id)!.radius = radius; }, g.key);
+        edit((d) => { const s = d.states.find((v) => v.id === g.id); if (s) s.radius = radius; }, g.key);
         break;
       }
       case "initial": {
         const s = byId.get(g.id)!.state;
         const angle = snapAngle(angleOf({ x: s.x!, y: s.y! }, p));
-        edit((d) => { d.states.find((v) => v.id === g.id)!.initialAngle = angle; }, g.key);
+        edit((d) => { const s = d.states.find((v) => v.id === g.id); if (s) s.initialAngle = angle; }, g.key);
         break;
       }
     }
@@ -302,7 +309,8 @@ export function Canvas({ view, setView, grid }: { view: View; setView: Dispatch<
       select({ kind: "state", id: stateId });
       return;
     }
-    if (document.elementFromPoint(e.clientX, e.clientY)?.closest("[data-edge],[data-initial]")) return;
+    // Lines, the start arrow and the resize handle (half of it lies outside the circle) are not empty space.
+    if (document.elementFromPoint(e.clientX, e.clientY)?.closest("[data-edge],[data-initial],[data-resize]")) return;
     let id = "";
     const at = grid.snap && !e.altKey ? { x: snapToGrid(p.x), y: snapToGrid(p.y) } : p;
     edit((d) => { id = createState(d, at.x, at.y).id; });
@@ -317,7 +325,7 @@ export function Canvas({ view, setView, grid }: { view: View; setView: Dispatch<
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      onPointerCancel={() => { gesture.current = null; setLink(null); setGuides([]); }}
+      onPointerCancel={() => { gesture.current = null; setLink(null); setBox(null); setGuides([]); }}
       onDoubleClick={onDoubleClick}
       fontFamily={FONT}
     >
