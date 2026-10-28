@@ -418,10 +418,22 @@ class Engine {
   }
 
   ctx(p: Path): EvalCtx {
+    const width = (n: string) => this.c.widths.get(n);
+    const assumed = (k: string) => p.assume.get(k)?.val;
+    const outer = (n: string) => p.subst.get(n) ?? this.fixed.get(n) ?? this.c.params.get(n);
     return {
-      lookup: (n) => p.env.get(n) ?? p.subst.get(n) ?? this.fixed.get(n) ?? this.c.params.get(n),
-      width: (n) => this.c.widths.get(n),
-      assumed: (k) => p.assume.get(k)?.val,
+      // A stored value (t = a & b, or a state-dependent wire) was simplified
+      // when it was written; what this run has assumed since (a = 1) must
+      // still be applied to it, or it never folds and the run forks on the
+      // same atom until the limit. Its free names are inputs and register
+      // values from before the clock edge, so only those are looked up.
+      lookup: (n) => {
+        const e = p.env.get(n);
+        if (e === undefined) return outer(n);
+        return isNum(e) || !p.assume.size ? e : simplify(e, { lookup: outer, width, assumed });
+      },
+      width,
+      assumed,
     };
   }
 

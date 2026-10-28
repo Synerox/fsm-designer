@@ -182,3 +182,41 @@ endmodule`);
   assert.deepEqual(w.mealyOutputs, ["dout"]);
   assert.ok(edges(w.diagram).includes("S0->S1: a / dout=din"), edges(w.diagram).join("\n"));
 });
+
+test("a stored compound value (a state-dependent wire, a blocking temp) folds once its inputs are decided", () => {
+  const r = importVerilog(`
+module m(input clk, input rst, input a, input b, input c, output reg y);
+  localparam IDLE = 2'd0, RUN = 2'd1, DONE = 2'd2;
+  reg [1:0] state, next;
+  wire fire = (state == RUN) & a & b;
+  always @(posedge clk) if (rst) state <= IDLE; else state <= next;
+  always @* begin
+    next = state; y = 0;
+    case (state)
+      IDLE: if (c) next = RUN;
+      RUN: if (fire) next = DONE; else if (!c) next = IDLE;
+      DONE: begin y = 1; next = IDLE; end
+    endcase
+  end
+endmodule`, { maxPaths: 64 });
+  assert.deepEqual(r.warnings, []);
+  assert.ok(edges(r.diagram).includes("RUN->DONE: a && b"), edges(r.diagram).join("\n"));
+  const t = importVerilog(`
+module m(input clk, input rst, input a, input b, output reg y);
+  localparam S0 = 1'b0, S1 = 1'b1;
+  reg s; reg t;
+  always @(posedge clk) begin
+    if (rst) s <= S0;
+    else begin
+      t = a & b;
+      case (s)
+        S0: if (t) s <= S1;
+        S1: if (!a) s <= S0;
+      endcase
+    end
+  end
+  always @* y = s;
+endmodule`, { maxPaths: 64 });
+  assert.deepEqual(t.warnings, []);
+  assert.ok(edges(t.diagram).includes("S0->S1: a && b"), edges(t.diagram).join("\n"));
+});
