@@ -12,6 +12,14 @@ import { fixture } from "../import/helpers.ts";
 
 const FIXTURES = ["seq_1011_two_block.v", "traffic_three_block.v", "pattern_one_block.v", "handshake_enum.sv", "onehot_index.v", "arbiter_casez.v", "vending_if_else.v"];
 
+type P = { x: number; y: number };
+function crosses(a: P, b: P, c: P, e: P) {
+  const d = (b.x - a.x) * (e.y - c.y) - (b.y - a.y) * (e.x - c.x);
+  if (Math.abs(d) < 1e-9) return false;
+  const t = ((c.x - a.x) * (e.y - c.y) - (c.y - a.y) * (e.x - c.x)) / d, u = ((c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x)) / d;
+  return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+}
+
 function checkTidy(d: FsmDiagram, what: string) {
   for (const s of d.states) assert.ok(s.x! % GRID === 0 && s.y! % GRID === 0, `${what}: ${s.name} at ${s.x},${s.y} is off the grid`);
   const sc = layoutScore(d);
@@ -24,7 +32,11 @@ function checkTidy(d: FsmDiagram, what: string) {
     return s !== init && dx * Math.cos(a) + dy * Math.sin(a) > 0 && dx * Math.cos(a) + dy * Math.sin(a) < 4 * rr && Math.abs(dx * Math.sin(a) - dy * Math.cos(a)) < 2 * rr;
   });
   assert.equal(blocked.length, 0, `${what}: a state sits in the way of the start arrow`);
-  const b = planDiagram(d).bounds;
+  const plan = planDiagram(d);
+  const arrow = plan.initialArrow!;
+  const cut = plan.edges.filter((e) => e.points.some((p, i) => i > 0 && crosses(arrow.from, arrow.to, e.points[i - 1], p)));
+  assert.equal(cut.length, 0, `${what}: a line cuts across the start arrow`);
+  const b = plan.bounds;
   assert.ok(b.minX >= 0 && b.minY >= 0, `${what}: drawing starts off the page`);
   return sc;
 }
@@ -194,18 +206,11 @@ test("no long arrows: a state with far neighbours moves in between them", () => 
   }
 });
 
-// No line of the drawing cuts across the reset state's start arrow.
+// No line of the drawing (labels hidden) cuts across the reset state's start arrow.
 function arrowClear(d: FsmDiagram) {
   const plan = planDiagram(d, { labels: "none" });
-  const { from: a, to: b } = plan.initialArrow!;
-  return plan.edges.every((e) => e.points.every((q, i) => {
-    if (i === 0) return true;
-    const p = e.points[i - 1];
-    const den = (b.x - a.x) * (q.y - p.y) - (b.y - a.y) * (q.x - p.x);
-    if (Math.abs(den) < 1e-9) return true;
-    const t = ((p.x - a.x) * (q.y - p.y) - (p.y - a.y) * (q.x - p.x)) / den, u = ((p.x - a.x) * (b.y - a.y) - (p.y - a.y) * (b.x - a.x)) / den;
-    return t < 0 || t > 1 || u < 0 || u > 1;
-  }));
+  const { from, to } = plan.initialArrow!;
+  return plan.edges.every((e) => !e.points.some((p, i) => i > 0 && crosses(from, to, e.points[i - 1], p)));
 }
 
 test("four states all linked: an equilateral triangle round the fourth, no crossings or arcs, the start arrow clear, nothing left of the reset state", () => {

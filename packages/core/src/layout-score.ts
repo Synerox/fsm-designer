@@ -20,6 +20,7 @@ export interface Pt { x: number; y: number }
 
 export interface LayoutScore {
   total: number;
+  /** Lines crossing each other, or cutting across the start arrow. */
   crossings: number;
   throughStates: number;
   labelOverlaps: number;
@@ -79,6 +80,9 @@ export function score(d: FsmDiagram, plan: DiagramPlan = planDiagram(d), step = 
   const s = emptyScore();
   for (let i = 0; i < edges.length; i++)
     for (let j = i + 1; j < edges.length; j++) s.crossings += crossCount(edges[i].points, edges[j].points, st);
+  // The start arrow counts as a line: nothing should cut across it.
+  const arrow = plan.initialArrow;
+  if (arrow) for (const e of edges) s.crossings += crossCount([arrow.from, arrow.to], e.points, st);
   for (const e of edges) {
     const ends = new Set([e.transitions[0].from, e.transitions[0].to]);
     const b = box(e.points); // a state outside the line's box (by its radius) is not on it

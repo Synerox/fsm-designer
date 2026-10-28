@@ -45,8 +45,10 @@
 //    arrow counts as a line, so an arc bows round it); each self loop points
 //    to its state's emptiest side, kept clear of lines (a pair drawn as two
 //    parallel lines is wider than its centre line); the start arrow comes in
-//    from a free side.
-// 5. Scoring (see layout-score.ts): crossings weigh most, then lines through states
+//    from a side free of states and lines (lines first bow round it, and
+//    only if one still cuts it does it move).
+// 5. Scoring (see layout-score.ts): crossings (the start arrow counts as a
+//    line) weigh most, then lines through states
 //    and overlapping labels, then triangles that are not equilateral,
 //    states lined up with nothing, lines much longer than the shortest,
 //    states left of the reset state, lines against the main flow, symmetry,
@@ -60,8 +62,10 @@
 //    through states, and would lead with those gone (at most five), are tried
 //    spread out a little; whatever cannot be fixed is reported in
 //    TidyResult.issues.
-// 7. Polish. In the best few, a state with a long line tries free grid spots
-//    nearer its neighbours and moves wherever the score improves.
+// 7. Polish. In the best four, if within half again of the best score, a
+//    state with a long line tries the three free grid spots nearest its
+//    neighbours and moves to the one that improves the score most (the
+//    reset state never moves right of another).
 
 import type { FsmDiagram } from "./model.ts";
 import { PARALLEL_GAP, labelLines, planDiagram, transitionLabel } from "./export/svg.ts";
@@ -197,7 +201,7 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
   const tried: Tried[] = [];
   const finish = (c: FsmDiagram, sx: number) => {
     clearStartArrow(c, sx);
-    routeEdges(c);
+    clearStartArrow(c, sx, routeEdges(c));
     placeLoops(c);
     return score(c, planDiagram(c, popts), sx);
   };
@@ -286,13 +290,15 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
 
   // Polish: a state with a long line moves to a free spot on the grid nearer
   // its neighbours, wherever that improves the score (a fixed number of
-  // tries, so big machines stay quick).
+  // tries, so big machines stay quick). Of the three nearest spots the best
+  // is taken, not the first that helps. Only the best four are polished, and
+  // only those near the best: polish fixes a drawing, it should not make a new one.
   let budget = Math.min(48, Math.round(4e4 / Math.max(1, edgePairs(g).length) ** 2));
-  for (const cand of tried.slice(0, 2)) {
+  for (const cand of tried.slice(0, 4).filter((c) => c.score.total <= 1.5 * tried[0].score.total)) {
     let cur = cand;
     const gap = 2 * R + 40;
     for (let round = 0; round < 3 && budget > 0; round++) {
-      let improved = false;
+      let next: Tried | undefined;
       const at = new Map(cur.d.states.map((s) => [s.id, { x: s.x!, y: s.y! }]));
       const reach = (id: string, p: Pt) => [...g.nb.get(id)!].reduce((sum, v) => sum + Math.hypot((p.x - at.get(v)!.x) / cur.sx, (p.y - at.get(v)!.y) / cur.sy), 0);
       const longest = new Map(g.ids.map((id) => [id, Math.max(0, ...[...g.nb.get(id)!].map((v) => Math.hypot((at.get(id)!.x - at.get(v)!.x) / cur.sx, (at.get(id)!.y - at.get(v)!.y) / cur.sy)))]));
@@ -304,13 +310,16 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
         const ns = [...g.nb.get(id)!].map((v) => at.get(v)!);
         const mx = ns.reduce((s, p) => s + p.x, 0) / ns.length, my = ns.reduce((s, p) => s + p.y, 0) / ns.length;
         const now = reach(id, here);
+        // The reset state does not move right of another state (unless it is already).
+        const left = Math.min(...[...at].filter(([v]) => v !== id).map(([, q]) => q.x));
+        const ok = (p: Pt) => id !== g.init || p.x <= Math.max(here.x, left + GRID);
         const spots: Array<{ p: Pt; r: number }> = []; // free grid spots near the neighbours' centre, with the line length they give
         for (let i = -2; i <= 2; i++) for (let j = -2; j <= 2; j++) {
           const p = { x: o.x + (Math.round((mx - o.x) / cur.sx) + i) * cur.sx, y: o.y + (Math.round((my - o.y) / cur.sy) + j) * cur.sy };
           const r = reach(id, p);
-          if (r < now - 0.3 && [...at].every(([v, q]) => v === id || Math.hypot(p.x - q.x, p.y - q.y) >= gap)) spots.push({ p, r });
+          if (r < now - 0.3 && ok(p) && [...at].every(([v, q]) => v === id || Math.hypot(p.x - q.x, p.y - q.y) >= gap)) spots.push({ p, r });
         }
-        for (const { p } of spots.sort((a, b) => a.r - b.r).slice(0, 2)) {
+        for (const { p } of spots.sort((a, b) => a.r - b.r).slice(0, 3)) {
           if (budget-- <= 0) break;
           const c = structuredClone(cur.d);
           for (const t of c.transitions) { delete t.curve; delete t.loopAngle; }
@@ -318,15 +327,12 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
           const s = c.states.find((x) => x.id === id)!;
           s.x = Math.round(p.x / GRID) * GRID; s.y = Math.round(p.y / GRID) * GRID;
           const sc = finish(c, cur.sx);
-          if (sc.total < cur.score.total - 1e-6) {
-            cur = { ...cur, score: sc, d: c, arrangement: cand.arrangement.endsWith("(polished)") ? cand.arrangement : `${cand.arrangement} (polished)` };
-            improved = true;
-            break;
-          }
+          if (sc.total < (next ?? cur).score.total - 1e-6) next = { ...cur, score: sc, d: c, arrangement: cand.arrangement.endsWith("(polished)") ? cand.arrangement : `${cand.arrangement} (polished)` };
         }
-        if (improved) break;
+        if (next) break;
       }
-      if (!improved) break;
+      if (!next) break;
+      cur = next;
     }
     if (cur !== cand) tried.push(cur);
   }
@@ -1279,12 +1285,21 @@ function levelClusters(g: Graph, pos: Pos, triangles: number[][], gap: number, s
   }
 }
 
-/** If a state sits where the start arrow comes in, bring it in from a free side instead: left, top, bottom, right, then the corners. */
-function clearStartArrow(d: FsmDiagram, L: number) {
+/**
+ * If a state sits where the start arrow comes in, bring it in from a free
+ * side instead: left, top, bottom, right, then the corners. Given the lines
+ * as drawn, a side where the arrow would cut across a line (or run along one
+ * leaving the state) is not free either.
+ */
+function clearStartArrow(d: FsmDiagram, L: number, lines: Pt[][] = []) {
   const init = d.states.find((s) => s.isInitial);
   if (!init) return;
   const r = stateRadius(d, init);
-  const room = (a: number) => {
+  const circles = d.states.map((s) => ({ x: s.x!, y: s.y!, r: stateRadius(d, s) }));
+  lines = lines.filter((pts) => pts.some((p) => Math.hypot(p.x - init.x!, p.y - init.y!) < r + 60)); // only lines near the state can be in the way
+  const memo = new Map<number, number>();
+  const room = (a: number) => memo.get(a) ?? memo.set(a, roomAt(a)).get(a)!;
+  const roomAt = (a: number) => {
     const ux = Math.cos(a), uy = Math.sin(a);
     let near = Infinity;
     for (const s of d.states) {
@@ -1293,7 +1308,9 @@ function clearStartArrow(d: FsmDiagram, L: number) {
       const along = dx * ux + dy * uy, across = Math.abs(dx * uy - dy * ux);
       if (along > 0 && across < r + stateRadius(d, s) + 10) near = Math.min(near, along);
     }
-    return near;
+    const p = { x: init.x! + ux * (r + 1), y: init.y! + uy * (r + 1) }, q = { x: init.x! + ux * (r + 40), y: init.y! + uy * (r + 40) };
+    const cut = lines.some((pts) => crossCount([p, q], pts, circles) > 0 || pts.some((o) => Math.hypot(o.x - init.x!, o.y - init.y!) > r + 4 && segDist(o, p, q) < 8));
+    return cut ? 0 : near;
   };
   const current = init.initialAngle ?? Math.PI;
   if (room(current) > 2 * L) return;
@@ -1328,7 +1345,7 @@ function arc(a: Pt, b: Pt, curve: number): Pt[] {
  * stay straight are drawn as two parallel lines. The start arrow counts as a
  * line to keep clear of, so an arc bows round it rather than through it.
  */
-function routeEdges(d: FsmDiagram) {
+function routeEdges(d: FsmDiagram): Pt[][] {
   const at = new Map(d.states.map((s) => [s.id, { x: s.x!, y: s.y!, r: stateRadius(d, s), id: s.id }]));
   const arrow = startArrow(d);
   const groups = groupsOf(d).filter((ts) => ts[0].from !== ts[0].to);
@@ -1376,6 +1393,7 @@ function routeEdges(d: FsmDiagram) {
     lines.set(key(from, to), best.pts);
   }
   uncross(groups, at, lines, has, clear, arrow);
+  return [...lines.values()];
 }
 
 /** The start arrow as drawn (planDiagram): from 38 px out to the reset state's edge. */
