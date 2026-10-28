@@ -3,7 +3,8 @@
 // less common FSM styles, long case statements, deep nesting).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { importVerilog } from "../../src/import/index.ts";
+import { importVerilog, parseExpression } from "../../src/import/index.ts";
+import { simplify } from "../../src/import/expr.ts";
 import type { FsmDiagram } from "../../src/model.ts";
 
 const edges = (d: FsmDiagram) => {
@@ -53,7 +54,7 @@ endmodule`);
 });
 
 test("a long else-if chain on one input imports in reasonable time", () => {
-  const arms = Array.from({ length: 400 }, (_, i) => `    ${i ? "else " : ""}if (x == ${i}) n = ${i % 2 ? "S1" : "S0"};`).join("\n");
+  const arms = Array.from({ length: 600 }, (_, i) => `    ${i ? "else " : ""}if (x == ${i}) n = ${i % 2 ? "S1" : "S0"};`).join("\n");
   const src = `
 module m(input clk, input rst_n, input [11:0] x, output reg y);
   localparam S0 = 0, S1 = 1;
@@ -69,6 +70,47 @@ endmodule`;
   const r = importVerilog(src);
   const ms = performance.now() - t0;
   assert.deepEqual(r.diagram.states.map((s) => s.name), ["S0", "S1"]);
-  // Re-checking every earlier x != k on each new branch made this cubic (about 6 s for 400 arms).
-  assert.ok(ms < 3000, `took ${ms.toFixed(0)} ms`);
+  // Re-checking every earlier x != k on each new branch made this cubic (over 10 s for 600 arms).
+  assert.ok(ms < 5000, `took ${ms.toFixed(0)} ms`);
+});
+
+test("signed inputs, signed literals and $signed() compare as two's complement", () => {
+  const thermo = (decl: string, below: string) => `
+module thermo(input clk, input rst_n, ${decl} temp, output reg heat, output reg cool);
+  localparam OK = 2'd0, COLD = 2'd1, HOT = 2'd2;
+  reg [1:0] s, n;
+  always @(posedge clk or negedge rst_n) if (!rst_n) s <= OK; else s <= n;
+  always @* begin
+    n = s; heat = 0; cool = 0;
+    case (s)
+      OK:   if (${below}) n = COLD; else if (temp > 8'sd30) n = HOT;
+      COLD: begin heat = 1; if (!(${below})) n = OK; end
+      HOT:  begin cool = 1; if (temp <= 8'sd30) n = OK; end
+      default: n = OK;
+    endcase
+  end
+endmodule`;
+  const r = importVerilog(thermo("input signed [7:0]", "temp < 0"));
+  assert.deepEqual(edges(r.diagram), [
+    "OK->COLD: temp < 0",
+    "OK->HOT: temp > 8'sd30",
+    "OK->OK: temp >= 0 && temp <= 8'sd30",
+    "COLD->OK: temp >= 0",
+    "COLD->COLD: temp < 0",
+    "HOT->OK: temp <= 8'sd30",
+    "HOT->HOT: temp > 8'sd30",
+  ]);
+  // On an unsigned input only $signed() makes "below zero" possible, and the condition keeps it.
+  const f = importVerilog(thermo("input [7:0]", "$signed(temp) < 0"));
+  assert.ok(edges(f.diagram).includes("OK->COLD: $signed(temp) < 0"), edges(f.diagram).join("\n"));
+  // Unsigned, temp < 0 can never hold: no transition to COLD at all.
+  const u = importVerilog(thermo("input [7:0]", "temp < 0"));
+  assert.ok(!edges(u.diagram).some((e) => e.startsWith("OK->COLD")), edges(u.diagram).join("\n"));
+  // Constant folding follows the same rule: two's complement only when both sides are signed.
+  const fold = (e: string) => { const r = simplify(parseExpression(e), { lookup: () => undefined, width: () => undefined }); return r.k === "num" ? r.v : undefined; };
+  assert.equal(fold("-1 < 0"), 1n);
+  assert.equal(fold("4'sb1000 < 4'sd0"), 1n);
+  assert.equal(fold("4'sb1111 == -1"), 1n);
+  assert.equal(fold("4'b1000 < 4'sd0"), 0n);
+  assert.equal(fold("$signed(4'b1000) < 0"), 1n);
 });

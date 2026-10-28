@@ -32,6 +32,8 @@ export interface Decl {
   range?: Range;
   /** Fixed width for types like integer (32) or a typedef'd enum. */
   width?: number;
+  /** Declared signed (`signed`, or integer / int / byte ...): compares are two's complement. */
+  signed?: boolean;
   enumType?: string;
   init?: Expr;
   line: number;
@@ -99,6 +101,9 @@ const BINARY_PREC: Record<string, number> = {
 };
 const NET_TYPES = new Set(["wire", "reg", "logic", "bit", "var", "tri", "wand", "wor", "supply0", "supply1", "uwire", "tri0", "tri1"]);
 const INT_TYPES: Record<string, number> = { integer: 32, int: 32, shortint: 16, longint: 64, byte: 8, genvar: 32, time: 64 };
+const SIGNED_TYPES = new Set(["integer", "int", "shortint", "longint", "byte", "genvar"]);
+/** What a type keyword says about signedness, if anything. */
+const signedness = (t: string): boolean | undefined => (t === "signed" || SIGNED_TYPES.has(t) ? true : t === "unsigned" ? false : undefined);
 const SKIP_BLOCKS: Record<string, string> = {
   function: "endfunction", task: "endtask", generate: "endgenerate", specify: "endspecify",
   covergroup: "endgroup", property: "endproperty", sequence: "endsequence", clocking: "endclocking",
@@ -275,19 +280,20 @@ class Parser {
     let range: Range | undefined;
     let enumType: string | undefined;
     let width: number | undefined;
+    let signed: boolean | undefined;
     while (!this.is(")") && !this.done()) {
       const start = this.peek();
       let sawType = false;
       if (start.text === "input" || start.text === "output" || start.text === "inout") {
         dir = start.text;
         this.i++;
-        range = undefined; enumType = undefined; width = undefined; sawType = true;
+        range = undefined; enumType = undefined; width = undefined; signed = undefined; sawType = true;
       }
       for (;;) {
         const t = this.peek();
         if (t.kind !== "id") break;
-        if (NET_TYPES.has(t.text) || t.text === "signed" || t.text === "unsigned") { this.i++; sawType = true; continue; }
-        if (t.text in INT_TYPES) { width = INT_TYPES[t.text]; this.i++; sawType = true; continue; }
+        if (NET_TYPES.has(t.text) || t.text === "signed" || t.text === "unsigned") { signed = signedness(t.text) ?? signed; this.i++; sawType = true; continue; }
+        if (t.text in INT_TYPES) { width = INT_TYPES[t.text]; signed = signedness(t.text); this.i++; sawType = true; continue; }
         if (this.peek(1).kind === "id" || (this.peek(1).text === "[" && m.enums.has(t.text))) {
           enumType = m.enums.has(t.text) ? t.text : undefined;
           this.i++;
@@ -307,7 +313,7 @@ class Parser {
         m.ports.push(name); // non-ANSI: declared in the body
       } else {
         m.ports.push(name);
-        m.decls.set(name, { name, dir, range, width, enumType, init, line: tok.line });
+        m.decls.set(name, { name, dir, range, width, ...(signed ? { signed } : {}), enumType, init, line: tok.line });
       }
       if (!this.accept(",")) break;
     }
@@ -434,11 +440,12 @@ class Parser {
     let range: Range | undefined;
     let width: number | undefined;
     let enumType: string | undefined;
+    let signed: boolean | undefined;
     for (;;) {
       const t = this.peek();
       if (t.kind !== "id") break;
-      if (NET_TYPES.has(t.text) || t.text === "signed" || t.text === "unsigned" || t.text === "automatic" || t.text === "static") { this.i++; continue; }
-      if (t.text in INT_TYPES) { width = INT_TYPES[t.text]; this.i++; continue; }
+      if (NET_TYPES.has(t.text) || t.text === "signed" || t.text === "unsigned" || t.text === "automatic" || t.text === "static") { signed = signedness(t.text) ?? signed; this.i++; continue; }
+      if (t.text in INT_TYPES) { width = INT_TYPES[t.text]; signed = signedness(t.text); this.i++; continue; }
       if (t.text === "enum") {
         const e = this.enumBody(m);
         const anon = `$enum${m.enums.size}`;
@@ -465,6 +472,7 @@ class Parser {
         dir: dir ?? old?.dir,
         range: range ?? old?.range,
         width: width ?? old?.width,
+        ...((signed ?? old?.signed) ? { signed: true } : {}),
         enumType: enumType ?? old?.enumType,
         init: init ?? old?.init,
         line: old?.line ?? tok.line,

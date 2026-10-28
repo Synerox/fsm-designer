@@ -97,6 +97,8 @@ const STATE_NAME = /state|^st$|_st$|^cs$|^ps$|^curr?|^cur_|fsm/i;
 class Ctx {
   readonly params = new Map<string, Num>();
   readonly widths = new Map<string, number>();
+  /** Signals declared signed: a value tried for one of them compares as two's complement. */
+  readonly signed = new Set<string>();
   readonly warnings: string[] = [];
   readonly m: Module;
   constructor(m: Module) {
@@ -113,6 +115,7 @@ class Ctx {
     for (const d of m.decls.values()) {
       const w = d.width ?? (d.enumType ? enumWidth(m, d.enumType, pctx) : d.range ? rangeWidth(d.range, pctx) : 1);
       this.widths.set(d.name, w ?? 1);
+      if (d.signed) this.signed.add(d.name);
     }
   }
   warn(msg: string) { if (!this.warnings.includes(msg)) this.warnings.push(msg); }
@@ -558,7 +561,7 @@ class Engine {
       if (w === 1) r.subst.set(atom.name, num(val ? 1 : 0, 1));
       else if (!val) r.subst.set(atom.name, num(0, w));
     } else if (atom.k === "bin" && (atom.op === "==" || atom.op === "===") && atom.a.k === "id" && isConst(atom.b) && val) {
-      r.subst.set(atom.a.name, num(atom.b.v, this.c.widths.get(atom.a.name) ?? atom.b.w));
+      r.subst.set(atom.a.name, num(atom.b.v, this.c.widths.get(atom.a.name) ?? atom.b.w, this.c.signed.has(atom.a.name) ? { signed: true } : {}));
     } else if (atom.k === "un" && atom.op === "!" && atom.a.k === "id") {
       r.subst.set(atom.a.name, num(val ? 0 : 1, 1));
     }
@@ -603,7 +606,7 @@ function feasible(p: Path, c: Ctx, ctx: EvalCtx): boolean {
   for (const [id, as] of groups) {
     const w = c.widths.get(id);
     if (w === undefined || w > 12) continue; // (an undeclared name's width is unknown)
-    const tests = as.map((a) => valueTest(a.atom, id, w, ctx));
+    const tests = as.map((a) => valueTest(a.atom, id, w, c.signed.has(id), ctx));
     const holds = (x: number, from: number) => {
       for (let i = from; i < as.length; i++) if (tests[i](x) !== as[i].val) return false;
       return true;
@@ -632,9 +635,10 @@ function feasible(p: Path, c: Ctx, ctx: EvalCtx): boolean {
 }
 
 /** The truth of `atom` (which reads only `id`) for each value of id. */
-function valueTest(atom: Expr, id: string, w: number, ctx: EvalCtx): (x: number) => boolean | undefined {
-  // id == 5, id < 4'd9 ...: compared directly, the common case and the hot loop.
-  if (atom.k === "bin" && atom.a.k === "id" && isConst(atom.b) && atom.b.v <= BigInt(Number.MAX_SAFE_INTEGER)) {
+function valueTest(atom: Expr, id: string, w: number, signed: boolean, ctx: EvalCtx): (x: number) => boolean | undefined {
+  // id == 5, id < 4'd9 ...: compared directly, the common case and the hot loop
+  // (left to simplify when both sides are signed).
+  if (atom.k === "bin" && atom.a.k === "id" && isConst(atom.b) && !(signed && atom.b.signed) && atom.b.v <= BigInt(Number.MAX_SAFE_INTEGER)) {
     const k = Number(atom.b.v);
     switch (atom.op) {
       case "==": case "===": return (x) => x === k;
@@ -646,7 +650,7 @@ function valueTest(atom: Expr, id: string, w: number, ctx: EvalCtx): (x: number)
     }
   }
   return (x) => {
-    const r = simplify(atom, { lookup: (n) => (n === id ? num(x, w) : undefined), width: ctx.width });
+    const r = simplify(atom, { lookup: (n) => (n === id ? num(x, w, signed ? { signed } : {}) : undefined), width: ctx.width });
     return isConst(r) ? r.v !== 0n : undefined;
   };
 }
