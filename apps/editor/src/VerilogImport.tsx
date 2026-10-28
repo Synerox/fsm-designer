@@ -5,7 +5,7 @@
 import { useDeferredValue, useEffect, useId, useMemo, useRef, useState } from "react";
 import { listStateMachines } from "@fsm/core";
 import type { ImportResult } from "@fsm/core";
-import { importVerilogText } from "./actions.ts";
+import { importVerilogText, loadVerilogDraft, saveVerilogDraft as saveDraft } from "./actions.ts";
 import { useModal } from "./dialog.ts";
 import { VERILOG_FILTER, openTextFile } from "./platform.ts";
 import { MOD, tr, useLang } from "./i18n.ts";
@@ -39,15 +39,8 @@ module seq_detector_1011 (
 endmodule
 `;
 
-const DRAFT_KEY = "fsm-designer:verilog-draft";
-
-/** A draft too big to store is dropped rather than leaving an older one to come back next time. */
-function saveDraft(code: string) {
-  try { localStorage.setItem(DRAFT_KEY, code); } catch { try { localStorage.removeItem(DRAFT_KEY); } catch { /* storage off */ } }
-}
-
 export function VerilogImportDialog({ onClose, onImported }: { onClose: () => void; onImported: (r: ImportResult) => void }) {
-  const [code, setCode] = useState(() => { try { return localStorage.getItem(DRAFT_KEY) ?? ""; } catch { return ""; } });
+  const [code, setCode] = useState(loadVerilogDraft);
   const [selfLoops, setSelfLoops] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -71,8 +64,13 @@ export function VerilogImportDialog({ onClose, onImported }: { onClose: () => vo
   useEffect(() => () => saveDraft(latest.current), []);
 
   const openFile = async () => {
-    const f = await openTextFile([VERILOG_FILTER]);
-    if (f) { setCode(f.text); setError(null); }
+    try {
+      const f = await openTextFile([VERILOG_FILTER]);
+      if (f) { setCode(f.text); setError(null); }
+    } catch (e) {
+      // A read error (permission, not UTF-8) already names the file.
+      setError(e instanceof Error ? e.message : String(e));
+    }
   };
   const run = async () => {
     setBusy(true);

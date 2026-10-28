@@ -26,6 +26,37 @@ export function baseName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }
 
+/**
+ * A failed open or save in the UI language: which file, which of the two, and
+ * why. The desktop shell rejects with "<path>: <io error>" in English.
+ */
+export function fileError(action: "open" | "save", path: string, e: unknown): Error {
+  const raw = e instanceof Error ? e.message : String(e);
+  const why = reasonText(raw.startsWith(`${path}: `) ? raw.slice(path.length + 2) : raw);
+  const name = baseName(path);
+  return new Error(action === "open"
+    ? tr(`Could not open ${name}: ${why}`, `無法開啟 ${name}：${why}`, `${name} を開けませんでした：${why}`)
+    : tr(`Could not save ${name}: ${why}`, `無法儲存 ${name}：${why}`, `${name} を保存できませんでした：${why}`));
+}
+
+/** The io errors people meet most, in words; anything else as the OS said it. */
+function reasonText(msg: string): string {
+  // Rust's io::Error text ends in "(os error N)": 13 is EACCES on Unix, 5 is
+  // ERROR_ACCESS_DENIED on Windows, 2 is "not found" on both.
+  if (/\(os error (13|5)\)$/.test(msg)) return tr("permission denied", "沒有權限", "アクセス権がありません");
+  if (/\(os error 2\)$/.test(msg)) return tr("the file does not exist", "檔案不存在", "ファイルが存在しません");
+  if (/did not contain valid UTF-8/.test(msg)) return tr("it is not UTF-8 text", "不是 UTF-8 文字檔", "UTF-8 のテキストではありません");
+  return msg;
+}
+
+async function readTextFile(path: string): Promise<string> {
+  try {
+    return await invoke<string>("read_text_file", { path });
+  } catch (e) {
+    throw fileError("open", path, e);
+  }
+}
+
 // Desktop file I/O goes through the shell's own commands (apps/desktop/src-tauri/src/lib.rs).
 async function invoke<T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T> {
   const core = await import("@tauri-apps/api/core");
@@ -37,7 +68,7 @@ export async function openTextFile(filters: FileFilter[]): Promise<OpenedFile | 
     const { open } = await import("@tauri-apps/plugin-dialog");
     const path = await open({ multiple: false, directory: false, filters });
     if (typeof path !== "string") return null;
-    return { path, text: await invoke<string>("read_text_file", { path }) };
+    return { path, text: await readTextFile(path) };
   }
   return new Promise((resolve) => {
     const input = document.createElement("input");
@@ -66,12 +97,17 @@ export function launchFile(): Promise<OpenedFile | null> {
   launched ??= (async () => {
     const path = await invoke<string | null>("launch_file");
     if (!path) return null;
-    return { path, text: await invoke<string>("read_text_file", { path }) };
+    return { path, text: await readTextFile(path) };
   })();
   return launched;
 }
 
 let launched: Promise<OpenedFile | null> | undefined;
+
+/** Forget the launch file, as a new page load would (tests run several launches in one process). */
+export function forgetLaunchFile(): void {
+  launched = undefined;
+}
 
 /**
  * Save data. With `path` (desktop only) it overwrites that file silently;
@@ -93,13 +129,22 @@ export async function saveFile(make: string | Uint8Array | (() => Promise<Uint8A
     // The bytes go as the raw request body: inside an args object they would be
     // sent as a JSON array of numbers, 3.5 times their size. Header values must
     // be ASCII, hence the encoding (lib.rs decodes it).
-    await invoke("write_file", bytes, { headers: { "file-path": encodeURIComponent(path) } });
+    try {
+      await invoke("write_file", bytes, { headers: { "file-path": encodeURIComponent(path) } });
+    } catch (e) {
+      throw fileError("save", path, e);
+    }
     return path;
   }
   const data = typeof make === "function" ? await make() : make;
   const name = opts.path ? baseName(opts.path) : opts.suggestedName;
   const host = await hostDownloads();
   if (host) return saveViaHost(host, name, data);
+  // A published page whose viewer cannot run `downloads` (not declared, not
+  // granted, or no answer in 10 s): its frame blocks <a download> as well, so
+  // the link below would save nothing while Save marked the diagram saved.
+  // (A plain page in a sandbox without allow-downloads cannot be told apart.)
+  if (onHostPage()) throw new Error(cantSave());
   const blob = new Blob([data as BlobPart], { type: opts.mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -122,12 +167,17 @@ interface HostDownloads {
 
 let downloadsPromise: Promise<HostDownloads | null> | undefined;
 
+const hostClaude = () => (window as { claude?: { use?: (name: string) => Promise<unknown> } }).claude;
+const onHostPage = () => typeof hostClaude()?.use === "function";
+
 function hostDownloads(): Promise<HostDownloads | null> {
-  const claude = (window as { claude?: { use?: (name: string) => Promise<unknown> } }).claude;
+  const claude = hostClaude();
   if (!claude?.use) return Promise.resolve(null);
   downloadsPromise ??= claude.use("downloads").then((d) => (d as HostDownloads | null) ?? null, () => null);
   return downloadsPromise;
 }
+
+const cantSave = () => tr("This page can't save files.", "這個頁面無法儲存檔案。", "このページはファイルを保存できません。");
 
 async function saveViaHost(host: HostDownloads, filename: string, data: string | Uint8Array): Promise<string | null> {
   const attempt = async (name: string) => { await host.save({ filename: name, data }); return name; };
@@ -138,17 +188,31 @@ async function saveViaHost(host: HostDownloads, filename: string, data: string |
     if (code === "declined") return null;
     // Only common extensions are allowed (e.g. not .tex): save as plain text instead.
     if (code === "rejected_extension") {
-      try { return await attempt(`${filename}.txt`); } catch (e2) { if ((e2 as { code?: string }).code === "declined") return null; throw saveError(e2); }
+      const txt = `${filename}.txt`;
+      try { return await attempt(txt); } catch (e2) { if ((e2 as { code?: string }).code === "declined") return null; throw saveError(e2, txt); }
     }
-    throw saveError(e);
+    throw saveError(e, filename);
   }
 }
 
-function saveError(e: unknown): Error {
-  const code = (e as { code?: string }).code;
-  return new Error(code === "rate_limited"
-    ? tr("The previous save dialog is still open; answer it and try again.", "上一個儲存視窗還開著，請先回應它再試一次。")
-    : tr(`This page can't save files right now (${code ?? String(e)}).`, `這個頁面目前無法儲存檔案（${code ?? String(e)}）。`, `このページは現在ファイルを保存できません（${code ?? String(e)}）。`));
+/** The host's error codes (see its downloads contract) as sentences; the raw code is kept only for the ones that mean a bug here. */
+function saveError(e: unknown, filename: string): Error {
+  const code = (e as { code?: unknown } | null)?.code;
+  const ext = filename.slice(filename.lastIndexOf(".") + 1);
+  switch (code) {
+    case "rate_limited":
+      return new Error(tr("The previous save dialog is still open; answer it and try again.", "上一個儲存視窗還開著，請先回應它再試一次。"));
+    case "extension_not_enabled":
+      return new Error(tr(`This page can't save .${ext} files.`, `這個頁面無法儲存 .${ext} 檔案。`, `このページでは .${ext} ファイルを保存できません。`));
+    case "too_large":
+      return new Error(tr("The file is too large to save from this page.", "檔案太大，無法從這個頁面儲存。", "ファイルが大きすぎるため、このページから保存できません。"));
+    case "bad_request": case "transform_error": case "request_unknown": case "not_signed": case undefined: {
+      const detail = typeof code === "string" ? code : String(e);
+      return new Error(tr(`This page can't save files right now (${detail}).`, `這個頁面目前無法儲存檔案（${detail}）。`, `このページは現在ファイルを保存できません（${detail}）。`));
+    }
+    default: // unavailable, not_granted, capability_disabled/removed, and codes added later
+      return new Error(cantSave());
+  }
 }
 
 let confirmCount = 0; // gives each confirm's text a unique id for aria-labelledby
@@ -197,18 +261,45 @@ export async function setWindowTitle(title: string): Promise<void> {
   await getCurrentWindow().setTitle(title);
 }
 
+let confirmsOpen = 0;
+
 export async function confirmDialog(message: string): Promise<boolean> {
-  if (!isDesktop) return pageConfirm(message);
-  const { ask } = await import("@tauri-apps/plugin-dialog");
-  return ask(message, { title: "FSM Designer", kind: "warning" });
+  confirmsOpen++;
+  try {
+    if (!isDesktop) return await pageConfirm(message);
+    try {
+      const { ask } = await import("@tauri-apps/plugin-dialog");
+      return await ask(message, { title: "FSM Designer", kind: "warning" });
+    } catch {
+      // The native dialog failed (e.g. not permitted): ask in the page, or the
+      // question, and closing the window, could never be answered.
+      return await pageConfirm(message);
+    }
+  } finally {
+    confirmsOpen--;
+  }
 }
 
-/** Desktop: ask before closing the window while `isDirty()` is true. */
-export async function guardWindowClose(isDirty: () => boolean, message: () => string): Promise<() => void> {
-  if (!isDesktop) return () => {}; // the browser build keeps work in localStorage instead
+/**
+ * Ask before the window or tab goes while `isDirty()` is true; `onDiscard` runs
+ * when the user agrees to lose the changes. Desktop asks in a dialog; a
+ * browser can only show its own "Leave site?" prompt, so the caller there
+ * says dirty only when the autosave does not hold the work.
+ */
+export async function guardWindowClose(isDirty: () => boolean, message: () => string, onDiscard: () => void): Promise<() => void> {
+  if (!isDesktop) {
+    const onUnload = (e: BeforeUnloadEvent) => { if (isDirty()) e.preventDefault(); };
+    window.addEventListener("beforeunload", onUnload);
+    return () => window.removeEventListener("beforeunload", onUnload);
+  }
   const { getCurrentWindow } = await import("@tauri-apps/api/window");
   return getCurrentWindow().onCloseRequested(async (e) => {
-    if (isDirty() && !(await confirmDialog(message()))) e.preventDefault();
+    if (!isDirty()) return;
+    // A question is already open (an earlier close request, or New/Open's):
+    // that one is answered first. Stacked asks closed the window on any Yes.
+    if (confirmsOpen) { e.preventDefault(); return; }
+    if (await confirmDialog(message())) onDiscard();
+    else e.preventDefault();
   });
 }
 

@@ -1,13 +1,17 @@
 // File and export commands shared by the toolbar and keyboard shortcuts.
 
-import { autoLayout, ensureLayout, fitStateSizes, importVerilogLaidOut, parseDiagram, prettyText, renderLatex, renderSvg, stateRadius } from "@fsm/core";
+import { create } from "zustand";
+import { autoLayout, ensureLayout, fitStateSizes, importVerilogLaidOut, parseDiagram, planDiagram, prettyText, renderLatex, renderSvg, stateRadius } from "@fsm/core";
 import type { FsmDiagram, ImportOptions, ImportResult, LayoutIssue } from "@fsm/core";
-import { FSM_FILTER, baseName, confirmDialog, launchFile, openTextFile, saveFile } from "./platform.ts";
+import { FSM_FILTER, baseName, confirmDialog, fileError, launchFile, openTextFile, saveFile } from "./platform.ts";
+import type { OpenedFile } from "./platform.ts";
 import { DEFAULT_NAME, drawOptions, newDiagram, useEditor } from "./store.ts";
 
 import { tr } from "./i18n.ts";
 
 const AUTOSAVE_KEY = "fsm-designer:autosave";
+/** Where an autosave that could not be restored is kept, so the next edit does not destroy it. */
+const SET_ASIDE_KEY = "fsm-designer:autosave.bad";
 
 export function serialize(d: FsmDiagram): string {
   return JSON.stringify(d, null, 2) + "\n";
@@ -35,9 +39,31 @@ function upgradeLabels(d: FsmDiagram): FsmDiagram {
   return d;
 }
 
+/**
+ * Throws, in words, if the diagram cannot be drawn: a throw while rendering
+ * would blank the whole page. A safety net: parseDiagram once let through docs
+ * the drawing code chokes on (a state without a name), and checks this strict
+ * are easy to loosen again.
+ */
+function checkDrawable(d: FsmDiagram): void {
+  try {
+    planDiagram(d, drawOptions());
+  } catch (e) {
+    throw new Error(tr(`the diagram cannot be drawn (${errorText(e)})`, `無法畫出這張圖（${errorText(e)}）`, `図を描画できません（${errorText(e)}）`));
+  }
+}
+
+const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
 export async function loadText(text: string, path: string | null): Promise<void> {
-  // A byte order mark (from an editor that writes one) is not JSON; File.text() drops it, so drop it here too.
-  const d = upgradeLabels(parseDiagram(JSON.parse(text.replace(/^\uFEFF/, ""))));
+  let json: unknown;
+  try {
+    // A byte order mark (from an editor that writes one) is not JSON; File.text() drops it, so drop it here too.
+    json = JSON.parse(text.replace(/^\uFEFF/, ""));
+  } catch {
+    throw new Error(tr("it is not a valid JSON file", "不是有效的 JSON 檔案", "有効な JSON ファイルではありません"));
+  }
+  const d = upgradeLabels(parseDiagram(json));
   // A file whose states are all placed (everything the editor saves) opens as
   // it was saved: in the editor text never resizes a state, so its circles and
   // positions are the user's. Files made elsewhere (agents) can come without
@@ -51,6 +77,7 @@ export async function loadText(text: string, path: string | null): Promise<void>
     if (grown && crowded(d)) await autoLayout(d, { draw: drawOptions() });
     else await ensureLayout(d);
   }
+  checkDrawable(d);
   useEditor.getState().load(d, path);
 }
 
@@ -71,7 +98,12 @@ export async function newFile(): Promise<void> {
 export async function openFile(): Promise<void> {
   if (!(await confirmDiscard())) return;
   const f = await openTextFile([FSM_FILTER]);
-  if (f) await loadText(f.text, f.path);
+  if (!f) return;
+  try {
+    await loadText(f.text, f.path);
+  } catch (e) {
+    throw fileError("open", f.path, e);
+  }
 }
 
 /**
@@ -153,8 +185,12 @@ export async function exportSvg(): Promise<void> {
   await saveFile(svgText(), { suggestedName: `${stem()}.svg`, filters: [{ name: tr("SVG image", "SVG 圖片", "SVG 画像"), extensions: ["svg"] }], mime: "image/svg+xml" });
 }
 
-export async function exportLatex(): Promise<void> {
-  await saveFile(latexText(), { suggestedName: `${stem()}.tex`, filters: [{ name: "LaTeX", extensions: ["tex"] }], mime: "application/x-tex" });
+/**
+ * Returns the name written, or null if cancelled. A published page cannot save
+ * .tex, so there it is the name with .txt added, which the user must be told.
+ */
+export async function exportLatex(): Promise<string | null> {
+  return saveFile(latexText(), { suggestedName: `${stem()}.tex`, filters: [{ name: "LaTeX", extensions: ["tex"] }], mime: "application/x-tex" });
 }
 
 /** Rasterise the exported SVG in the webview, so PNG matches SVG exactly. */
@@ -187,37 +223,156 @@ export async function exportPng(scale = 2): Promise<void> {
 
 // ---- Autosave: the open diagram survives a reload or crash, like Evan's editor ----
 
+/**
+ * Whether the autosave still holds this tab's diagram. failed: the last write
+ * threw (storage full, blocked, or an opaque sandbox). otherTab: another tab
+ * of this origin writes the same slot, so a reload brings back whichever tab
+ * wrote last. overwritten: it did so after this tab's last write.
+ */
+export const useAutosave = create<{ failed: boolean; otherTab: boolean; overwritten: boolean }>(() => ({ failed: false, otherTab: false, overwritten: false }));
+
+/** True when a reload or close would lose this tab's unsaved changes even though the browser build autosaves. */
+export const autosaveLost = () => { const a = useAutosave.getState(); return a.failed || a.overwritten; };
+
+let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
+
+function writeAutosave(): void {
+  const { doc, filePath, dirty } = useEditor.getState();
+  try {
+    localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({ doc, filePath, dirty }));
+    useAutosave.setState({ failed: false, overwritten: false });
+  } catch {
+    useAutosave.setState({ failed: true });
+  }
+}
+
 export function startAutosave(): () => void {
-  let timer: ReturnType<typeof setTimeout> | undefined;
   const unsub = useEditor.subscribe((s, prev) => {
     // dirty counts too: an import or restore sets it in a second update after
     // load(), and a save to the same path changes nothing else.
     if (s.doc === prev.doc && s.filePath === prev.filePath && s.dirty === prev.dirty) return;
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      // Write the state as it is now, not as it was when the timer started.
-      const { doc, filePath, dirty } = useEditor.getState();
-      try {
-        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({ doc, filePath, dirty }));
-      } catch { /* storage full or unavailable */ }
-    }, 300);
+    clearTimeout(autosaveTimer);
+    // Write the state as it is when the timer fires, not as it was when it started.
+    autosaveTimer = setTimeout(writeAutosave, 300);
   });
-  return () => { clearTimeout(timer); unsub(); };
+  // Fired only by other tabs (key null: they cleared storage).
+  const onStorage = (e: StorageEvent) => {
+    if (e.key === AUTOSAVE_KEY || e.key === null) useAutosave.setState({ otherTab: true, overwritten: true });
+  };
+  globalThis.addEventListener?.("storage", onStorage);
+  return () => { clearTimeout(autosaveTimer); unsub(); globalThis.removeEventListener?.("storage", onStorage); };
 }
 
-export async function restoreSession(): Promise<void> {
-  const launched = await launchFile().catch(() => null);
-  if (launched) return loadText(launched.text, launched.path);
+/**
+ * The user closed the window and chose to discard the unsaved changes, so the
+ * next launch must not bring them back: it opens what was last saved.
+ */
+export function discardUnsaved(): void {
+  clearTimeout(autosaveTimer);
+  const { savedDoc, filePath } = useEditor.getState();
   try {
-    const raw = localStorage.getItem(AUTOSAVE_KEY);
-    // First visit: keep the blank diagram the store starts with.
-    if (!raw) return;
-    const saved = JSON.parse(raw) as { doc: unknown; filePath: string | null; dirty: boolean };
-    const d = upgradeLabels(parseDiagram(saved.doc));
-    // Older versions opened an example under its own name; an unsaved copy takes the default.
-    if (!saved.filePath && d.name === "seq_detector_1011") d.name = DEFAULT_NAME;
-    await ensureLayout(d);
-    useEditor.getState().load(d, saved.filePath);
-    if (saved.dirty) useEditor.setState({ dirty: true, savedDoc: null });
-  } catch { /* ignore a corrupt autosave */ }
+    // No savedDoc: an import or restored session that was never written anywhere.
+    if (savedDoc) localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({ doc: savedDoc, filePath, dirty: false }));
+    else localStorage.removeItem(AUTOSAVE_KEY);
+  } catch { /* storage off: nothing kept anyway */ }
+}
+
+/**
+ * Move the autosave out of the way (kept under SET_ASIDE_KEY, which holds only
+ * the latest one), so the next start is a blank diagram. The slot is emptied
+ * first: with storage full the copy can fail, and a bad autosave left in place
+ * would fail again on every start.
+ */
+export function setAsideAutosave(raw?: string): void {
+  try {
+    raw ??= localStorage.getItem(AUTOSAVE_KEY) ?? undefined;
+    localStorage.removeItem(AUTOSAVE_KEY);
+    if (raw !== undefined) localStorage.setItem(SET_ASIDE_KEY, raw);
+  } catch { /* storage off or full: no copy, but the slot is clear */ }
+}
+
+interface Session { doc: FsmDiagram; filePath: string | null; dirty: boolean }
+
+/** The stored session as a drawable diagram; throws if it is not one. */
+async function parseSession(raw: string): Promise<Session> {
+  const saved = JSON.parse(raw) as { doc?: unknown; filePath?: unknown; dirty?: unknown } | null;
+  if (typeof saved !== "object" || saved === null) throw new Error(tr("not a saved diagram", "不是存下來的圖", "保存された図ではありません"));
+  const d = upgradeLabels(parseDiagram(saved.doc));
+  // Only this editor writes the slot, but an older build, or a hand edit, can leave anything in it.
+  const filePath = typeof saved.filePath === "string" ? saved.filePath : null;
+  // Older versions opened an example under its own name; an unsaved copy takes the default.
+  if (!filePath && d.name === "seq_detector_1011") d.name = DEFAULT_NAME;
+  await ensureLayout(d);
+  checkDrawable(d);
+  return { doc: d, filePath, dirty: saved.dirty === true };
+}
+
+/**
+ * Start-up: open the file the desktop app was launched with, else bring back
+ * the autosaved session. Throws (after doing what it could) to say what failed.
+ */
+export async function restoreSession(): Promise<void> {
+  let raw: string | null = null;
+  try { raw = localStorage.getItem(AUTOSAVE_KEY); } catch { /* storage off: nothing to restore */ }
+  let session: Session | null = null;
+  let problem: Error | null = null;
+  // null on a first visit: keep the blank diagram the store starts with.
+  if (raw !== null) {
+    try {
+      session = await parseSession(raw);
+    } catch (e) {
+      // Kept for repair by hand: the first edit overwrites the autosave slot.
+      setAsideAutosave(raw);
+      problem = new Error(tr(`Could not restore the last session: ${errorText(e)}`, `無法還原上次的工作：${errorText(e)}`, `前回のセッションを復元できませんでした：${errorText(e)}`));
+    }
+  }
+  let launched: OpenedFile | null = null;
+  try {
+    launched = await launchFile();
+  } catch (e) {
+    // Read errors already say which file (fileError); the session comes back instead.
+    problem = e instanceof Error ? e : new Error(String(e));
+  }
+  // The autosave is the only copy of work that a crash or kill left unsaved,
+  // and opening the file replaces it 300 ms later: ask first.
+  if (launched && (!session?.dirty || await confirmDialog(tr(
+    `The last session has unsaved changes. Discard them and open ${baseName(launched.path)}?`,
+    `上次的工作有尚未儲存的變更。要放棄這些變更並開啟 ${baseName(launched.path)} 嗎？`,
+    `前回のセッションに保存されていない変更があります。破棄して ${baseName(launched.path)} を開きますか？`)))) {
+    try {
+      await loadText(launched.text, launched.path);
+      session = null;
+    } catch (e) {
+      problem = fileError("open", launched.path, e);
+    }
+  }
+  if (session) {
+    useEditor.getState().load(session.doc, session.filePath);
+    if (session.dirty) useEditor.setState({ dirty: true, savedDoc: null });
+  }
+  if (problem) throw problem;
+}
+
+// ---- Import Verilog dialog's draft ----
+
+const DRAFT_KEY = "fsm-designer:verilog-draft";
+/**
+ * Larger drafts are not kept: they share the origin's ~5 MB of storage with
+ * the autosave, and one near that size made every autosave fail. Real FSM
+ * sources are a few KB.
+ */
+export const MAX_DRAFT = 200_000;
+
+export function loadVerilogDraft(): string {
+  try { return localStorage.getItem(DRAFT_KEY) ?? ""; } catch { return ""; }
+}
+
+/** A draft too big to store is dropped rather than leaving an older one to come back next time. */
+export function saveVerilogDraft(code: string): void {
+  try {
+    if (code.length > MAX_DRAFT) throw new RangeError("draft too large");
+    localStorage.setItem(DRAFT_KEY, code);
+  } catch {
+    try { localStorage.removeItem(DRAFT_KEY); } catch { /* storage off */ }
+  }
 }
