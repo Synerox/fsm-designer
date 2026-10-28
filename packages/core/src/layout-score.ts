@@ -20,6 +20,7 @@ export interface Pt { x: number; y: number }
 
 export interface LayoutScore {
   total: number;
+  /** Lines crossing each other, or cutting across the start arrow. */
   crossings: number;
   throughStates: number;
   labelOverlaps: number;
@@ -33,9 +34,9 @@ export interface LayoutScore {
   leftOfStart: number;
   /** States lined up with no other state, in a row or a column. */
   floating: number;
-  /** Triangles of linked states, two of them linked both ways, that are not about equilateral. */
+  /** Triangles of linked states, two of them linked both ways, that are not about equilateral (not counting the slices round a state centred in an equilateral triangle of the three states it links to, and to nothing else). */
   uneven: number;
-  /** How far lines between states run past one and a half times the shortest line, summed (in shortest lines). */
+  /** How far lines between states run past one and a half times the shortest line (or the grid step, if shorter), summed (in those units). */
   long: number;
   asymmetry: number;
   length: number;
@@ -73,15 +74,20 @@ export function emptyScore(): LayoutScore {
 
 /** Readability of a drawn diagram; lower is better. `step` is the grid step used for distances. */
 export function score(d: FsmDiagram, plan: DiagramPlan = planDiagram(d), step = 200): LayoutScore {
+  if (d.states.length === 0) return emptyScore();
   const at = new Map(d.states.map((s) => [s.id, { x: s.x!, y: s.y!, r: stateRadius(d, s) }]));
   const st = [...at.values()];
   const edges = plan.edges;
   const s = emptyScore();
   for (let i = 0; i < edges.length; i++)
-    for (let j = i + 1; j < edges.length; j++) s.crossings += crossCount(edges[i].points, edges[j].points, at);
+    for (let j = i + 1; j < edges.length; j++) s.crossings += crossCount(edges[i].points, edges[j].points, st);
+  // The start arrow counts as a line: nothing should cut across it.
+  const arrow = plan.initialArrow;
+  if (arrow) for (const e of edges) s.crossings += crossCount([arrow.from, arrow.to], e.points, st);
   for (const e of edges) {
     const ends = new Set([e.transitions[0].from, e.transitions[0].to]);
-    for (const [id, c] of at) if (!ends.has(id) && e.points.some((p) => Math.hypot(p.x - c.x, p.y - c.y) < c.r + 2)) s.throughStates++;
+    const b = box(e.points); // a state outside the line's box (by its radius) is not on it
+    for (const [id, c] of at) if (!ends.has(id) && c.x > b.x0 - c.r - 2 && c.x < b.x1 + c.r + 2 && c.y > b.y0 - c.r - 2 && c.y < b.y1 + c.r + 2 && e.points.some((p) => (p.x - c.x) ** 2 + (p.y - c.y) ** 2 < (c.r + 2) ** 2)) s.throughStates++;
   }
   const labels = edges.filter((e) => e.label);
   for (const [i, e] of labels.entries()) {
@@ -94,10 +100,16 @@ export function score(d: FsmDiagram, plan: DiagramPlan = planDiagram(d), step = 
       const q = f.label!;
       if (Math.abs(r.x - q.x) * 2 < r.w + q.w && Math.abs(r.y - q.y) * 2 < r.h + q.h) s.labelOverlaps++;
     }
-    for (const f of edges) if (f !== e && f.points.some((p) => Math.abs(p.x - r.x) < r.w / 2 && Math.abs(p.y - r.y) < r.h / 2)) s.labelOnEdges++;
+    for (const f of edges) {
+      if (f === e) continue;
+      const b = box(f.points); // a line whose box misses the label is not under it
+      const x0 = r.x - r.w / 2, x1 = r.x + r.w / 2, y0 = r.y - r.h / 2, y1 = r.y + r.h / 2;
+      // Any piece of the line through the label, not only its sample points (on a long arc they are further apart than a label is tall).
+      if (b.x1 > x0 && b.x0 < x1 && b.y1 > y0 && b.y0 < y1 && f.points.some((p, k) => k > 0 && segInBox(f.points[k - 1], p, x0, y0, x1, y1))) s.labelOnEdges++;
+    }
   }
   for (let i = 0; i < st.length; i++)
-    for (let j = i + 1; j < st.length; j++) if (Math.hypot(st[i].x - st[j].x, st[i].y - st[j].y) < st[i].r + st[j].r + 40) s.tooClose++;
+    for (let j = i + 1; j < st.length; j++) if ((st[i].x - st[j].x) ** 2 + (st[i].y - st[j].y) ** 2 < (st[i].r + st[j].r + 40) ** 2) s.tooClose++;
   // Main flow: whichever of left-to-right and top-to-bottom fewer lines go against.
   let left = 0, up = 0;
   for (const e of edges) {
@@ -117,9 +129,11 @@ export function score(d: FsmDiagram, plan: DiagramPlan = planDiagram(d), step = 
     linked.get(t.from)!.add(t.to); linked.get(t.to)!.add(t.from);
     if (d.transitions.some((u) => u.from === t.to && u.to === t.from)) both.add(`${t.from}\u0000${t.to}`);
   }
-  // Long lines: measured against the shortest line in the drawing.
+  // Long lines: measured against the shortest line in the drawing, or the
+  // grid step if that is shorter (at least one grid cell, so two linked
+  // states on the same spot do not make every line infinitely long).
   const span = (a: string, b: string) => Math.hypot(at.get(a)!.x - at.get(b)!.x, at.get(a)!.y - at.get(b)!.y);
-  const unitLen = Math.min(step, ...[...linked].flatMap(([a, na]) => [...na].map((b) => span(a, b))));
+  const unitLen = Math.max(GRID, Math.min(step, ...[...linked].flatMap(([a, na]) => [...na].map((b) => span(a, b)))));
   for (const [a, na] of linked) for (const b of na) if (a < b) {
     s.long += Math.max(0, span(a, b) / unitLen - 1.5);
     // Three states linked to each other, two of them both ways: should be
@@ -130,6 +144,13 @@ export function score(d: FsmDiagram, plan: DiagramPlan = planDiagram(d), step = 
       if (!twoWay) continue;
       const [p, q, r] = [a, b, c].map((id) => at.get(id)!);
       if (twoWay < 3 && Math.abs((q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)) < 1) continue;
+      // A slice of a centred hub: one corner at the centre of an equilateral
+      // triangle that the other two make with a fourth state linked to all
+      // three (four states all linked, drawn as a triangle round its centre).
+      // Only the outer triangle can be equilateral then. The centre must have
+      // no other lines: one leaving the triangle (k5 drawn as a grid) makes
+      // the drawing no cleaner than an uneven one.
+      if ([a, b, c].some((h) => linked.get(h)!.size === 3 && [...linked.get(h)!].some((e) => e !== a && e !== b && e !== c && [a, b, c].every((x) => x === h || linked.get(e)!.has(x)) && centred(at.get(h)!, [a, b, c, e].filter((x) => x !== h).map((x) => at.get(x)!))))) continue;
       const sides = [Math.hypot(p.x - q.x, p.y - q.y), Math.hypot(q.x - r.x, q.y - r.y), Math.hypot(r.x - p.x, r.y - p.y)];
       if (Math.max(...sides) > 1.15 * Math.min(...sides)) s.uneven++;
     }
@@ -153,31 +174,72 @@ export function score(d: FsmDiagram, plan: DiagramPlan = planDiagram(d), step = 
   return s;
 }
 
+/** Whether p sits at the centre of the about equilateral triangle t (within a fifth of a side, for the grid). */
+function centred(p: Pt, t: Pt[]): boolean {
+  const sides = t.map((q, i) => Math.hypot(q.x - t[(i + 1) % 3].x, q.y - t[(i + 1) % 3].y));
+  const cx = (t[0].x + t[1].x + t[2].x) / 3, cy = (t[0].y + t[1].y + t[2].y) / 3;
+  return Math.max(...sides) <= 1.15 * Math.min(...sides) && Math.hypot(p.x - cx, p.y - cy) < 0.2 * Math.min(...sides);
+}
+
+/** Whether segment a-b runs through the inside of the box x0..x1 × y0..y1 (Liang-Barsky clipping). */
+function segInBox(a: Pt, b: Pt, x0: number, y0: number, x1: number, y1: number): boolean {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  let t0 = 0, t1 = 1;
+  for (const [p, q] of [[-dx, a.x - x0], [dx, x1 - a.x], [-dy, a.y - y0], [dy, y1 - a.y]]) {
+    if (p === 0) { if (q <= 0) return false; continue; }
+    const t = q / p;
+    if (p < 0) t0 = Math.max(t0, t); else t1 = Math.min(t1, t);
+    if (t0 >= t1) return false;
+  }
+  return true;
+}
+
 export function segDist(p: Pt, a: Pt, b: Pt): number {
   const vx = b.x - a.x, vy = b.y - a.y;
   const t = Math.max(0, Math.min(1, ((p.x - a.x) * vx + (p.y - a.y) * vy) / (vx * vx + vy * vy || 1)));
   return Math.hypot(p.x - a.x - t * vx, p.y - a.y - t * vy);
 }
 
-/** Times two polylines cross, not counting where they meet at a state. */
-export function crossCount(p: Pt[], q: Pt[], states: Map<string, { x: number; y: number; r: number }>): number {
+export interface Circle { x: number; y: number; r: number }
+
+/**
+ * Times two polylines cross, not counting where they meet at a state.
+ * `states` is the circles to ignore crossings inside of (a map's values or an array).
+ * A sampled straight line is compared as its one segment, so two straight
+ * lines cost one intersection test instead of four hundred.
+ */
+export function crossCount(p: Pt[], q: Pt[], states: Iterable<Circle>): number {
   const bp = box(p), bq = box(q);
   if (bp.x1 < bq.x0 || bq.x1 < bp.x0 || bp.y1 < bq.y0 || bq.y1 < bp.y0) return 0;
+  const sp = bp.straight ? [p[0], p[p.length - 1]] : p, sq = bq.straight ? [q[0], q[q.length - 1]] : q;
   let n = 0;
-  for (let i = 1; i < p.length; i++)
-    for (let j = 1; j < q.length; j++) {
-      const x = intersect(p[i - 1], p[i], q[j - 1], q[j]);
-      if (x && [...states.values()].every((s) => Math.hypot(x.x - s.x, x.y - s.y) > s.r + 6)) n++;
+  let circles: Circle[] | undefined;
+  for (let i = 1; i < sp.length; i++) {
+    // Only pieces whose boxes meet can cross (most pairs of pieces on two arcs that pass near each other do not).
+    const a = sp[i - 1], b = sp[i];
+    const x0 = Math.min(a.x, b.x), x1 = Math.max(a.x, b.x), y0 = Math.min(a.y, b.y), y1 = Math.max(a.y, b.y);
+    if (x1 < bq.x0 || x0 > bq.x1 || y1 < bq.y0 || y0 > bq.y1) continue;
+    for (let j = 1; j < sq.length; j++) {
+      const c = sq[j - 1], e = sq[j];
+      if ((c.x < x0 && e.x < x0) || (c.x > x1 && e.x > x1) || (c.y < y0 && e.y < y0) || (c.y > y1 && e.y > y1)) continue;
+      const x = intersect(a, b, c, e);
+      if (!x) continue;
+      circles ??= Array.isArray(states) ? states : [...states];
+      if (circles.every((s) => (x.x - s.x) ** 2 + (x.y - s.y) ** 2 > (s.r + 6) ** 2)) n++;
     }
+  }
   return n;
 }
 
-const boxes = new WeakMap<Pt[], { x0: number; y0: number; x1: number; y1: number }>();
+const boxes = new WeakMap<Pt[], { x0: number; y0: number; x1: number; y1: number; straight: boolean }>();
 function box(p: Pt[]) {
   let b = boxes.get(p);
   if (!b) {
-    b = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+    b = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity, straight: false };
     for (const q of p) { b.x0 = Math.min(b.x0, q.x); b.y0 = Math.min(b.y0, q.y); b.x1 = Math.max(b.x1, q.x); b.y1 = Math.max(b.y1, q.y); }
+    // Every sample on the chord between the ends: a straight line.
+    const a = p[0], z = p[p.length - 1];
+    b.straight = p.length > 2 && p.every((q) => Math.abs((q.x - a.x) * (z.y - a.y) - (q.y - a.y) * (z.x - a.x)) <= 1e-6 * Math.max(1, Math.abs(z.x - a.x) + Math.abs(z.y - a.y)));
     boxes.set(p, b);
   }
   return b;

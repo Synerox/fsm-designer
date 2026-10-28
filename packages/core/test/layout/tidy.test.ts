@@ -5,12 +5,20 @@
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { addState, addTransition, autoLayout, createDiagram, GRID, layoutScore, planDiagram, renderLatex, renderSvg, tidyLayout } from "../../src/index.ts";
+import { addState, addTransition, autoLayout, createDiagram, GRID, layoutCandidates, layoutScore, planDiagram, renderLatex, renderSvg, tidyLayout } from "../../src/index.ts";
 import type { FsmDiagram } from "../../src/index.ts";
 import { importVerilog } from "../../src/import/index.ts";
 import { fixture } from "../import/helpers.ts";
 
 const FIXTURES = ["seq_1011_two_block.v", "traffic_three_block.v", "pattern_one_block.v", "handshake_enum.sv", "onehot_index.v", "arbiter_casez.v", "vending_if_else.v"];
+
+type P = { x: number; y: number };
+function crosses(a: P, b: P, c: P, e: P) {
+  const d = (b.x - a.x) * (e.y - c.y) - (b.y - a.y) * (e.x - c.x);
+  if (Math.abs(d) < 1e-9) return false;
+  const t = ((c.x - a.x) * (e.y - c.y) - (c.y - a.y) * (e.x - c.x)) / d, u = ((c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x)) / d;
+  return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+}
 
 function checkTidy(d: FsmDiagram, what: string) {
   for (const s of d.states) assert.ok(s.x! % GRID === 0 && s.y! % GRID === 0, `${what}: ${s.name} at ${s.x},${s.y} is off the grid`);
@@ -24,7 +32,13 @@ function checkTidy(d: FsmDiagram, what: string) {
     return s !== init && dx * Math.cos(a) + dy * Math.sin(a) > 0 && dx * Math.cos(a) + dy * Math.sin(a) < 4 * rr && Math.abs(dx * Math.sin(a) - dy * Math.cos(a)) < 2 * rr;
   });
   assert.equal(blocked.length, 0, `${what}: a state sits in the way of the start arrow`);
-  const b = planDiagram(d).bounds;
+  const plan = planDiagram(d);
+  const arrow = plan.initialArrow!;
+  const cut = plan.edges.filter((e) => e.points.some((p, i) => i > 0 && crosses(arrow.from, arrow.to, e.points[i - 1], p)));
+  assert.equal(cut.length, 0, `${what}: a line cuts across the start arrow`);
+  const onArrow = d.transitions.filter((t) => t.from === init.id && t.to === init.id && Math.abs(Math.atan2(Math.sin((t.loopAngle ?? 0) - a), Math.cos((t.loopAngle ?? 0) - a))) < Math.PI / 4 - 0.01);
+  assert.equal(onArrow.length, 0, `${what}: the reset state's self loop sits on the start arrow`);
+  const b = plan.bounds;
   assert.ok(b.minX >= 0 && b.minY >= 0, `${what}: drawing starts off the page`);
   return sc;
 }
@@ -192,6 +206,66 @@ test("no long arrows: a state with far neighbours moves in between them", () => 
     const dd = Math.hypot(at(n).x! - at("WRITE").x!, at(n).y! - at("WRITE").y!);
     assert.ok(Math.abs(dd - step) < 1, `WRITE to ${n}: ${dd}`);
   }
+});
+
+// No line of the drawing (labels hidden) cuts across the reset state's start arrow.
+function arrowClear(d: FsmDiagram) {
+  const plan = planDiagram(d, { labels: "none" });
+  const { from, to } = plan.initialArrow!;
+  return plan.edges.every((e) => !e.points.some((p, i) => i > 0 && crosses(from, to, e.points[i - 1], p)));
+}
+
+test("four states all linked: an equilateral triangle round the fourth, no crossings or arcs, the start arrow clear, nothing left of the reset state", () => {
+  const d = machine(4, [[0, 1], [1, 0], [0, 2], [2, 0], [0, 3], [3, 0], [1, 2], [2, 1], [1, 3], [3, 1], [2, 3], [3, 2]]);
+  const r = tidyLayout(d, { plan: { labels: "none" } });
+  checkTidy(d, "k4");
+  assert.equal(r.score.crossings, 0);
+  assert.ok(arrowClear(d), "no line cuts across the start arrow");
+  assert.ok(d.transitions.every((t) => !t.curve), "straight lines only");
+  assert.ok(d.states.every((s) => s.x! >= d.states[0].x!), "nothing left of the reset state");
+  // One state at the centre of an equilateral triangle of the other three.
+  const hub = d.states.find((h) => { const o = d.states.filter((s) => s !== h); return Math.abs(o.reduce((a, s) => a + s.x!, 0) / 3 - h.x!) <= GRID && Math.abs(o.reduce((a, s) => a + s.y!, 0) / 3 - h.y!) <= GRID; });
+  assert.ok(hub, "a state at the centre");
+  const o = d.states.filter((s) => s !== hub).map((s) => d.states.indexOf(s));
+  const sides = [dist(d, o[0], o[1]), dist(d, o[1], o[2]), dist(d, o[2], o[0])];
+  assert.ok(Math.max(...sides) - Math.min(...sides) <= 2 * GRID, `${sides}`);
+});
+
+test("four states all linked, labels shown: the reset state still at the top left of the triangle, its first line running right", () => {
+  const d = machine(4, [[0, 1], [1, 0], [0, 2], [2, 0], [0, 3], [3, 0], [1, 2], [2, 1], [1, 3], [3, 1], [2, 3], [3, 2]]);
+  for (const t of d.transitions) t.condition = ""; // every line labelled "else": one label touching a line used to turn the triangle upside down
+  const r = tidyLayout(d, { plan: { labels: "all" } });
+  assert.equal(r.arrangement, "hub-triangle");
+  const s0 = d.states[0];
+  assert.ok(d.states.every((s) => s.y! >= s0.y!), "S0 in the top row");
+  assert.ok(d.states.every((s) => s.x! >= s0.x!), "nothing left of S0");
+  const level = d.states.filter((s) => s !== s0 && s.y === s0.y);
+  assert.equal(level.length, 1, "a level top side");
+  assert.ok(level[0].x! > s0.x!, "its first line runs right");
+});
+
+test("four states all linked: each hub shape is made once, not once per hub with the states only named differently", () => {
+  const d = machine(4, [[0, 1], [1, 0], [0, 2], [2, 0], [0, 3], [3, 0], [1, 2], [2, 1], [1, 3], [3, 1], [2, 3], [3, 2]]);
+  const hubs = layoutCandidates(d, { plan: { labels: "none" } }).filter((c) => /^hub-[a-z]+$/.test(c.arrangement));
+  assert.ok(hubs.some((c) => c.arrangement === "hub-triangle"), "a triangle round its centre is tried");
+  // The drawing as it looks with the names hidden: where the reset state is, and which cells the lines join.
+  const looks = hubs.map((c) => {
+    const s = c.diagram.states, x0 = Math.min(...s.map((p) => p.x!)), y0 = Math.min(...s.map((p) => p.y!));
+    const cell = (id: string) => { const p = s.find((q) => q.id === id)!; return `${p.x! - x0},${p.y! - y0}`; };
+    return `${c.step} ${c.arrangement} ${cell(s[0].id)} ` + c.diagram.transitions.map((t) => `${cell(t.from)}>${cell(t.to)}`).sort().join(" ");
+  });
+  assert.equal(new Set(looks).size, looks.length, "two hub candidates are the same drawing");
+});
+
+test("a wheel round the reset state: no crossings, the start arrow clear, nothing left of the reset state, every spoke one step", () => {
+  const d = machine(6, [[0, 1], [0, 2], [0, 3], [0, 4], [0, 5], [1, 2], [2, 3], [3, 4], [4, 5], [5, 1]]);
+  const r = tidyLayout(d, { plan: { labels: "none" } });
+  checkTidy(d, "wheel");
+  assert.equal(r.score.crossings, 0);
+  assert.ok(arrowClear(d), "no line cuts across the start arrow");
+  assert.ok(d.states.every((s) => s.x! >= d.states[0].x!), "nothing left of the reset state");
+  const step = Math.min(...d.states.slice(1).map((_, i) => dist(d, 0, i + 1)));
+  assert.ok(d.states.slice(1).every((_, i) => dist(d, 0, i + 1) <= step * Math.SQRT2 + 1), "spokes one step, straight or diagonal");
 });
 
 // Pairs of layouts of the same machine, and which one the user preferred

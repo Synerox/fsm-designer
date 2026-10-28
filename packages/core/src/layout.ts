@@ -9,7 +9,7 @@ import type { PlanOptions } from "./export/svg.ts";
 export interface LayoutOptions {
   draw?: PlanOptions; // how the diagram is drawn (e.g. labels hidden), so spacing matches
   spacing?: number; // px between state edges, default 90
-  margin?: number; // px around the drawing, default 60
+  margin?: number; // default 60: the drawing's bounds start at margin - 20 (at least 20), on the grid
 }
 
 /** Lay out every state (see tidy.ts); the result says which arrangement won and what it could not fix. */
