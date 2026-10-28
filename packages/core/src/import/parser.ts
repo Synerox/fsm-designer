@@ -234,23 +234,28 @@ class Parser {
 
   private paramList(m: Module, end: string) {
     let local = false;
+    // The type and range of a list apply to every name in it
+    // (localparam [1:0] X = 0, Y = ~0: Y is 2'b11), up to the next keyword.
+    let range: Range | undefined;
     while (!this.is(end) && !this.done()) {
-      if (this.accept("parameter")) local = false;
-      else if (this.accept("localparam")) local = true;
-      this.oneParam(m, local);
+      if (this.accept("parameter")) { local = false; range = undefined; }
+      else if (this.accept("localparam")) { local = true; range = undefined; }
+      range = this.oneParam(m, local, range);
       if (!this.accept(",")) break;
     }
   }
 
-  private oneParam(m: Module, local: boolean) {
-    // [type] [signed] [range] NAME = value
-    if (this.is("type")) { this.skipStatement(); return; }
-    let range: Range | undefined;
+  /** One `[type] [signed] [range] NAME = value`; returns the range for the names after it. */
+  private oneParam(m: Module, local: boolean, listRange: Range | undefined): Range | undefined {
+    if (this.is("type")) { this.skipStatement(); return undefined; }
+    let range = listRange;
+    let typed = false;
+    const newType = () => { if (!typed) { typed = true; range = undefined; } };
     for (;;) {
       const t = this.peek();
-      if (t.kind === "id" && (NET_TYPES.has(t.text) || t.text in INT_TYPES || t.text === "signed" || t.text === "unsigned" || t.text === "real")) { this.i++; continue; }
-      if (t.kind === "id" && this.peek(1).kind === "id") { this.i++; continue; } // user type
-      if (this.is("[")) { range = this.range(); continue; }
+      if (t.kind === "id" && (NET_TYPES.has(t.text) || t.text in INT_TYPES || t.text === "signed" || t.text === "unsigned" || t.text === "real")) { newType(); this.i++; continue; }
+      if (t.kind === "id" && this.peek(1).kind === "id") { newType(); this.i++; continue; } // user type
+      if (this.is("[")) { newType(); range = this.range(); continue; }
       break;
     }
     const tok = this.peek();
@@ -259,6 +264,7 @@ class Parser {
     this.expect("=");
     const value = this.expr();
     m.params.push({ name, value, range, local, line: tok.line, origin: "param" });
+    return range;
   }
 
   private range(): Range {

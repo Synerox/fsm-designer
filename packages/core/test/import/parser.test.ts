@@ -99,3 +99,34 @@ endmodule`);
   assert.deepEqual(edges(r.diagram), ["IDLE->RUN: go", "IDLE->IDLE: !go", "RUN->DONE: ", "DONE->IDLE: "]);
   assert.deepEqual(r.warnings, []);
 });
+
+test("the range of a parameter list applies to every name in it", () => {
+  // Y = ~0 in [1:0] is 2'b11, so the state compares equal to Y and Y goes on to Z.
+  const r = importVerilog(`module m(input clk, input rst_n, input a, output reg y);
+  localparam [1:0] X = 0, Y = ~0, Z = 1;
+  reg [1:0] s;
+  always @(posedge clk or negedge rst_n)
+    if (!rst_n) s <= X;
+    else case (s)
+      X: if (a) s <= Y;
+      Y: s <= Z;
+      Z: s <= X;
+      default: s <= X;
+    endcase
+  always @* y = (s == Y);
+endmodule`);
+  assert.deepEqual(r.stateCodes, { X: "2'b00", Y: "2'b11", Z: "2'b01" });
+  assert.deepEqual(r.diagram.states.map((s) => [s.name, s.outputs.y]), [["X", 0], ["Y", 1], ["Z", 0]]);
+  assert.deepEqual(edges(r.diagram), ["X->Y: a", "X->X: !a", "Y->Z: ", "Z->X: "]);
+  // A new keyword starts a new list: B is not cut to [1:0].
+  const p = importVerilog(`module m(input clk, input rst, output reg [3:0] q);
+  localparam signed [1:0] S0 = 0, S1 = -1; parameter B = 5;
+  reg [1:0] s;
+  always @(posedge clk) if (rst) s <= S0; else case (s) S0: s <= S1; S1: s <= S0; endcase
+  always @* q = s == S1 ? B : 0;
+endmodule`);
+  assert.deepEqual(p.stateCodes, { S0: "2'b00", S1: "2'b11" });
+  assert.deepEqual(p.diagram.states.map((s) => [s.name, s.outputs.q]), [["S0", 0], ["S1", "B"]]);
+  assert.equal(p.constants.B, "5");
+  assert.deepEqual(edges(p.diagram), ["S0->S1: ", "S1->S0: "]);
+});
