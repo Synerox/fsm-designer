@@ -81,6 +81,7 @@ export function VerilogImportDialog({ onClose, onImported }: { onClose: () => vo
           ref={area}
           value={code}
           spellCheck={false}
+          aria-label={tr("Verilog source", "Verilog 程式碼", "Verilog ソース")}
           placeholder={"module my_fsm (input clk, input rst_n, ...);\n  ...\nendmodule"}
           onChange={(e) => { setCode(e.target.value); setError(null); }}
           data-testid="verilog-source"

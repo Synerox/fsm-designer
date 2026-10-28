@@ -4,7 +4,7 @@
 import { LABEL_SIZE, NAME_SIZE, STATE_RADIUS, expandShortcut } from "@fsm/core";
 import { PARALLEL_GAP, planDiagram } from "@fsm/core";
 import type { FsmDiagram } from "@fsm/core";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useId, useLayoutEffect, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { DRAW, alignStates, deleteSelection, edgeTransitions, setEdgeShape, getStateText, setEdgeText, setStateText, useEditor } from "./store.ts";
 
@@ -34,6 +34,8 @@ function SizeField({ label, value, fallback, min, max, onChange }: {
 }) {
   // Keep what is typed while it is incomplete (e.g. "1" on the way to "12").
   const [draft, setDraft] = useState<string | null>(null);
+  // Named by the label text alone; the wrapping <label> would add the arrow buttons' names.
+  const labelId = useId();
   // Arrows and the up/down keys step from the shown value, or from the default when empty.
   const step = (dir: 1 | -1) => {
     setDraft(null);
@@ -41,10 +43,11 @@ function SizeField({ label, value, fallback, min, max, onChange }: {
   };
   return (
     <label>
-      {label}
+      <span id={labelId}>{label}</span>
       <span className="stepper">
         <input
           type="number"
+          aria-labelledby={labelId}
           min={min}
           max={max}
           value={draft ?? value ?? ""}
@@ -58,11 +61,17 @@ function SizeField({ label, value, fallback, min, max, onChange }: {
           onChange={(e) => {
             const raw = e.target.value;
             setDraft(raw);
-            if (raw === "") return onChange(undefined);
+            // A number box reports "" for unfinished input such as "-" or "1e"
+            // too; only a really empty box means "back to the default".
+            if (raw === "") { if (!e.target.validity.badInput) onChange(undefined); return; }
             const v = Number(raw);
             if (Number.isFinite(v) && v >= min && v <= max) onChange(v);
           }}
-          onBlur={() => setDraft(null)}
+          onBlur={(e) => {
+            // Unfinished input erased again ("-", then Backspace) fires no change: "" to "".
+            if (draft === "" && e.target.value === "" && !e.target.validity.badInput) onChange(undefined);
+            setDraft(null);
+          }}
         />
         <span className="arrows">
           <button type="button" tabIndex={-1} aria-label={tr("Increase", "加 1")} onClick={(e) => { e.preventDefault(); step(1); }}>
