@@ -51,15 +51,15 @@ endmodule`;
     else case (s)
       S0: if (a) s <= S1;
       S1: if (!a s <= S0;
-    endcase`)), { message: /^line 8: expected "\)" but found "s"; .*no state machine was found in module m$/ });
+    endcase`)), { message: /^No state machine found in module m: code that did not parse was skipped, line 8: expected "\)" but found "s"$/ });
   assert.throws(() => importVerilog(src(`    if (!rst_n) s <= S0;
     else case (s)
       S0: if (a) s <= S1;
-    `)), { message: /^line 6: "case" without "endcase"/ });
+    `)), { message: /^No state machine found in module m: code that did not parse was skipped, line 6: "case" without "endcase"/ });
   assert.throws(() => importVerilog(src(`    begin if (!rst_n) s <= S0;
     else begin
       if (a) s <= ~s;
-    end`)), { message: /^line 5: "begin" without "end"/ });
+    end`)), { message: /^No state machine found in module m: code that did not parse was skipped, line 5: "begin" without "end"/ });
 });
 
 test("after a broken always block the parser resumes at the next module item", () => {

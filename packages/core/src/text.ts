@@ -84,9 +84,11 @@ export function prettyText(raw: string): string {
 
 /** Escape for LaTeX text mode. */
 export function texEscape(s: string): string {
-  return s.replace(/[\\{}$&#^_%~]/g, (c) => ({
+  return s.replace(/[\\{}$&#^_%~<>|]/g, (c) => ({
     "\\": "\\textbackslash{}", "{": "\\{", "}": "\\}", $: "\\$", "&": "\\&", "#": "\\#",
     "^": "\\textasciicircum{}", _: "\\_", "%": "\\%", "~": "\\textasciitilde{}",
+    // OT1 (the default font encoding) prints < > | as ¡ ¿ —.
+    "<": "\\textless{}", ">": "\\textgreater{}", "|": "\\textbar{}",
   })[c]!);
 }
 

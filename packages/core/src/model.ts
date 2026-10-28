@@ -1,6 +1,8 @@
 // FSM document model shared by the MCP server and (eventually) the editor UI.
 // A diagram is plain JSON so it can be saved as *.fsm.json and loaded anywhere.
 
+import { tokenize } from "./import/lexer.ts";
+
 export type MachineType = "moore" | "mealy";
 export type OutputValue = string | number | boolean;
 
@@ -151,6 +153,7 @@ export function createDiagram(opts: {
   };
   if (d.type !== "moore" && d.type !== "mealy") throw new FsmError(`type must be "moore" or "mealy"`);
   for (const n of [d.clock.name, d.reset.name]) if (!isIdent(n)) throw new FsmError(`Clock/reset name ${show(n)} must be a valid Verilog identifier`);
+  if (d.clock.name === d.reset.name) throw new FsmError(`Clock and reset cannot both be named "${d.clock.name}"`);
   if (!isIdent(d.name)) throw new FsmError(`Diagram name ${show(d.name)} must be a valid Verilog identifier`);
   for (const s of opts.inputs ?? []) addSignal(d, "inputs", s);
   for (const s of opts.outputs ?? []) addSignal(d, "outputs", s);
@@ -169,7 +172,9 @@ function normSignal(s: SignalInput): Signal {
 export function addSignal(d: FsmDiagram, kind: "inputs" | "outputs", s: SignalInput): Signal {
   const sig = normSignal(s);
   if ([...d.inputs, ...d.outputs].some((x) => x.name === sig.name)) throw new FsmError(`Signal "${sig.name}" already exists`);
-  if ([d.clock.name, d.reset.name, "state", "next_state"].includes(sig.name)) throw new FsmError(`"${sig.name}" is reserved`);
+  if (sig.name === d.clock.name) throw new FsmError(`"${sig.name}" is the clock; it is declared with clock, not as an ${kind === "inputs" ? "input" : "output"}`);
+  if (sig.name === d.reset.name) throw new FsmError(`"${sig.name}" is the reset; it is declared with reset, not as an ${kind === "inputs" ? "input" : "output"}`);
+  if (["state", "next_state"].includes(sig.name)) throw new FsmError(`"${sig.name}" is reserved for the state register in generated Verilog; pick another name`);
   d[kind].push(sig);
   return sig;
 }
@@ -183,15 +188,29 @@ export function removeSignal(d: FsmDiagram, name: string): void {
   for (const t of d.transitions) delete t.outputs[name];
 }
 
-function uniqueId(prefix: string, taken: Set<string>): string {
+/**
+ * The next free `<prefix><n>`: one past the highest number in use, so the id of
+ * something just deleted is not handed out again at once (an agent may still
+ * hold it), and never one of `avoid` (state names, so an id cannot be mistaken for another state's name).
+ */
+function uniqueId(prefix: string, taken: Set<string>, avoid: Set<string> = new Set()): string {
   let i = 0;
-  while (taken.has(`${prefix}${i}`)) i++;
+  for (const id of taken) {
+    const n = id.startsWith(prefix) ? id.slice(prefix.length) : "";
+    // Longer suffixes are not exact numbers (i + 1 === i past 2^53); the loop below steps past any clash.
+    if (/^\d{1,15}$/.test(n)) i = Math.max(i, Number(n) + 1);
+  }
+  while (taken.has(`${prefix}${i}`) || avoid.has(`${prefix}${i}`)) i++;
   return `${prefix}${i}`;
 }
 
-/** Find a state by id or (case-sensitive) name. */
+/** Find a state by id or (case-sensitive) name. A reference that is one state's name and another's id is an error. */
 export function findState(d: FsmDiagram, ref: string): State {
-  const s = d.states.find((x) => x.id === ref) ?? d.states.find((x) => x.name === ref);
+  const byId = d.states.find((x) => x.id === ref);
+  const byName = d.states.find((x) => x.name === ref);
+  if (byId && byName && byId !== byName)
+    throw new FsmError(`"${ref}" is ambiguous: it is the name of state ${byName.name} (id ${byName.id}) and the id of state ${byId.name}. Use "${byName.id}" or "${byId.name}" instead`);
+  const s = byId ?? byName;
   if (!s) throw new FsmError(`No state with id or name "${ref}". Existing: ${d.states.map((x) => x.name).join(", ") || "(none)"}`);
   return s;
 }
@@ -244,7 +263,7 @@ export function addState(d: FsmDiagram, s: StateInput): State {
   const radius = optNum(s.radius, `${f} radius`, "positive");
   const fontSize = optNum(s.fontSize, `${f} fontSize`, "positive");
   const st: State = {
-    id: uniqueId("s", new Set(d.states.map((x) => x.id))),
+    id: uniqueId("s", new Set(d.states.map((x) => x.id)), new Set([...d.states.map((x) => x.name), s.name])),
     name: s.name,
     ...(label !== undefined ? { label } : {}),
     ...(x !== undefined ? { x } : {}),
@@ -426,23 +445,50 @@ export function parseDiagram(json: unknown): FsmDiagram {
   const d = createDiagram({ name: r.name, type: r.type, clock: r.clock, reset: r.reset });
   for (const k of ["inputs", "outputs"] as const)
     for (const [i, s] of list(k).entries()) inEntry(`${k}[${i}]`, () => addSignal(d, k, s as SignalInput));
-  const idMap = new Map<string, string>();
+  const dup = (kind: string, ids: Array<string | undefined>) => {
+    const seen = new Set<string>();
+    for (const id of ids) if (id) {
+      if (seen.has(id)) throw new FsmError(`Duplicate ${kind} id "${id}"`);
+      seen.add(id);
+    }
+    return seen;
+  };
+  // Ids and references are strings; a hand-written file may have numbers there.
+  const str = (v: unknown) => (typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : undefined);
+  const rawStates = list("states").map((x, i) => { const s = entry<State>("states", i, x); return { ...s, id: str(s.id) }; });
+  const given = dup("state", rawStates.map((s) => s.id));
   const initial: string[] = [];
-  for (const [i, x] of list("states").entries()) {
-    const s = entry<State>("states", i, x);
+  const added = rawStates.map((s, i) => {
     // addState makes the first state initial when none is marked; a file says so itself.
     const st = inEntry(`states[${i}]`, () => addState(d, { ...s, isInitial: s.isInitial ?? false }));
-    if (s.id && !d.states.some((x) => x.id === s.id)) st.id = s.id;
-    idMap.set(s.id ?? s.name, st.id);
     if (st.isInitial) initial.push(`"${st.name}"`);
-  }
+    return st;
+  });
   // addState keeps only the last one, which would hide that the file is ambiguous.
   if (initial.length > 1) throw new FsmError(`States ${initial.join(", ")} are all marked initial; a machine has one initial (reset) state`);
-  for (const [i, x] of list("transitions").entries()) {
-    const t = entry<Transition>("transitions", i, x);
-    const tr = inEntry(`transitions[${i}]`, () => addTransition(d, { ...t, from: idMap.get(t.from) ?? t.from, to: idMap.get(t.to) ?? t.to }));
-    if (t.id && !d.transitions.some((x) => x.id === t.id)) tr.id = t.id;
+  const names = new Set(added.map((st) => st.name));
+  // Given ids are kept, except one that is another state's name (older files could
+  // have that; it makes "s0" mean two states). Those, and states without an id,
+  // get a fresh id that is neither a given id nor a state name.
+  const remap = new Map<string, string>();
+  added.forEach((st, i) => {
+    const id = rawStates[i].id;
+    st.id = id && !(names.has(id) && st.name !== id) ? id : "";
+  });
+  for (const [i, st] of added.entries()) if (!st.id) {
+    st.id = uniqueId("s", new Set([...given, ...added.map((x) => x.id).filter(Boolean)]), names);
+    const old = rawStates[i].id;
+    if (old) remap.set(old, st.id);
   }
+  const rawTransitions = list("transitions").map((x, i) => { const t = entry<Transition>("transitions", i, x); return { ...t, id: str(t.id), from: str(t.from) ?? "", to: str(t.to) ?? "" }; });
+  const givenT = dup("transition", rawTransitions.map((t) => t.id));
+  // Transitions in a file refer to state ids; ones written by hand may use names (see findState).
+  const ref = (r: string) => remap.get(r) ?? r;
+  for (const [i, t] of rawTransitions.entries()) {
+    const tr = inEntry(`transitions[${i}]`, () => addTransition(d, { ...t, from: ref(t.from), to: ref(t.to) }));
+    tr.id = t.id ?? "";
+  }
+  for (const tr of d.transitions) if (!tr.id) tr.id = uniqueId("t", new Set([...givenT, ...d.transitions.map((x) => x.id).filter(Boolean)]));
   return d;
 }
 
@@ -490,14 +536,22 @@ export function validate(d: FsmDiagram): ValidationIssue[] {
 
   const ids = new Set(d.inputs.map((s) => s.name));
   for (const t of d.transitions) {
-    for (const tok of t.condition.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) {
-      if (!ids.has(tok) && !/^\d/.test(tok) && !/^[bdhoBDHO][0-9a-fA-F_xXzZ]+$/.test(tok))
-        issues.push({ level: "warning", message: `Transition ${t.id} (${name(t.from)} -> ${name(t.to)}) uses "${tok}", which is not a declared input` });
-    }
+    // The Verilog tokenizer tells names from literals (8'h FF, 2'sd3, 1_000) and system functions ($signed).
+    const used = new Set(tokenize(t.condition).filter((k) => k.kind === "id").map((k) => k.text));
+    for (const tok of used) if (!ids.has(tok))
+      issues.push({ level: "warning", message: `Transition ${t.id} (${name(t.from)} -> ${name(t.to)}) uses "${tok}", which is not a declared input` });
   }
   if (d.type === "moore") {
-    for (const s of d.states) for (const o of d.outputs) if (!(o.name in s.outputs))
-      issues.push({ level: "warning", message: `Moore state "${s.name}" does not set output "${o.name}" (uses default ${o.default ?? 0})` });
+    // An output with an explicit default is meant to be left out; otherwise one line per output, not per state and output.
+    for (const o of d.outputs) {
+      if (o.default !== undefined) continue;
+      const unset = d.states.filter((s) => !(o.name in s.outputs)).map((s) => s.name);
+      if (unset.length)
+        issues.push({ level: "warning", message: `Moore output "${o.name}" is not set in state${unset.length > 1 ? "s" : ""} ${unset.join(", ")} (uses default 0)` });
+    }
+    const withOutputs = d.transitions.filter((t) => Object.keys(t.outputs).length);
+    if (withOutputs.length)
+      issues.push({ level: "warning", message: `Transition${withOutputs.length > 1 ? "s" : ""} ${withOutputs.map((t) => t.id).join(", ")} set outputs, but this is a Moore machine: outputs on transitions are not drawn (set them on states, or make the machine Mealy)` });
   }
   return issues;
 }
