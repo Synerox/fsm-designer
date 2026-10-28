@@ -42,7 +42,7 @@ button {
 }
 button:hover:not(:disabled) { background: var(--surface-hover); }
 button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-button:disabled { color: var(--disabled); cursor: default; }
+button:disabled, button[aria-disabled="true"] { color: var(--disabled); cursor: default; }
 button.ghost { border-color: transparent; background: transparent; }
 button.ghost:hover:not(:disabled) { background: var(--surface-hover); }
 button.icon { width: var(--control-h); padding: 0; font-size: 15px; }
@@ -172,7 +172,7 @@ kbd {
 .menu { position: relative; }
 .menu-trigger { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px 0 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-muted); color: var(--text); font-size: 12px; font-weight: 500; }
 .menu-trigger .caret-down { color: var(--muted); }
-.menu-trigger:hover:not(:disabled), .menu-trigger.active { background: var(--surface-hover); border-color: var(--border-strong); }
+.menu-trigger:hover:not(:disabled):not([aria-disabled="true"]), .menu-trigger.active { background: var(--surface-hover); border-color: var(--border-strong); }
 .menu-list { position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; min-width: 220px; margin: 0; padding: 4px; list-style: none; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-md); }
 .menu-list li { position: relative; }
 .menu-list button { display: flex; align-items: center; gap: 16px; width: 100%; border: 0; background: transparent; text-align: left; border-radius: 4px; }

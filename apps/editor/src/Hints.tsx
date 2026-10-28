@@ -2,6 +2,7 @@
 // Hints button (laid out like Analog Canvas's shortcut sheet).
 
 import { MOD, tr } from "./i18n.ts";
+import type { MouseEvent } from "react";
 
 /** Each hint: the keys pressed together, then what they do. */
 const hints = (): Array<[string[], string]> => [
@@ -44,7 +45,7 @@ const hints = (): Array<[string[], string]> => [
   [["F"], tr("Fit to window", "符合視窗", "ウィンドウに合わせる")],
 ];
 
-export function Hints({ onClose }: { onClose: () => void }) {
+export function Hints({ onClose }: { onClose: (e: MouseEvent<HTMLButtonElement>) => void }) {
   return (
     <section className="hints" data-testid="hints" aria-label={tr("Shortcuts", "快捷鍵", "ショートカット")}>
       <header>

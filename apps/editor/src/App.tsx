@@ -95,6 +95,31 @@ export function App() {
     setView((v) => zoomAround(v, factor, (el?.clientWidth ?? 0) / 2, (el?.clientHeight ?? 0) / 2));
   };
 
+  const hintsToggle = useRef<HTMLButtonElement>(null);
+  /**
+   * A button pressed from the keyboard (a click with detail 0) that then goes
+   * away or turns disabled drops focus to <body>, and a screen reader loses
+   * its place: once React has updated, hand focus on to `next`, or else the
+   * canvas. A mouse click keeps the browser's behaviour, so Space typed after
+   * it still goes to the selection (see keyPressesButton).
+   */
+  const handFocus = (e: RMouseEvent<HTMLElement>, next: () => HTMLElement | null = () => null) => {
+    if (e.detail !== 0) return;
+    const from = e.currentTarget;
+    requestAnimationFrame(() => {
+      const gone = !from.isConnected || (from instanceof HTMLButtonElement && from.disabled);
+      const at = document.activeElement;
+      if (!gone || (at && at !== from && at !== document.body)) return;
+      (next() ?? document.querySelector<SVGSVGElement>("[data-testid=canvas]"))?.focus();
+    });
+  };
+  /** Undo or Redo, then (if that used it up) focus the other one while it can still be pressed. */
+  const undoRedo = (step: () => void) => (e: RMouseEvent<HTMLButtonElement>) => {
+    const other = (e.currentTarget.nextElementSibling ?? e.currentTarget.previousElementSibling) as HTMLButtonElement | null;
+    step();
+    handFocus(e, () => (other && !other.disabled ? other : null));
+  };
+
   const run = (fn: () => Promise<void> | void) => () => {
     Promise.resolve().then(fn).catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
   };
@@ -285,10 +310,13 @@ export function App() {
         <div className="menu">
           <button
             className="menu-trigger"
-            disabled={!hasStates || layingOut}
+            // Busy, not disabled, while the layout runs: disabling the button
+            // would drop keyboard focus to <body>.
+            disabled={!hasStates}
+            aria-disabled={layingOut || undefined}
             aria-busy={layingOut}
             data-testid="tidy"
-            onClick={run(async () => {
+            onClick={layingOut ? undefined : run(async () => {
               setLayingOut(true); // tidyUp lets this paint before the layout holds the page
               const { moved, issues } = await tidyUp().finally(() => setLayingOut(false));
               if (issues.length) setNotice(tr(`Laid out; could not fix: ${issueText(issues)}`, `已排版，仍無法解決：${issueText(issues)}`, `レイアウト済み。解決できなかった問題：${issueText(issues)}`));
@@ -301,8 +329,8 @@ export function App() {
         </div>
         <span className="sep" />
         <nav className="group" aria-label={tr("Edit", "編輯")}>
-          <button className="ghost with-icon" onClick={undo} disabled={!canUndo} title={`${MOD}+Z`}>{tr("Undo", "復原")}<Icon d={UNDO} /></button>
-          <button className="ghost with-icon" onClick={redo} disabled={!canRedo} title={`${MOD}+Shift+Z`}>{tr("Redo", "重做")}<Icon d={REDO} /></button>
+          <button className="ghost with-icon" onClick={undoRedo(undo)} disabled={!canUndo} title={`${MOD}+Z`}>{tr("Undo", "復原")}<Icon d={UNDO} /></button>
+          <button className="ghost with-icon" onClick={undoRedo(redo)} disabled={!canRedo} title={`${MOD}+Shift+Z`}>{tr("Redo", "重做")}<Icon d={REDO} /></button>
         </nav>
         <span className="file" title={filePath ?? undefined}>{dirty && <span className="dot" title={tr("Unsaved changes", "尚未儲存")} />}{filePath ? baseName(filePath) : tr("Untitled", "未命名")}</span>
         <Menu
@@ -318,8 +346,8 @@ export function App() {
       <main className="main">
         <div className="canvas-wrap">
           <Canvas view={view} setView={setView} grid={grid} />
-          {hints && <Hints onClose={() => setHints(false)} />}
-          {report && <ImportReport result={report.result} onClose={() => setReport(null)} />}
+          {hints && <Hints onClose={(e) => { setHints(false); handFocus(e, () => hintsToggle.current); }} />}
+          {report && <ImportReport result={report.result} onClose={(e) => { setReport(null); handFocus(e); }} />}
           {/* Stacked over the bottom of the canvas, so an error and a notice
               never hide each other or the status bar's controls. Always in
               the page so screen readers announce what appears in them. */}
@@ -356,7 +384,7 @@ export function App() {
             ))}
           </span>
           <button className="chip" aria-pressed={grid.snap} onClick={() => setGrid((g) => ({ ...g, snap: !g.snap }))} title={tr("Snap to the grid while dragging (hold Alt to turn off for a moment)", "拖曳時吸附到格線（按住 Alt 暫時不吸附）")}>{tr("Snap", "吸附")}</button>
-          <button className="chip" aria-pressed={hints} data-testid="hints-toggle" onClick={() => setHints((h) => !h)} title={hints ? tr("Hide shortcut hints", "隱藏快捷鍵提示") : tr("Show shortcut hints", "顯示快捷鍵提示")}>{tr("Hints", "提示")}</button>
+          <button ref={hintsToggle} className="chip" aria-pressed={hints} data-testid="hints-toggle" onClick={() => setHints((h) => !h)} title={hints ? tr("Hide shortcut hints", "隱藏快捷鍵提示") : tr("Show shortcut hints", "顯示快捷鍵提示")}>{tr("Hints", "提示")}</button>
           <span className="zoom-controls" role="group" aria-label={tr("Zoom", "縮放")}>
             <button className="icon" onClick={() => zoomBy(1 / 1.1)} title={tr(`Zoom out (${MOD}+wheel)`, `縮小（${MOD}+滾輪）`, `縮小（${MOD}+ホイール）`)} aria-label={tr("Zoom out", "縮小")}><Icon d={ZOOM_OUT} /></button>
             <button className="zoom" data-testid="zoom" onClick={() => zoomBy(1 / view.k)} title={tr("Zoom level; click for 100%", "縮放比例；點一下回到 100%")}>{Math.round(view.k * 100)}%</button>
