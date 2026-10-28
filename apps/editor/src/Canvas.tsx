@@ -16,7 +16,7 @@
 // snapping is on; hold Alt to place freely.
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { ReactElement, SVGProps } from "react";
+import type { Dispatch, ReactElement, SVGProps, SetStateAction } from "react";
 import type { PointerEvent as RPointerEvent } from "react";
 import { SMALL_SIZE, SUB_LINE_H, drawnSubLines, planDiagram, stateDisplay, stateFontSize, unreachableStates } from "@fsm/core";
 import type { DiagramPlan, EdgePlan } from "@fsm/core";
@@ -69,7 +69,7 @@ type SingleItem = Exclude<Selection, null | { kind: "multi" }>;
 
 let gestureSeq = 0;
 
-export function Canvas({ view, setView, grid }: { view: View; setView: (v: View) => void; grid: GridOptions }) {
+export function Canvas({ view, setView, grid }: { view: View; setView: Dispatch<SetStateAction<View>>; grid: GridOptions }) {
   const doc = useEditor((s) => s.doc);
   const selection = useEditor((s) => s.selection);
   const edit = useEditor((s) => s.edit);
@@ -108,6 +108,8 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
   };
 
   // Wheel: scroll, or zoom around the cursor with ctrl/cmd (also trackpad pinch).
+  // Updates build on the latest view: several wheel events can arrive before
+  // React re-renders, and each must add to the one before.
   useEffect(() => {
     const el = svgRef.current!;
     const onWheel = (e: WheelEvent) => {
@@ -118,14 +120,16 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
         // A mouse wheel notch (deltaY around 100) zooms 10%; small trackpad
         // pinch deltas zoom smoothly in proportion.
         const factor = Math.abs(dy) >= 50 ? (dy > 0 ? 1 / 1.1 : 1.1) : Math.exp(-dy * 0.01);
-        setView(zoomAround(view, factor, e.clientX - r.left, e.clientY - r.top));
+        const mx = e.clientX - r.left, my = e.clientY - r.top;
+        setView((v) => zoomAround(v, factor, mx, my));
       } else {
-        setView({ ...view, x: view.x - e.deltaX, y: view.y - e.deltaY });
+        const { deltaX, deltaY } = e;
+        setView((v) => ({ ...v, x: v.x - deltaX, y: v.y - deltaY }));
       }
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, [view, setView]);
+  }, [setView]);
 
   const onPointerDown = (e: RPointerEvent<SVGSVGElement>) => {
     if (e.button !== 0 && e.button !== 1) return;
@@ -191,7 +195,7 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
     const p = toWorld(e);
     switch (g.kind) {
       case "pan":
-        setView({ ...view, x: g.vx + e.clientX - g.sx, y: g.vy + e.clientY - g.sy });
+        setView((v) => ({ ...v, x: g.vx + e.clientX - g.sx, y: g.vy + e.clientY - g.sy }));
         break;
       case "link":
         setLink({ from: g.from, start: g.start, at: p });
