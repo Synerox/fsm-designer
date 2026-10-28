@@ -1,6 +1,8 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import type { MouseEvent as RMouseEvent, RefObject } from "react";
 import { expandShortcut, planDiagram } from "@fsm/core";
-import { Canvas, MAX_ZOOM, zoomAround } from "./Canvas.tsx";
+import { Canvas, zoomAround } from "./Canvas.tsx";
+import { fitView } from "./geometry.ts";
 import type { GridOptions, GridStyle, View } from "./Canvas.tsx";
 import { Hints } from "./Hints.tsx";
 import { Inspector } from "./Inspector.tsx";
@@ -8,7 +10,7 @@ import { Menu } from "./Menu.tsx";
 import { ImportReport, VerilogImportDialog } from "./VerilogImport.tsx";
 import { autosaveLost, discardMessage, discardUnsaved, exportLatex, exportPng, exportSvg, latexText, newFile, openFile, restoreSession, saveDoc, startAutosave, tidyUp, useAutosave } from "./actions.ts";
 import { baseName, copyText, guardWindowClose, isDesktop, setWindowTitle } from "./platform.ts";
-import { deleteCopied, deletesSelection, keyPressesButton, typedText } from "./keys.ts";
+import { PRESSABLE, deleteCopied, deletesSelection, keyPressesButton, ownsKeys, snapCaret, stepCaret, typedText } from "./keys.ts";
 import { modalOpen, useModal } from "./dialog.ts";
 import { drawOptions, selectionParts, copySelection, deleteSelection, editedTransition, getStateText, hasClipboard, pasteClipboard, selectAll, setEdgeText, typeStateText, useEditor } from "./store.ts";
 import type { Selection } from "./store.ts";
@@ -82,10 +84,7 @@ export function App() {
     const el = document.querySelector<SVGSVGElement>("[data-testid=canvas]");
     const { doc } = useEditor.getState();
     if (!el || !doc.states.length) return setView({ x: 0, y: 0, k: 1 });
-    const { minX, minY, maxX, maxY } = planDiagram(doc, drawOptions()).bounds;
-    const pad = 40, w = el.clientWidth, h = el.clientHeight;
-    const k = Math.min(2, MAX_ZOOM, (w - 2 * pad) / (maxX - minX), (h - 2 * pad) / (maxY - minY));
-    setView({ k, x: (w - (maxX - minX) * k) / 2 - minX * k, y: (h - (maxY - minY) * k) / 2 - minY * k });
+    setView(fitView(planDiagram(doc, drawOptions()).bounds, el.clientWidth, el.clientHeight));
   };
   useEffect(() => { if (loadSeq) fit(); }, [loadSeq]);
   // The import report belongs to the diagram it describes.
@@ -94,6 +93,32 @@ export function App() {
   const zoomBy = (factor: number) => {
     const el = document.querySelector<SVGSVGElement>("[data-testid=canvas]");
     setView((v) => zoomAround(v, factor, (el?.clientWidth ?? 0) / 2, (el?.clientHeight ?? 0) / 2));
+  };
+
+  const hintsToggle = useRef<HTMLButtonElement>(null);
+  /**
+   * A button pressed from the keyboard (a click with detail 0) that then goes
+   * away or turns disabled drops focus to <body>, and a screen reader loses
+   * its place: once React has updated, hand focus on to `next`, or else the
+   * canvas. A mouse click keeps the browser's behaviour, so Space typed after
+   * it still goes to the selection (see keyPressesButton).
+   */
+  const handFocus = (e: RMouseEvent<HTMLElement>, next: () => HTMLElement | null = () => null) => {
+    if (e.detail !== 0) return;
+    const from = e.currentTarget;
+    requestAnimationFrame(() => {
+      const gone = !from.isConnected || (from instanceof HTMLButtonElement && from.disabled);
+      const at = document.activeElement;
+      if (!gone || (at && at !== from && at !== document.body)) return;
+      (next() ?? document.querySelector<SVGSVGElement>("[data-testid=canvas]"))?.focus();
+    });
+  };
+  const undoButton = useRef<HTMLButtonElement>(null);
+  const redoButton = useRef<HTMLButtonElement>(null);
+  /** Undo or Redo, then (if that used it up) focus the other one while it can still be pressed. */
+  const undoRedo = (step: () => void, other: RefObject<HTMLButtonElement | null>) => (e: RMouseEvent<HTMLButtonElement>) => {
+    step();
+    handFocus(e, () => (other.current && !other.current.disabled ? other.current : null));
   };
 
   const run = (fn: () => Promise<void> | void) => () => {
@@ -120,21 +145,51 @@ export function App() {
   }), []);
 
   useEffect(() => {
-    // The last button clicked with the mouse: Chromium leaves focus on it, and
-    // Space after that is typing, not pressing it again (see keyPressesButton).
-    // Forgotten once focus moves anywhere else, so a button reached again by
-    // Tab/Shift+Tab is pressed by Space like any keyboard-focused one.
+    // The last button or checkbox clicked with the mouse: Chromium leaves focus
+    // on it, and Space after that is typing, not pressing it again (see
+    // keyPressesButton). Forgotten once focus moves anywhere else, so a control
+    // reached again by Tab/Shift+Tab is pressed by Space like any
+    // keyboard-focused one. A click on a checkbox's label focuses the checkbox.
     let clicked: Element | null = null;
-    const onPointer = (e: PointerEvent) => { clicked = (e.target as Element).closest?.("button") ?? null; };
+    const onPointer = (e: PointerEvent) => {
+      const t = e.target as Element;
+      const label = t.closest?.("label");
+      clicked = t.closest?.(PRESSABLE) ?? (label instanceof HTMLLabelElement ? label.control : null) ?? null;
+    };
     const onFocus = (e: FocusEvent) => { if (e.target !== clicked) clicked = null; };
     const onKey = (e: KeyboardEvent) => {
       // A menu that handled the key itself (arrow keys) already prevented it.
       if (e.defaultPrevented) return;
       const mod = e.ctrlKey || e.metaKey;
       const target = e.target instanceof Element ? e.target : document.body;
-      const inField = target.closest("input, textarea, select, [role=menu]");
+      const inField = ownsKeys(target);
       const k = e.key.toLowerCase();
-      if (mod && k === "s") { e.preventDefault(); run(() => saveDoc(e.shiftKey))(); return; }
+      if (mod && k === "s") {
+        e.preventDefault();
+        // A field that keeps its value only on blur (the diagram's name) must
+        // be committed first, or the file gets the old value and the typed one
+        // is lost with no unsaved marker. Focus and caret then go back to the
+        // field; the name input is keyed by the name, so committing a new one
+        // remounts it once React updates, and the new input is found by its testid.
+        const el = document.activeElement;
+        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+          const { selectionStart: from, selectionEnd: to } = el;
+          const refocus = (f: HTMLInputElement | HTMLTextAreaElement) => {
+            f.focus();
+            try { f.setSelectionRange(from, to); } catch { /* number inputs have no caret */ }
+          };
+          el.blur();
+          if (el.isConnected) refocus(el);
+          const id = el.dataset.testid;
+          if (id) requestAnimationFrame(() => {
+            if (el.isConnected || document.activeElement !== document.body) return;
+            const again = document.querySelector(`[data-testid="${id}"]`);
+            if (again instanceof HTMLInputElement || again instanceof HTMLTextAreaElement) refocus(again);
+          });
+        }
+        run(() => saveDoc(e.shiftKey))();
+        return;
+      }
       // An open dialog (LaTeX, Import, Discard changes?) owns the keyboard; it
       // handles Escape and Tab itself, and nothing may change the diagram behind it.
       if (inField || modalOpen()) return;
@@ -208,16 +263,17 @@ export function App() {
         apply = (text) => edit((d) => setEdgeText(d, selection.from, selection.to, text, t.id), `text:${t.id}`);
       }
       const { caret: stored, setCaret } = useEditor.getState();
-      const caret = Math.min(stored ?? cur.length, cur.length);
+      // Whole characters only: an emoji is two code units and must not be split.
+      const caret = snapCaret(cur, Math.min(stored ?? cur.length, cur.length));
       const put = (text: string, at: number) => { apply(text); setCaret(at); };
       switch (e.key) {
-        case "ArrowLeft": e.preventDefault(); setCaret(Math.max(0, caret - 1)); return;
-        case "ArrowRight": e.preventDefault(); setCaret(Math.min(cur.length, caret + 1)); return;
+        case "ArrowLeft": e.preventDefault(); setCaret(stepCaret(cur, caret, -1)); return;
+        case "ArrowRight": e.preventDefault(); setCaret(stepCaret(cur, caret, 1)); return;
         case "ArrowUp": case "Home": e.preventDefault(); setCaret(0); return;
         case "ArrowDown": case "End": e.preventDefault(); setCaret(cur.length); return;
         case "Backspace":
           e.preventDefault();
-          if (caret > 0) put(cur.slice(0, caret - 1) + cur.slice(caret), caret - 1);
+          if (caret > 0) { const at = stepCaret(cur, caret, -1); put(cur.slice(0, at) + cur.slice(caret), at); }
           return;
         case " ": {
           e.preventDefault();
@@ -231,7 +287,7 @@ export function App() {
       }
       if (typed === null) return;
       e.preventDefault();
-      put(cur.slice(0, caret) + typed + cur.slice(caret), caret + 1);
+      put(cur.slice(0, caret) + typed + cur.slice(caret), caret + typed.length);
     };
     window.addEventListener("pointerdown", onPointer, true);
     window.addEventListener("focusin", onFocus, true);
@@ -268,10 +324,13 @@ export function App() {
         <div className="menu">
           <button
             className="menu-trigger"
-            disabled={!hasStates || layingOut}
+            // Busy, not disabled, while the layout runs: disabling the button
+            // would drop keyboard focus to <body>.
+            disabled={!hasStates}
+            aria-disabled={layingOut || undefined}
             aria-busy={layingOut}
             data-testid="tidy"
-            onClick={run(async () => {
+            onClick={layingOut ? undefined : run(async () => {
               setLayingOut(true); // tidyUp lets this paint before the layout holds the page
               const { moved, issues } = await tidyUp().finally(() => setLayingOut(false));
               if (issues.length) setNotice(tr(`Laid out; could not fix: ${issueText(issues)}`, `已排版，仍無法解決：${issueText(issues)}`, `レイアウト済み。解決できなかった問題：${issueText(issues)}`));
@@ -284,8 +343,8 @@ export function App() {
         </div>
         <span className="sep" />
         <nav className="group" aria-label={tr("Edit", "編輯")}>
-          <button className="ghost with-icon" onClick={undo} disabled={!canUndo} title={`${MOD}+Z`}>{tr("Undo", "復原")}<Icon d={UNDO} /></button>
-          <button className="ghost with-icon" onClick={redo} disabled={!canRedo} title={`${MOD}+Shift+Z`}>{tr("Redo", "重做")}<Icon d={REDO} /></button>
+          <button ref={undoButton} className="ghost with-icon" onClick={undoRedo(undo, redoButton)} disabled={!canUndo} title={`${MOD}+Z`}>{tr("Undo", "復原")}<Icon d={UNDO} /></button>
+          <button ref={redoButton} className="ghost with-icon" onClick={undoRedo(redo, undoButton)} disabled={!canRedo} title={`${MOD}+Shift+Z`}>{tr("Redo", "重做")}<Icon d={REDO} /></button>
         </nav>
         <span className="file" title={filePath ?? undefined}>{dirty && <span className="dot" title={tr("Unsaved changes", "尚未儲存")} />}{filePath ? baseName(filePath) : tr("Untitled", "未命名")}</span>
         <Menu
@@ -301,8 +360,26 @@ export function App() {
       <main className="main">
         <div className="canvas-wrap">
           <Canvas view={view} setView={setView} grid={grid} />
-          {hints && <Hints onClose={() => setHints(false)} />}
-          {report && <ImportReport result={report.result} onClose={() => setReport(null)} />}
+          {hints && <Hints onClose={(e) => { setHints(false); handFocus(e, () => hintsToggle.current); }} />}
+          {report && <ImportReport result={report.result} onClose={(e) => { setReport(null); handFocus(e); }} />}
+          {/* Stacked over the bottom of the canvas, so an error and a notice
+              never hide each other or the status bar's controls. Always in
+              the page so screen readers announce what appears in them. */}
+          <div className="toasts">
+            <div role="alert">
+              {error && (
+                <div className="toast" onClick={() => setError(null)}>
+                  {error}
+                  <button className="toast-close" onClick={() => setError(null)} aria-label={tr("Close", "關閉")}>×</button>
+                </div>
+              )}
+            </div>
+            <div role="status">
+              {notice && (
+                <div className="toast ok" onClick={() => setNotice(null)} onPointerEnter={() => setHoldNotice(true)} onPointerLeave={() => setHoldNotice(false)}>{notice}</div>
+              )}
+            </div>
+          </div>
         </div>
         <Inspector snap={grid.snap} />
       </main>
@@ -321,7 +398,7 @@ export function App() {
             ))}
           </span>
           <button className="chip" aria-pressed={grid.snap} onClick={() => setGrid((g) => ({ ...g, snap: !g.snap }))} title={tr("Snap to the grid while dragging (hold Alt to turn off for a moment)", "拖曳時吸附到格線（按住 Alt 暫時不吸附）")}>{tr("Snap", "吸附")}</button>
-          <button className="chip" aria-pressed={hints} data-testid="hints-toggle" onClick={() => setHints((h) => !h)} title={hints ? tr("Hide shortcut hints", "隱藏快捷鍵提示") : tr("Show shortcut hints", "顯示快捷鍵提示")}>{tr("Hints", "提示")}</button>
+          <button ref={hintsToggle} className="chip" aria-pressed={hints} data-testid="hints-toggle" onClick={() => setHints((h) => !h)} title={hints ? tr("Hide shortcut hints", "隱藏快捷鍵提示") : tr("Show shortcut hints", "顯示快捷鍵提示")}>{tr("Hints", "提示")}</button>
           <span className="zoom-controls" role="group" aria-label={tr("Zoom", "縮放")}>
             <button className="icon" onClick={() => zoomBy(1 / 1.1)} title={tr(`Zoom out (${MOD}+wheel)`, `縮小（${MOD}+滾輪）`, `縮小（${MOD}+ホイール）`)} aria-label={tr("Zoom out", "縮小")}><Icon d={ZOOM_OUT} /></button>
             <button className="zoom" data-testid="zoom" onClick={() => zoomBy(1 / view.k)} title={tr("Zoom level; click for 100%", "縮放比例；點一下回到 100%")}>{Math.round(view.k * 100)}%</button>
@@ -345,20 +422,6 @@ export function App() {
           }}
         />
       )}
-      {/* Always in the page so screen readers announce what appears in them. */}
-      <div role="alert">
-        {error && (
-          <div className="toast" onClick={() => setError(null)}>
-            {error}
-            <button className="toast-close" onClick={() => setError(null)} aria-label={tr("Close", "關閉")}>×</button>
-          </div>
-        )}
-      </div>
-      <div role="status">
-        {notice && (
-          <div className="toast ok" onClick={() => setNotice(null)} onPointerEnter={() => setHoldNotice(true)} onPointerLeave={() => setHoldNotice(false)}>{notice}</div>
-        )}
-      </div>
     </div>
   );
 }

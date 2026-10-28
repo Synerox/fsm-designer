@@ -3,6 +3,7 @@
 // new diagram. A small report says what was found.
 
 import { useDeferredValue, useEffect, useId, useMemo, useRef, useState } from "react";
+import type { MouseEvent } from "react";
 import { listStateMachines } from "@fsm/core";
 import type { ImportResult } from "@fsm/core";
 import { importVerilogText, loadVerilogDraft, saveVerilogDraft as saveDraft } from "./actions.ts";
@@ -130,7 +131,7 @@ export function VerilogImportDialog({ onClose, onImported }: { onClose: () => vo
 }
 
 /** What was found, shown after an import until dismissed. */
-export function ImportReport({ result, onClose }: { result: ImportResult; onClose: () => void }) {
+export function ImportReport({ result, onClose }: { result: ImportResult; onClose: (e: MouseEvent<HTMLButtonElement>) => void }) {
   const d = result.diagram;
   const kind = result.machine === "mealy" ? "Mealy" : "Moore";
   return (

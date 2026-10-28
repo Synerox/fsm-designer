@@ -193,6 +193,7 @@ function DiagramName({ name }: { name: string }) {
       {tr("Name", "名稱")}
       <input
         ref={ref}
+        data-testid="diagram-name"
         defaultValue={name}
         onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
         onBlur={(e) => commitName(e.currentTarget)}

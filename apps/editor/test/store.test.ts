@@ -330,6 +330,18 @@ test("dragging snaps to other centres first, then the grid", async () => {
   assert.deepEqual(snapPoint({ x: 47, y: 93 }, others, 8, false).p, { x: 47, y: 93 }, "no grid: free");
 });
 
+test("fit to window never zooms below the minimum, however small the canvas", async () => {
+  const { fitView, MIN_ZOOM } = await import("../src/geometry.ts");
+  const b = { minX: 0, minY: 0, maxX: 400, maxY: 200 };
+  assert.deepEqual(fitView(b, 880, 480), { k: 2, x: 40, y: 40 }, "a roomy canvas: centred at 200%");
+  for (const [w, h] of [[1300, 40], [1300, 80], [60, 600], [0, 0]]) {
+    const v = fitView(b, w, h);
+    assert.equal(v.k, MIN_ZOOM, `${w}x${h}: smallest zoom, not ${v.k} (a negative zoom mirrors the drawing)`);
+    assert.equal(v.x + 200 * v.k, w / 2, "still centred");
+    assert.equal(v.y + 100 * v.k, h / 2);
+  }
+});
+
 test("line shape: straight, curve and reset", async () => {
   const { setEdgeShape } = await import("../src/store.ts");
   const d = newDiagram();
