@@ -10,6 +10,7 @@ import { DRAW, alignStates, deleteSelection, edgeTransitions, setEdgeShape, getS
 
 import { snapToGrid } from "./geometry.ts";
 import { tr } from "./i18n.ts";
+import { diagramSizeText, selectionSizeText } from "./summary.ts";
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -222,12 +223,11 @@ export function Inspector({ snap }: { snap: boolean }) {
   }
 
   if (selection?.kind === "multi") {
-    const n = selection.edges.length + (selection.initial ? 1 : 0);
     return (
       <aside className="inspector">
         <h3>{tr("Multiple items selected", "已選取多個物件")}</h3>
         <p className="hint">
-          {tr(`${selection.states.length} states, ${n} lines`, `${selection.states.length} 個狀態、${n} 條線`, `状態 ${selection.states.length} 個、線 ${n} 本`)}{selection.initial ? tr(" (including the start arrow)", "（含起始箭頭）") : ""}
+          {selectionSizeText(selection)}{selection.initial ? tr(" (including the start arrow)", "（含起始箭頭）") : ""}
         </p>
         <SizeControls doc={doc} states={selection.states} edges={selection.edges} edit={edit} keyPrefix="multi" />
         <ShapeControls doc={doc} edges={selection.edges} edit={edit} />
@@ -277,7 +277,7 @@ export function Inspector({ snap }: { snap: boolean }) {
           }}
         />
       </label>
-      <p className="hint">{tr(`${doc.states.length} states, ${doc.transitions.length} transitions`, `${doc.states.length} 個狀態，${doc.transitions.length} 條轉移`, `状態 ${doc.states.length} 個、遷移 ${doc.transitions.length} 本`)}</p>
+      <p className="hint">{diagramSizeText(doc)}</p>
     </aside>
   );
 }

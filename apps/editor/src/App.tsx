@@ -8,9 +8,10 @@ import { Menu } from "./Menu.tsx";
 import { ImportReport, VerilogImportDialog } from "./VerilogImport.tsx";
 import { discardMessage, exportLatex, exportPng, exportSvg, latexText, newFile, openFile, restoreSession, saveDoc, startAutosave, tidyUp } from "./actions.ts";
 import { baseName, copyText, guardWindowClose, isDesktop, setWindowTitle } from "./platform.ts";
-import { drawOptions, selectionParts, copySelection, deleteSelection, edgeTransitions, getStateText, hasClipboard, pasteClipboard, selectAll, setEdgeText, setStateText, useEditor } from "./store.ts";
+import { drawOptions, copySelection, deleteSelection, edgeTransitions, getStateText, hasClipboard, pasteClipboard, selectAll, setEdgeText, setStateText, useEditor } from "./store.ts";
 import type { Selection } from "./store.ts";
-import type { FsmDiagram, ImportResult, LayoutIssue } from "@fsm/core";
+import type { ImportResult, LayoutIssue } from "@fsm/core";
+import { drewText, statusText } from "./summary.ts";
 import type { LabelMode } from "./store.ts";
 import { tr, useLang } from "./i18n.ts";
 import type { Lang } from "./i18n.ts";
@@ -304,8 +305,7 @@ export function App() {
           onImported={(result) => {
             setImporting(false);
             setReport({ result, seq: useEditor.getState().loadSeq });
-            const ns = result.diagram.states.length, nt = result.diagram.transitions.length;
-            setNotice(tr(`Drew ${ns} states and ${nt} transitions from Verilog`, `已從 Verilog 畫出 ${ns} 個狀態、${nt} 條轉移`, `Verilog から ${ns} 個の状態と ${nt} 本の遷移を描きました`));
+            setNotice(drewText(result.diagram));
           }}
         />
       )}
@@ -323,18 +323,6 @@ const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "Cmd" : "Ctrl";
 const GRID_KEY = "fsm-designer.grid.v2";
 const HINTS_KEY = "fsm-designer.hints.v1";
 
-/** Status bar text: what is selected, else the size of the diagram. */
-function statusText(d: FsmDiagram, sel: Selection): string {
-  const { states, edges, initial } = selectionParts(sel);
-  const kind = d.type === "mealy" ? "Mealy" : "Moore";
-  const ns = d.states.length, nt = d.transitions.length;
-  if (!sel) return tr(`${d.outputs.length ? `${kind} machine · ` : ""}${ns} state${ns === 1 ? "" : "s"} · ${nt} transition${nt === 1 ? "" : "s"}`, `${d.outputs.length ? `${kind} 機 · ` : ""}${ns} 個狀態 · ${nt} 條轉移`, `${d.outputs.length ? `${kind} マシン · ` : ""}状態 ${ns} 個 · 遷移 ${nt} 本`);
-  if (sel.kind === "state") return tr("1 state selected · type to edit its text", "已選取 1 個狀態 · 直接打字編輯文字");
-  if (sel.kind === "edge") return sel.from === sel.to ? tr("1 self loop selected · type to edit its text", "已選取 1 條自迴圈 · 直接打字編輯文字") : tr("1 transition selected · type to edit its text", "已選取 1 條轉移 · 直接打字編輯文字");
-  if (sel.kind === "initial") return tr("Start arrow selected", "已選取起始箭頭");
-  const nl = edges.length + (initial ? 1 : 0);
-  return tr(`${states.length} states and ${nl} lines selected`, `已選取 ${states.length} 個狀態、${nl} 條線`, `状態 ${states.length} 個、線 ${nl} 本を選択中`);
-}
 const GRID_STYLE_IDS: GridStyle[] = ["line", "dot", "none"];
 const GRID_STYLES = (): Array<[GridStyle, string]> => [["line", tr("Line", "線")], ["dot", tr("Dot", "點")], ["none", tr("None", "無")]];
 
