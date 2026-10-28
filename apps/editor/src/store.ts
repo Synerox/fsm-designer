@@ -25,6 +25,8 @@ interface EditorState {
   future: FsmDiagram[];
   filePath: string | null; // desktop: absolute path; browser: file name
   dirty: boolean;
+  /** The doc as last loaded or saved (null if that is not on disk, e.g. an import), so undo back to it is clean. */
+  savedDoc: FsmDiagram | null;
   /** Snapshot key of the last coalesced edit (typing, dragging), so one gesture is one undo step. */
   coalesce: string | null;
   /** Text cursor in the selected state's or transition's text; null = at the end. */
@@ -67,13 +69,16 @@ export function newDiagram(): FsmDiagram {
   return createDiagram({ name: DEFAULT_NAME });
 }
 
+const initialDoc = newDiagram();
+
 export const useEditor = create<EditorState>((set, get) => ({
-  doc: newDiagram(),
+  doc: initialDoc,
   selection: null,
   past: [],
   future: [],
   filePath: null,
   dirty: false,
+  savedDoc: initialDoc,
   coalesce: null,
   loadSeq: 0,
   caret: null,
@@ -106,19 +111,19 @@ export const useEditor = create<EditorState>((set, get) => ({
     const { past, doc, future } = get();
     if (!past.length) return;
     const prev = past[past.length - 1];
-    set({ doc: prev, past: past.slice(0, -1), future: [doc, ...future], dirty: true, coalesce: null, selection: keepSelection(prev, get().selection) });
+    set({ doc: prev, past: past.slice(0, -1), future: [doc, ...future], dirty: prev !== get().savedDoc, coalesce: null, selection: keepSelection(prev, get().selection) });
   },
   redo() {
     const { past, doc, future } = get();
     if (!future.length) return;
     const next = future[0];
-    set({ doc: next, past: [...past, doc], future: future.slice(1), dirty: true, coalesce: null, selection: keepSelection(next, get().selection) });
+    set({ doc: next, past: [...past, doc], future: future.slice(1), dirty: next !== get().savedDoc, coalesce: null, selection: keepSelection(next, get().selection) });
   },
   load(doc, filePath) {
-    set({ doc, filePath, past: [], future: [], dirty: false, selection: null, coalesce: null, loadSeq: get().loadSeq + 1 });
+    set({ doc, filePath, past: [], future: [], dirty: false, savedDoc: doc, selection: null, coalesce: null, loadSeq: get().loadSeq + 1 });
   },
   markSaved(filePath) {
-    set({ filePath, dirty: false, coalesce: null });
+    set({ filePath, dirty: false, savedDoc: get().doc, coalesce: null });
   },
 }));
 

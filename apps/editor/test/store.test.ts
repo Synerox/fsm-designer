@@ -159,3 +159,24 @@ test("box select adds to the existing selection", async () => {
   assert.deepEqual(sel, { kind: "multi", states: ["a", "b"], edges: [{ from: "a", to: "b" }], initial: false });
   assert.deepEqual(mergeSelections({ kind: "state", id: "a" }, null), { kind: "state", id: "a" }, "an empty box keeps the selection");
 });
+
+test("undo back to the saved document is clean again; redo away from it is not", () => {
+  const { load, edit, undo, redo, markSaved } = useEditor.getState();
+  load(newDiagram(), null);
+  edit((d) => { createState(d, 0, 0); });
+  markSaved("a.fsm.json");
+  edit((d) => { d.states[0].x = 40; });
+  assert.equal(useEditor.getState().dirty, true);
+  undo();
+  assert.equal(useEditor.getState().dirty, false, "the doc equals the saved file");
+  redo();
+  assert.equal(useEditor.getState().dirty, true);
+  undo(); undo();
+  assert.equal(useEditor.getState().dirty, true, "before the save is unsaved too");
+  // A diagram that was never saved (an import) stays unsaved even back at its start.
+  load(newDiagram(), null);
+  useEditor.setState({ dirty: true, savedDoc: null });
+  edit((d) => { createState(d, 0, 0); });
+  undo();
+  assert.equal(useEditor.getState().dirty, true);
+});

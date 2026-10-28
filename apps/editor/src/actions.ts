@@ -78,7 +78,7 @@ export async function importVerilogText(source: string, opts: ImportOptions = {}
   const r = await importVerilogLaidOut(source, { ...opts, layout: { draw: drawOptions() } }); // throws before anything is replaced
   if (!(await confirmDiscard())) return null;
   useEditor.getState().load(r.diagram, null);
-  useEditor.setState({ dirty: true });
+  useEditor.setState({ dirty: true, savedDoc: null }); // never saved: undoing back to it is not clean either
   return r;
 }
 
@@ -198,6 +198,6 @@ export async function restoreSession(): Promise<void> {
     if (!saved.filePath && d.name === "seq_detector_1011") d.name = DEFAULT_NAME;
     await ensureLayout(d);
     useEditor.getState().load(d, saved.filePath);
-    if (saved.dirty) useEditor.setState({ dirty: true });
+    if (saved.dirty) useEditor.setState({ dirty: true, savedDoc: null });
   } catch { /* ignore a corrupt autosave */ }
 }
