@@ -292,6 +292,7 @@ class Parser {
         if (t.kind !== "id") break;
         if (NET_TYPES.has(t.text) || t.text === "signed" || t.text === "unsigned") { this.i++; sawType = true; continue; }
         if (t.text in INT_TYPES) { width = INT_TYPES[t.text]; this.i++; sawType = true; continue; }
+        if (this.is("::", 1) && this.peek(2).kind === "id") { this.i += 2; continue; } // pkg::type
         if (this.peek(1).kind === "id" || (this.peek(1).text === "[" && m.enums.has(t.text))) {
           enumType = m.enums.has(t.text) ? t.text : undefined;
           this.i++;
@@ -409,7 +410,11 @@ class Parser {
       this.stmt();
       return;
     }
+    // import pkg::*; the package's constants and types are already known.
+    if (w === "import") { this.skipStatement(); return; }
     if (m.enums.has(w) && this.peek(1).kind === "id") return this.declaration(m);
+    // pkg::state_t s, n;
+    if (this.is("::", 1) && m.enums.has(this.peek(2).text) && (this.peek(3).kind === "id" || this.is("[", 3))) return this.declaration(m);
     if (this.peek(1).kind === "id" || this.peek(1).text === "#") {
       m.skipped.push(`instance of ${w} (line ${t.line})`);
     }
@@ -475,6 +480,7 @@ class Parser {
         enumType = anon;
         continue;
       }
+      if (this.is("::", 1) && this.peek(2).kind === "id") { this.i += 2; continue; } // pkg::type: the type is what counts
       if (m.enums.has(t.text) && (this.peek(1).kind === "id" || this.peek(1).text === "[")) { enumType = t.text; this.i++; continue; }
       break;
     }

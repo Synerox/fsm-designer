@@ -75,3 +75,27 @@ endmodule`);
   // Only the real error, not "instance of else" from resyncing inside the block.
   assert.deepEqual(r.warnings.filter((w) => w.startsWith("Skipped")), ['Skipped line 5: expected ";" but found "else"']);
 });
+
+test("package-scoped types (pkg::state_t) in ports and declarations keep the enum's width", () => {
+  const r = importVerilog(`package fsm_pkg;
+  typedef enum logic [1:0] {IDLE, RUN, DONE} st_t;
+endpackage
+module m (input logic clk, input logic rst_n, input logic go, output fsm_pkg::st_t cur);
+  import fsm_pkg::*;
+  fsm_pkg::st_t s, n;
+  always_ff @(posedge clk or negedge rst_n) if (!rst_n) s <= fsm_pkg::IDLE; else s <= n;
+  always_comb begin
+    n = s;
+    case (s)
+      fsm_pkg::IDLE: if (go) n = RUN;
+      RUN: n = DONE;
+      DONE: n = IDLE;
+    endcase
+  end
+  assign cur = s;
+endmodule`);
+  assert.deepEqual(r.stateCodes, { IDLE: "2'b00", RUN: "2'b01", DONE: "2'b10" });
+  assert.deepEqual(r.diagram.outputs.map((s) => [s.name, s.width]), [["cur", 2]]);
+  assert.deepEqual(edges(r.diagram), ["IDLE->RUN: go", "IDLE->IDLE: !go", "RUN->DONE: ", "DONE->IDLE: "]);
+  assert.deepEqual(r.warnings, []);
+});
