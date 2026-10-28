@@ -130,3 +130,33 @@ endmodule`);
   assert.equal(p.constants.B, "5");
   assert.deepEqual(edges(p.diagram), ["S0->S1: ", "S1->S0: "]);
 });
+
+test("[lo:hi] ranges in case-inside labels and in inside lists", () => {
+  const r = importVerilog(`module m(input logic clk, input logic rst_n, input logic [3:0] d, output logic hit);
+  typedef enum logic [1:0] {IDLE, LOW, HIGH} st_t;
+  st_t s, n;
+  always_ff @(posedge clk or negedge rst_n) if (!rst_n) s <= IDLE; else s <= n;
+  always_comb begin
+    n = s;
+    case (s)
+      IDLE: case (d) inside
+              [4'd0:4'd3], 4'd7: n = LOW;
+              [4'd12:4'd15]: n = HIGH;
+              default: n = IDLE;
+            endcase
+      LOW: if (d inside {4'd1, [4'd8:4'd9]}) n = IDLE;
+      HIGH: n = IDLE;
+    endcase
+  end
+  assign hit = (s != IDLE);
+endmodule`);
+  assert.deepEqual(r.stateCodes, { IDLE: "2'b00", LOW: "2'b01", HIGH: "2'b10" });
+  assert.deepEqual(edges(r.diagram), [
+    "IDLE->LOW: d <= 4'd3 || d == 4'd7",
+    "IDLE->HIGH: d >= 4'd12",
+    "IDLE->IDLE: d > 4'd3 && d != 4'd7 && d < 4'd12",
+    "LOW->IDLE: d == 4'd1 || (d >= 4'd8 && d <= 4'd9)",
+    "LOW->LOW: d > 4'd9 || (d != 4'd1 && d < 4'd8)",
+    "HIGH->IDLE: ",
+  ]);
+});

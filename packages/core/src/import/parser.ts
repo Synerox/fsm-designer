@@ -593,8 +593,8 @@ class Parser {
       this.expect("(");
       const subject = this.expr();
       this.expect(")");
-      this.accept("inside");
-      const items: CaseItem[] = [];
+      const inside = this.accept("inside");
+      const items: Array<{ labels: Array<Expr | ValueRange> | null; body: Stmt }> = [];
       while (!this.accept("endcase")) {
         if (this.done() || this.atItem()) throw new VerilogSyntaxError(`"${w}" without "endcase"`, t.line);
         if (this.accept("default")) {
@@ -602,12 +602,19 @@ class Parser {
           items.push({ labels: null, body: this.stmt() });
           continue;
         }
-        const labels: Expr[] = [];
-        do labels.push(this.expr()); while (this.accept(","));
+        const labels: Array<Expr | ValueRange> = [];
+        do labels.push(inside ? this.insideItem() : this.expr()); while (this.accept(","));
         this.expect(":");
         items.push({ labels, body: this.stmt() });
       }
-      return { k: "case", kind: w, subject, items, line: t.line };
+      // A [lo:hi] label of `case (x) inside` matches a range, which a case
+      // label compared for equality cannot say, so such a case becomes
+      // case (1'b1) with each label turned into its condition.
+      if (items.some((it) => it.labels?.some((l) => "lo" in l))) {
+        const labels = (ls: Array<Expr | ValueRange> | null) => ls && ls.map((l) => insideMatch(subject, l));
+        return { k: "case", kind: w, subject: num(1, 1), items: items.map((it) => ({ labels: labels(it.labels), body: it.body })), line: t.line };
+      }
+      return { k: "case", kind: w, subject, items: items as CaseItem[], line: t.line };
     }
     if (w === "for" || w === "while" || w === "repeat" || w === "foreach") {
       this.i++;
@@ -712,12 +719,23 @@ class Parser {
       // x inside {A, B}: equality with any member.
       this.i++;
       this.expect("{");
-      const opts: Expr[] = [];
-      do opts.push(this.expr()); while (this.accept(","));
+      const opts: Array<Expr | ValueRange> = [];
+      do opts.push(this.insideItem()); while (this.accept(","));
       this.expect("}");
-      left = opts.map((o): Expr => ({ k: "bin", op: "==", a: left, b: o })).reduce((a, b) => ({ k: "bin", op: "||", a, b }));
+      const x = left;
+      left = opts.map((o) => insideMatch(x, o)).reduce((a, b) => ({ k: "bin", op: "||", a, b }));
     }
     return left;
+  }
+
+  /** One member of an inside list or a case-inside label: a value or a [lo:hi] range. */
+  private insideItem(): Expr | ValueRange {
+    if (!this.accept("[")) return this.expr();
+    const lo = this.expr();
+    this.expect(":");
+    const hi = this.expr();
+    this.expect("]");
+    return { lo, hi };
   }
 
   private unary(): Expr {
@@ -792,6 +810,17 @@ class Parser {
     }
     return this.selects(e);
   }
+}
+
+interface ValueRange {
+  lo: Expr;
+  hi: Expr;
+}
+
+/** x inside {item}: equal to a value, or between the bounds of a [lo:hi] range. */
+function insideMatch(x: Expr, item: Expr | ValueRange): Expr {
+  if (!("lo" in item)) return { k: "bin", op: "==", a: x, b: item };
+  return { k: "bin", op: "&&", a: { k: "bin", op: ">=", a: x, b: item.lo }, b: { k: "bin", op: "<=", a: x, b: item.hi } };
 }
 
 function emptyModule(name: string, line: number): Module {
