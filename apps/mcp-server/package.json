@@ -1,6 +1,6 @@
 {
   "name": "@fsm/mcp-server",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "license": "MIT",
   "description": "MCP server that lets AI agents build and export FSM state diagrams",
   "type": "module",

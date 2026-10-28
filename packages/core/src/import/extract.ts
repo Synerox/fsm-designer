@@ -633,7 +633,12 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
     if (!blocks.some((b) => b.seq && b.writes.has(opts.stateVar!))) throw new VerilogImportError(`"${opts.stateVar}" is not a register written in a clocked always block of module ${m.name}`);
     cand = { name: opts.stateVar, score: 0, values: new Set() };
   }
-  if (!cand) throw new VerilogImportError(`No state machine found in module ${m.name}: no register written in a clocked always block takes two or more constant state values`);
+  if (!cand) {
+    // A statement that did not parse drops its whole always block, which is the usual reason for not finding the FSM.
+    const syntax = m.skipped.filter((s) => /^line \d+:/.test(s));
+    const hint = syntax.length ? `. These parts did not parse and were skipped: ${syntax.join("; ")}` : "";
+    throw new VerilogImportError(`No state machine found in module ${m.name}: no register written in a clocked always block takes two or more constant state values${hint}`);
+  }
   for (const o of cands) if (o !== cand && o.score >= 6 && !opts.stateVar) c.warn(`Register "${o.name}" also looks like a state register; import it with stateVar: "${o.name}"`);
   const R = cand.name;
   const N = cand.next;
@@ -956,6 +961,19 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
     const st = addState(d, { name, isInitial: v === resetValue, outputs: outs });
     ids.set(k, st.id);
     stateCodes[name] = `${Rw}'b${v.toString(2).padStart(Rw, "0")}`;
+  }
+  // An id given while adding the states can be the name of a state added later
+  // (states named s0, s1...); renumber them so every id differs from every name.
+  const drawnNames = new Set(d.states.map((s) => s.name));
+  if (d.states.some((s) => drawnNames.has(s.id) && s.name !== s.id)) {
+    let n = 0;
+    const fresh = new Map<string, string>();
+    for (const s of d.states) {
+      while (drawnNames.has(`s${n}`)) n++;
+      fresh.set(s.id, `s${n++}`);
+    }
+    for (const s of d.states) s.id = fresh.get(s.id)!;
+    for (const [k, id] of ids) ids.set(k, fresh.get(id)!);
   }
   for (const v of order) {
     const k = v.toString();
