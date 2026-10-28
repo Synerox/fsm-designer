@@ -654,8 +654,8 @@ class Parser {
       return { k: "skip", what: t.text, line: t.line };
     }
     if (w === "assign" || w === "force") this.i++;
-    // Task call: name(...);
-    if (t.kind === "id" && this.peek(1).text === "(") {
+    // Task call: name(...); or, for a task without arguments, name;
+    if (t.kind === "id" && (this.is("(", 1) || this.is(";", 1))) {
       this.skipStatement();
       return { k: "skip", what: `call ${t.text}`, line: t.line };
     }

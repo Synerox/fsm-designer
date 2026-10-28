@@ -184,3 +184,22 @@ endmodule`;
   const last = importVerilog(src.replace(/endmodule$/, ""), { module: "second" });
   assert.ok(last.warnings.includes('Skipped line 11: "endmodule" of second missing at the end of the file'), last.warnings.join("\n"));
 });
+
+test("a task called without parentheses is skipped like one with them", () => {
+  const r = importVerilog(`module m(input clk, input rst, input a, output reg y, output reg z);
+  localparam S0 = 1'b0, S1 = 1'b1;
+  reg s, n;
+  task set_out; begin y = 1; end endtask
+  always @(posedge clk) if (rst) s <= S0; else s <= n;
+  always @* begin
+    n = s; y = 0; z = 0;
+    case (s)
+      S0: if (a) n = S1;
+      S1: begin set_out; z = 1; n = S0; end
+    endcase
+  end
+endmodule`);
+  assert.deepEqual(edges(r.diagram), ["S0->S1: a", "S0->S0: !a", "S1->S0: "]);
+  assert.deepEqual(r.diagram.states.map((s) => [s.name, s.outputs.z]), [["S0", 0], ["S1", 1]]);
+  assert.ok(r.warnings.includes("Skipped call set_out on line 10; its effect is not in the diagram"), r.warnings.join("\n"));
+});
