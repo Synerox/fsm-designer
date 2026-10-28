@@ -3,7 +3,7 @@
 // and printing back to Verilog text.
 
 export type Expr =
-  | { k: "num"; v: bigint; w: number | null; x: bigint; z: bigint; src?: string; name?: string; signed?: boolean }
+  | { k: "num"; v: bigint; w: number | null; x: bigint; z: bigint; src?: string; name?: string; signed?: boolean; index?: string }
   | { k: "id"; name: string }
   | { k: "un"; op: string; a: Expr }
   | { k: "bin"; op: string; a: Expr; b: Expr }

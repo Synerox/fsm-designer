@@ -335,3 +335,33 @@ endmodule`);
   assert.deepEqual(edges(t.diagram), ["IDLE->GO: go", "IDLE->IDLE: !go", "GO->RUN: ", "RUN->IDLE: stop", "RUN->RUN: !stop"]);
   assert.deepEqual(stateOutputs(t.diagram).RUN, { run: 1 });
 });
+
+test("bit selects follow the declared range: [0:2] counts from the MSB, [4:3] starts at bit 3", () => {
+  const r = importVerilog(`
+module m(input clk, input rst, input go, output busy);
+  localparam IDLE = 0, RUN = 1, DONE = 2;
+  reg [0:2] state, next;
+  always @(posedge clk) if (rst) state <= 3'b100; else state <= next;
+  always @* begin
+    next = 3'b000;
+    case (1'b1)
+      state[IDLE]: if (go) next[RUN] = 1'b1; else next[IDLE] = 1'b1;
+      state[RUN]:  next[DONE] = 1'b1;
+      state[DONE]: next[IDLE] = 1'b1;
+    endcase
+  end
+  assign busy = state[RUN] | state[DONE];
+endmodule`);
+  // state[0] is the MSB of a [0:2] vector, so the reset value 3'b100 is IDLE.
+  assert.deepEqual(r.stateCodes, { IDLE: "3'b100", RUN: "3'b010", DONE: "3'b001" });
+  assert.ok(r.diagram.states.find((s) => s.name === "IDLE")!.isInitial);
+  assert.deepEqual(stateOutputs(r.diagram), { IDLE: { busy: 0 }, RUN: { busy: 1 }, DONE: { busy: 1 } });
+  const o = importVerilog(`
+module m(input clk, input rst, input go, output busy);
+  localparam A = 2'd0, B = 2'd1, C = 2'd2;
+  reg [4:3] st;
+  always @(posedge clk) if (rst) st <= A; else case (st) A: if (go) st <= B; B: st <= C; C: st <= A; default: st <= A; endcase
+  assign busy = st[4];
+endmodule`);
+  assert.deepEqual(stateOutputs(o.diagram), { A: { busy: 0 }, B: { busy: 0 }, C: { busy: 1 } });
+});

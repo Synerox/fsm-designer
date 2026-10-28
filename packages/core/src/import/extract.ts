@@ -99,6 +99,8 @@ class Ctx {
   readonly widths = new Map<string, number>();
   /** Signals declared signed: a value tried for one of them compares as two's complement. */
   readonly signed = new Set<string>();
+  /** Declared ranges other than [w-1:0] (reg [0:2], reg [4:3]), where index i is not bit i. */
+  readonly ranges = new Map<string, { msb: number; lsb: number }>();
   readonly warnings: string[] = [];
   readonly m: Module;
   constructor(m: Module) {
@@ -116,6 +118,8 @@ class Ctx {
       const w = d.width ?? (d.enumType ? enumWidth(m, d.enumType, pctx) : d.range ? rangeWidth(d.range, pctx) : 1);
       this.widths.set(d.name, w ?? 1);
       if (d.signed) this.signed.add(d.name);
+      const msb = d.range && simplify(d.range.msb, pctx), lsb = d.range && simplify(d.range.lsb, pctx);
+      if (msb && lsb && isConst(msb) && isConst(lsb) && (lsb.v !== 0n || msb.v < lsb.v)) this.ranges.set(d.name, { msb: Number(msb.v), lsb: Number(lsb.v) });
     }
   }
   warn(msg: string) { if (!this.warnings.includes(msg)) this.warnings.push(msg); }
@@ -214,9 +218,64 @@ function writesOf(s: Stmt): Set<string> {
   return w;
 }
 
-function makeBlocks(m: Module): Block[] {
+// ---- bit positions ----------------------------------------------------------------
+
+function mapExpr(e: Expr, f: (e: Expr) => Expr): Expr {
+  const m = (x: Expr) => mapExpr(x, f);
+  switch (e.k) {
+    case "un": return f({ ...e, a: m(e.a) });
+    case "bin": return f({ ...e, a: m(e.a), b: m(e.b) });
+    case "tern": return f({ ...e, c: m(e.c), a: m(e.a), b: m(e.b) });
+    case "idx": return f({ ...e, a: m(e.a), i: m(e.i) });
+    case "part": return f({ ...e, a: m(e.a), msb: m(e.msb), lsb: m(e.lsb) });
+    case "cat": return f({ ...e, parts: e.parts.map(m) });
+    case "rep": return f({ ...e, n: m(e.n), parts: e.parts.map(m) });
+    case "call": return f({ ...e, args: e.args.map(m) });
+    default: return f(e);
+  }
+}
+
+function mapStmt(s: Stmt, f: (e: Expr) => Expr): Stmt {
+  switch (s.k) {
+    case "block": return { ...s, body: s.body.map((b) => mapStmt(b, f)) };
+    case "assign": return { ...s, lhs: mapExpr(s.lhs, f), rhs: mapExpr(s.rhs, f) };
+    case "if": return { ...s, c: mapExpr(s.c, f), t: mapStmt(s.t, f), ...(s.e ? { e: mapStmt(s.e, f) } : {}) };
+    case "case": return { ...s, subject: mapExpr(s.subject, f), items: s.items.map((it) => ({ labels: it.labels?.map((l) => mapExpr(l, f)) ?? null, body: mapStmt(it.body, f) })) };
+    case "skip": return s;
+  }
+}
+
+/**
+ * Selects on a vector declared [0:2] or [4:3] rewritten to bit positions (the
+ * LSB is bit 0), the way the rest of the importer and the diagram read them:
+ * in reg [0:2] state, state[0] is the MSB. A parameter index keeps its name
+ * on the number (state[IDLE] still names a one-hot state IDLE).
+ */
+function bitPositions(c: Ctx, s: Stmt): Stmt {
+  if (!c.ranges.size) return s;
+  const pctx: EvalCtx = { lookup: (n) => c.params.get(n), width: (n) => c.widths.get(n) };
+  return mapStmt(s, (e) => {
+    if ((e.k !== "idx" && e.k !== "part") || e.a.k !== "id") return e;
+    const r = c.ranges.get(e.a.name);
+    if (!r) return e;
+    const down = r.msb >= r.lsb;
+    const pos = (i: Expr): Expr => {
+      const v = simplify(i, pctx);
+      if (isConst(v)) return num(down ? Number(v.v) - r.lsb : r.lsb - Number(v.v), null, i.k === "id" && c.params.has(i.name) ? { index: i.name } : {});
+      return down ? { k: "bin", op: "-", a: i, b: num(r.lsb) } : { k: "bin", op: "-", a: num(r.lsb), b: i };
+    };
+    if (e.k === "idx") return { ...e, i: pos(e.i) };
+    if (e.mode === ":") return { ...e, msb: pos(e.msb), lsb: pos(e.lsb) };
+    // a[base +: w] counts up from base in index order: down the bits of an ascending vector.
+    const mode = down ? e.mode : e.mode === "+:" ? "-:" : "+:";
+    return { ...e, msb: pos(e.msb), mode };
+  });
+}
+
+function makeBlocks(m: Module, c: Ctx): Block[] {
   const blocks: Block[] = [];
   const mk = (seq: boolean, stmt: Stmt, line: number, always?: Always) => {
+    stmt = bitPositions(c, stmt);
     const writes = new Set<string>(), reads = new Set<string>();
     eachStmt(stmt, (x) => {
       if (x.k === "assign") {
@@ -346,7 +405,7 @@ function findCandidates(c: Ctx, blocks: Block[]): Candidate[] {
       });
       eachExpr(b.stmt, (e) => subExprs(e, (s) => {
         if (s.k === "bin" && (s.op === "==" || s.op === "!=") && s.a.k === "id" && names.has(s.a.name) && constOf(s.b)) compares++;
-        if (s.k === "idx" && s.a.k === "id" && names.has(s.a.name) && s.i.k === "id" && c.params.has(s.i.name)) bitTests++;
+        if (s.k === "idx" && s.a.k === "id" && names.has(s.a.name) && paramIndex(s.i, c)) bitTests++;
         else if (s.k === "idx" && s.a.k === "id" && names.has(s.a.name) && s.i.k === "num" && constOf(s.i)) numericBitTests++;
       }));
     }
@@ -358,6 +417,13 @@ function findCandidates(c: Ctx, blocks: Block[]): Candidate[] {
     if (enough && (caseUses > 0 || compares > 0 || bitTests > 0 || numericBitTests > 0)) out.push({ name, next, score, values });
   }
   return out.sort((a, b) => b.score - a.score);
+}
+
+/** A bit index written as a parameter (state[IDLE]), with the bit it selects. */
+function paramIndex(i: Expr, c: Ctx): { name: string; pos: number } | undefined {
+  if (i.k === "id" && c.params.has(i.name)) return { name: i.name, pos: Number(c.params.get(i.name)!.v) };
+  if (i.k === "num" && i.index && c.params.has(i.index)) return { name: i.index, pos: Number(i.v) };
+  return undefined;
 }
 
 // ---- reset and clock ----------------------------------------------------------
@@ -744,13 +810,14 @@ const sameValue = (a: OutputValue | undefined, b: OutputValue | undefined) => St
 
 /** Registers in m that look like state registers, most likely first. */
 export function stateRegisters(m: Module): string[] {
-  const cands = findCandidates(new Ctx(m), makeBlocks(m));
+  const c = new Ctx(m);
+  const cands = findCandidates(c, makeBlocks(m, c));
   return cands.filter((x, i) => i === 0 || x.score >= 6).map((x) => x.name);
 }
 
 export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
   const c = new Ctx(m);
-  const blocks = makeBlocks(m);
+  const blocks = makeBlocks(m, c);
   const cands = findCandidates(c, blocks);
   let cand = opts.stateVar ? cands.find((x) => x.name === opts.stateVar) : cands[0];
   if (opts.stateVar && !cand) {
@@ -808,6 +875,7 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
     if (name && !names.has(k)) names.set(k, name);
   };
   const indexNames: string[] = [];
+  const indexPos = new Map<string, number>();
   const numericIndices = new Set<number>();
   for (const b of blocks) {
     eachStmt(b.stmt, (x) => {
@@ -831,8 +899,9 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
         const v = simplify(s.b, pctx);
         if (isConst(v)) addName(v.v, named(s.b));
       }
-      if (s.k === "idx" && s.a.k === "id" && stateNames.has(s.a.name) && s.i.k === "id" && c.params.has(s.i.name) && !indexNames.includes(s.i.name)) indexNames.push(s.i.name);
-      if (s.k === "idx" && s.a.k === "id" && stateNames.has(s.a.name) && s.i.k === "num" && isConst(s.i)) numericIndices.add(Number(s.i.v));
+      const pi = s.k === "idx" && s.a.k === "id" && stateNames.has(s.a.name) ? paramIndex(s.i, c) : undefined;
+      if (pi && !indexPos.has(pi.name)) { indexNames.push(pi.name); indexPos.set(pi.name, pi.pos); }
+      else if (s.k === "idx" && s.a.k === "id" && stateNames.has(s.a.name) && s.i.k === "num" && isConst(s.i) && !s.i.index) numericIndices.add(Number(s.i.v));
     }));
   }
   const enumType = m.decls.get(R)?.enumType;
@@ -841,7 +910,7 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
   }
   // One-hot written with indices: state[IDLE], next[S1] = 1'b1.
   if (indexNames.length >= 2 && Rw >= indexNames.length) {
-    const idx = indexNames.map((n) => Number(c.params.get(n)!.v));
+    const idx = indexNames.map((n) => indexPos.get(n)!);
     if (idx.every((i) => i < Rw) && new Set(idx).size === idx.length) {
       oneHotIndex = true;
       names.clear();
