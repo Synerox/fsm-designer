@@ -116,11 +116,28 @@ test("latex asks for xelatex or lualatex, with CJK fonts, only when labels need 
   const cjk = renderLatex(d);
   assert.match(cjk, /^% Some labels are Chinese, Japanese or Korean: compile with xelatex or lualatex/m);
   assert.match(cjk, /\\documentclass[^\n]*\n\\usepackage\{iftex\}\n\\RequireTUTeX\n\\usepackage\[UTF8, scheme=plain\]\{ctex\}\n/);
+  // Fandol, ctex's default on Linux, prints Korean and some Traditional Chinese blank: say so, with a font line to uncomment.
+  assert.match(cjk, /^% Some labels are Chinese[^\n]*print blank[^\n]*Fandol[^\n]*Korean/m);
+  assert.match(cjk, /\{ctex\}\n% \\setCJKmainfont\{Noto Serif CJK TC\}\\setCJKsansfont\{Noto Sans CJK TC\}\\setCJKmonofont\{Noto Sans CJK TC\} % if characters are missing: uncomment/);
+  assert.doesNotMatch(cjk, /setmainfont/, "CJK alone needs no Latin font");
   assert.match(renderLatex(d, { standalone: false }), /^% Some labels are Chinese/, "a bare picture still says what it needs");
   d.states[1].label = "🚦";
   const emoji = renderLatex(d);
   assert.match(emoji, /\\RequireTUTeX/);
   assert.doesNotMatch(emoji, /ctex/);
+  d.states[1].label = "Ожидание";
+  const cyrillic = renderLatex(d);
+  assert.match(cyrillic, /^% Some labels use characters pdflatex cannot typeset[^\n]*print blank/m);
+  assert.match(cyrillic, /\n% \\usepackage\{fontspec\}\\setmainfont\{DejaVu Serif\}\\setmonofont\{DejaVu Sans Mono\} % if characters are missing: uncomment/);
+  // Inside Latin-1 and Latin Extended-A, OT1 pdflatex still lacks primes, guillemets, eth, ogonek letters, ...
+  d.states[1].label = "S′ x″";
+  const prime = renderLatex(d);
+  assert.match(prime, /\{S\$'\$ x\$''\$\}/, "primes become TeX primes");
+  assert.doesNotMatch(prime, /RequireTUTeX|xelatex/);
+  for (const label of ["«x»", "Ðþ", "Ąę", "„x“", "‹x›"]) {
+    d.states[1].label = label;
+    assert.match(renderLatex(d), /\\RequireTUTeX/, `${label} needs xelatex or lualatex`);
+  }
 });
 
 test("prettyText leaves empty subscript braces as typed", () => {
@@ -128,3 +145,4 @@ test("prettyText leaves empty subscript braces as typed", () => {
   assert.equal(prettyText("S_{}x"), "S_{}x");
   assert.equal(prettyText("S_{12}"), "S₁₂");
 });
+

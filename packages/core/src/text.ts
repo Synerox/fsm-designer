@@ -107,6 +107,7 @@ const TEX_CHAR: Record<string, string> = {
   "→": "\\rightarrow", "←": "\\leftarrow", "↔": "\\leftrightarrow", "⇒": "\\Rightarrow", "⇐": "\\Leftarrow", "⇔": "\\Leftrightarrow", "↑": "\\uparrow", "↓": "\\downarrow",
   "≥": "\\geq", "≤": "\\leq", "≠": "\\neq", "≈": "\\approx", "≡": "\\equiv", "±": "\\pm", "×": "\\times", "÷": "\\div", "·": "\\cdot", "∘": "\\circ",
   "¬": "\\neg", "∧": "\\wedge", "∨": "\\vee", "⊕": "\\oplus", "⊗": "\\otimes", "∑": "\\sum", "∏": "\\prod", "∞": "\\infty",
+  "′": "'", "″": "''", "‴": "'''", // primes (S′): OT1 pdflatex has no text glyph for them
   "∈": "\\in", "∉": "\\notin", "∅": "\\emptyset", "∀": "\\forall", "∃": "\\exists", "∩": "\\cap", "∪": "\\cup", "⊂": "\\subset", "⊆": "\\subseteq",
 };
 const TEX_CHAR_RUN = new RegExp(`[${Object.keys(TEX_CHAR).join("")}]`, "g");

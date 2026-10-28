@@ -109,7 +109,7 @@ pnpm dev:web      # 在瀏覽器開啟 http://localhost:5173
 | --- | --- |
 | **PNG** | 貼進簡報、文件或作業 |
 | **SVG** | 向量圖，放大不失真，可以再用 Inkscape／Illustrator 修改 |
-| **LaTeX (TikZ)** | 產生可用 `pdflatex` 編譯的 TikZ 圖，可以直接放進報告或論文；標籤含中日韓文字時改用 `xelatex` 或 `lualatex`（檔頭會載入 `ctex`） |
+| **LaTeX (TikZ)** | 產生可用 `pdflatex` 編譯的 TikZ 圖，可以直接放進報告或論文；標籤含中日韓文字時改用 `xelatex` 或 `lualatex`（檔頭會載入 `ctex`）；字型缺的字會印成空白，`ctex` 在 Linux 與 Overleaf 的預設字型 Fandol 沒有韓文、也缺部分繁體字（如「綠」「黃」），這時取消檔頭 `\setCJKmainfont{Noto Serif CJK TC}` 那一行的註解，或換成你有的 CJK 字型 |
 | **.fsm.json** | 專案檔，桌面版、網頁版與 MCP server 都讀寫同一種格式 |
 
 以 1011 序列偵測器為例，匯出的 LaTeX 節錄如下：
