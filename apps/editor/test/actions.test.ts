@@ -19,7 +19,7 @@ let storageFull = false;
 // ...and no window to hear other tabs' "storage" events on.
 const events = new EventTarget();
 Object.assign(globalThis, { addEventListener: events.addEventListener.bind(events), removeEventListener: events.removeEventListener.bind(events) });
-const autosaved = () => JSON.parse(storage.get("fsm-designer:autosave") ?? "null") as { dirty: boolean; filePath: string | null } | null;
+const autosaved = () => JSON.parse(storage.get("fsm-designer:autosave") ?? "null") as { doc: { states: Array<{ label?: string }> }; dirty: boolean; filePath: string | null } | null;
 
 const SEQ = `module m (input clk, input rst, input x, output reg z);
   localparam A = 1'b0, B = 1'b1;
@@ -210,6 +210,47 @@ test("discarding on close leaves the last saved diagram in the autosave, not the
   useEditor.setState({ savedDoc: null });
   discardUnsaved();
   assert.equal(storage.has("fsm-designer:autosave"), false);
+});
+
+test("a reload, closed tab or hidden page writes a pending autosave at once", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  // Node has no document either: a stand-in that can hide.
+  const doc = Object.assign(new EventTarget(), { visibilityState: "visible" });
+  (globalThis as { document?: unknown }).document = doc;
+  const stop = startAutosave();
+  try {
+    useEditor.getState().load(newDiagram(), null);
+    mock.timers.tick(300);
+    // An edit, then the page goes before the 300 ms are up.
+    useEditor.getState().edit((d) => { createState(d, 0, 0).label = "IDLE"; });
+    events.dispatchEvent(new Event("pagehide"));
+    assert.deepEqual(autosaved()?.doc.states.map((s) => s.label), ["IDLE"], "the edit is in the autosave");
+    // A save, then a reload: it comes back saved, under its name.
+    useEditor.getState().markSaved("m.fsm.json");
+    events.dispatchEvent(new Event("pagehide"));
+    assert.deepEqual([autosaved()?.dirty, autosaved()?.filePath], [false, "m.fsm.json"]);
+    // New (after Discard), then the tab is hidden and killed.
+    useEditor.getState().load(newDiagram(), null);
+    doc.visibilityState = "hidden";
+    doc.dispatchEvent(new Event("visibilitychange"));
+    assert.deepEqual([autosaved()?.doc.states.length, autosaved()?.filePath], [0, null]);
+    doc.visibilityState = "visible";
+    // Nothing due: a pagehide writes nothing (another tab may hold the slot).
+    storage.set("fsm-designer:autosave", "other tab");
+    events.dispatchEvent(new Event("pagehide"));
+    assert.equal(storage.get("fsm-designer:autosave"), "other tab");
+    // Discarded on close: the pending write held the discarded changes, so it stays cancelled.
+    useEditor.getState().load(newDiagram(), "m.fsm.json");
+    useEditor.getState().edit((d) => { createState(d, 0, 0); });
+    discardUnsaved();
+    events.dispatchEvent(new Event("pagehide"));
+    mock.timers.tick(300);
+    assert.equal(autosaved()?.doc.states.length, 0, "the discarded state does not come back");
+  } finally {
+    stop();
+    delete (globalThis as { document?: unknown }).document;
+    mock.timers.reset();
+  }
 });
 
 test("a failed autosave write is reported until a write works again", () => {

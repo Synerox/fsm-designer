@@ -234,7 +234,20 @@ export const useAutosave = create<{ failed: boolean; otherTab: boolean; overwrit
 /** True when a reload or close would lose this tab's unsaved changes even though the browser build autosaves. */
 export const autosaveLost = () => { const a = useAutosave.getState(); return a.failed || a.overwritten; };
 
+/** Set while a write is due; undefined once it has run or been cancelled. */
 let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
+
+/**
+ * Write a due autosave now. A reload or closed tab cancels the timer, and the
+ * guard stays quiet because the autosave holds the work: without this the
+ * last 300 ms of edits (or a New, a Discard, a Save) would be lost unasked.
+ */
+function flushAutosave(): void {
+  if (autosaveTimer === undefined) return;
+  clearTimeout(autosaveTimer);
+  autosaveTimer = undefined;
+  writeAutosave();
+}
 
 function writeAutosave(): void {
   const { doc, filePath, dirty } = useEditor.getState();
@@ -253,14 +266,26 @@ export function startAutosave(): () => void {
     if (s.doc === prev.doc && s.filePath === prev.filePath && s.dirty === prev.dirty) return;
     clearTimeout(autosaveTimer);
     // Write the state as it is when the timer fires, not as it was when it started.
-    autosaveTimer = setTimeout(writeAutosave, 300);
+    autosaveTimer = setTimeout(() => { autosaveTimer = undefined; writeAutosave(); }, 300);
   });
   // Fired only by other tabs (key null: they cleared storage).
   const onStorage = (e: StorageEvent) => {
     if (e.key === AUTOSAVE_KEY || e.key === null) useAutosave.setState({ otherTab: true, overwritten: true });
   };
+  // pagehide comes with every reload, close and navigation; a hidden tab may
+  // be killed without one (mobile, or a discarded background tab).
+  const onHidden = () => { if (globalThis.document?.visibilityState !== "visible") flushAutosave(); };
   globalThis.addEventListener?.("storage", onStorage);
-  return () => { clearTimeout(autosaveTimer); unsub(); globalThis.removeEventListener?.("storage", onStorage); };
+  globalThis.addEventListener?.("pagehide", flushAutosave);
+  globalThis.document?.addEventListener("visibilitychange", onHidden);
+  return () => {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = undefined;
+    unsub();
+    globalThis.removeEventListener?.("storage", onStorage);
+    globalThis.removeEventListener?.("pagehide", flushAutosave);
+    globalThis.document?.removeEventListener("visibilitychange", onHidden);
+  };
 }
 
 /**
@@ -268,7 +293,9 @@ export function startAutosave(): () => void {
  * next launch must not bring them back: it opens what was last saved.
  */
 export function discardUnsaved(): void {
+  // Cancelled, not flushed: the pending write holds the discarded changes.
   clearTimeout(autosaveTimer);
+  autosaveTimer = undefined;
   const { savedDoc, filePath } = useEditor.getState();
   try {
     // No savedDoc: an import or restored session that was never written anywhere.
