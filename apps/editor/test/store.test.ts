@@ -207,6 +207,40 @@ test("typing on a merged line edits the transition whose text was clicked, with 
   assert.deepEqual(lineOwners(d, [t0, t1, t2]), [0, 0]);
 });
 
+test("a pasted state never shows the same text as another; typed text never names a state after a signal or keyword", async () => {
+  const { copySelection, pasteClipboard } = await import("../src/store.ts");
+  const { stateText } = await import("@fsm/core");
+  const d = newDiagram();
+  const a = createState(d, 0, 0), b = createState(d, 100, 0);
+  setStateText(d, a.id, "S₀");
+  setStateText(d, b.id, "IDLE");
+  copySelection(d, { kind: "multi", states: [a.id, b.id], edges: [], initial: false });
+  pasteClipboard(d);
+  pasteClipboard(d);
+  assert.deepEqual(d.states.map(stateText), ["S₀", "IDLE", "S₀_1", "IDLE_1", "S₀_2", "IDLE_2"]);
+  assert.deepEqual(d.states.map((s) => s.name), ["S_0", "IDLE", "S_0_1", "IDLE_1", "S_0_2", "IDLE_2"]);
+  // An unlabelled state whose name another state shows as its label.
+  const e = newDiagram();
+  const c = createState(e, 0, 0);
+  setStateText(e, c.id, "A");
+  e.states[0].name = "S9"; e.states[0].label = "A";
+  const f = newDiagram();
+  setStateText(f, createState(f, 0, 0).id, "A");
+  copySelection(f, { kind: "state", id: f.states[0].id });
+  pasteClipboard(e);
+  assert.deepEqual(e.states.map(stateText), ["A", "A_1"]);
+
+  const g = newDiagram();
+  g.inputs.push({ name: "x", width: 1 });
+  const s = createState(g, 0, 0);
+  for (const text of ["x", "clk", "rst_n", "module", "State_Diagram", "next_state"]) {
+    setStateText(g, s.id, text);
+    assert.deepEqual([g.states[0].name, g.states[0].label], ["S0", text], `"${text}" is drawn but is not the identifier`);
+  }
+  setStateText(g, s.id, "x1");
+  assert.deepEqual([g.states[0].name, g.states[0].label], ["x1", undefined]);
+});
+
 test("align and spread states", async () => {
   const { alignStates } = await import("../src/store.ts");
   const d = newDiagram();

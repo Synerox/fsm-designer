@@ -187,16 +187,40 @@ export function createTransition(d: FsmDiagram, from: string, to: string, loopAn
   t.priority = p;
 }
 
+/** Verilog-2005 reserved words (IEEE 1364-2005 Annex B): never a state's identifier. */
+const VERILOG_KEYWORDS = new Set(`always and assign automatic begin buf bufif0 bufif1 case casex casez cell cmos config
+  deassign default defparam design disable edge else end endcase endconfig endfunction endgenerate endmodule
+  endprimitive endspecify endtable endtask event for force forever fork function generate genvar highz0 highz1 if
+  ifnone incdir include initial inout input instance integer join large liblist library localparam macromodule medium
+  module nand negedge nmos nor noshowcancelled not notif0 notif1 or output parameter pmos posedge primitive pull0
+  pull1 pulldown pullup pulsestyle_ondetect pulsestyle_onevent rcmos real realtime reg release repeat rnmos rpmos
+  rtran rtranif0 rtranif1 scalared showcancelled signed small specify specparam strong0 strong1 supply0 supply1 table
+  task time tran tranif0 tranif1 tri tri0 tri1 triand trior trireg unsigned use uwire vectored wait wand weak0 weak1
+  while wire wor xnor xor`.split(/\s+/));
+
+/**
+ * Whether `name` can be a state's identifier besides `s`: not another
+ * state's, and not a name the generated module already uses (a signal, the
+ * clock or reset, the module itself, the state registers) or a Verilog
+ * keyword, which would read as that signal in conditions or break codegen.
+ */
+function freeForState(d: FsmDiagram, s: State, name: string): boolean {
+  if (!IDENT.test(name) || d.states.some((x) => x !== s && x.name === name)) return false;
+  const used = [...d.inputs, ...d.outputs].map((x) => x.name).concat(d.clock.name, d.reset.name, d.name, "state", "next_state");
+  return !used.includes(name) && !VERILOG_KEYWORDS.has(name);
+}
+
 /**
  * Set the text drawn on a state. Plain identifiers ("IDLE") become the state's
  * name; anything else ("S₀", "β", "q 1", "") is kept as a display label, and
- * its ASCII spelling ("S_0", "beta") becomes the name when that is usable.
+ * its ASCII spelling ("S_0", "beta") becomes the name when that is usable
+ * (see freeForState; text that isn't, such as an input's name, is a label too).
  */
 export function setStateText(d: FsmDiagram, id: string, text: string): void {
   const s = d.states.find((x) => x.id === id);
   if (!s) return;
   const ascii = asciiText(text);
-  const usable = IDENT.test(ascii) && !d.states.some((x) => x !== s && x.name === ascii) && !["state", "next_state"].includes(ascii);
+  const usable = freeForState(d, s, ascii);
   if (usable) s.name = ascii;
   if (usable && ascii === text) delete s.label;
   else s.label = text;
@@ -410,7 +434,7 @@ export function hasClipboard(): boolean {
 
 /**
  * Paste the clipboard into `d`, offset down-right a little more each time,
- * with fresh ids and names (S0 -> S0_1 when S0 exists). Pasted states are
+ * with fresh ids, names and labels (S0 -> S0_1 when S0 exists). Pasted states are
  * never initial. Returns the selection of what was pasted.
  *
  * The clipboard outlives File > New and Open, so the target may not declare
@@ -436,6 +460,8 @@ export function pasteClipboard(d: FsmDiagram): Selection {
   const keepDeclared = (outs: Record<string, unknown>) => { for (const k of Object.keys(outs)) if (!declared("outputs", k)) delete outs[k]; };
   const off = 40 * ++pasteCount; // two grid cells, so grid-aligned states stay aligned
   const names = new Set(d.states.map((s) => s.name));
+  // Text drawn on the states: a pasted copy must not look the same as its original.
+  const shown = new Set(d.states.map((s) => stateText(s)));
   const ids = new Set(d.states.map((s) => s.id));
   const idMap = new Map<string, string>();
   const fresh = (base: string, taken: Set<string>) => {
@@ -447,13 +473,17 @@ export function pasteClipboard(d: FsmDiagram): Selection {
   for (const src of clipboard.states) {
     const s = structuredClone(src);
     s.id = fresh(`s${d.states.length}`, ids);
-    s.name = fresh(src.name, names);
+    // A label ("S₀") gets the same kind of suffix as a name ("S₀_1"); a state
+    // drawn by its name keeps clear of other states' labels too.
+    if (src.label) s.label = fresh(src.label, shown);
+    s.name = fresh(src.name, src.label ? names : new Set([...names, ...shown]));
     s.x = (src.x ?? 0) + off;
     s.y = (src.y ?? 0) + off;
     s.isInitial = false;
     keepDeclared(s.outputs);
     ids.add(s.id);
     names.add(s.name);
+    shown.add(stateText(s));
     idMap.set(src.id, s.id);
     d.states.push(s);
   }
