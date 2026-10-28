@@ -151,3 +151,34 @@ endmodule`);
   assert.deepEqual(r.diagram.inputs.map((s) => s.name), ["a"]);
   assert.deepEqual(r.warnings, []);
 });
+
+test("a registered output that copies an input goes on the transitions, not into the state", () => {
+  const r = importVerilog(`
+module m(input clk, input rst_n, input a, input b, output reg y);
+  localparam S0 = 0, S1 = 1;
+  reg s;
+  always @(posedge clk or negedge rst_n)
+    if (!rst_n) begin s <= S0; y <= 0; end
+    else case (s)
+      S0: if (a) begin s <= S1; y <= b; end else y <= 0;
+      S1: begin s <= S0; y <= 0; end
+    endcase
+endmodule`);
+  assert.equal(r.machine, "mealy");
+  assert.deepEqual(stateOutputs(r.diagram).S1, {});
+  assert.ok(edges(r.diagram).includes("S0->S1: a && b / y=1"), edges(r.diagram).join("\n"));
+  assert.ok(r.warnings.some((w) => /Registered output "y"/.test(w)));
+  const w = importVerilog(`
+module m(input clk, input rst_n, input a, input [3:0] din, output reg [3:0] dout);
+  localparam S0 = 0, S1 = 1;
+  reg s;
+  always @(posedge clk or negedge rst_n)
+    if (!rst_n) begin s <= S0; dout <= 0; end
+    else case (s)
+      S0: if (a) begin s <= S1; dout <= din; end
+      S1: s <= S0;
+    endcase
+endmodule`);
+  assert.deepEqual(w.mealyOutputs, ["dout"]);
+  assert.ok(edges(w.diagram).includes("S0->S1: a / dout=din"), edges(w.diagram).join("\n"));
+});

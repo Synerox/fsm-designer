@@ -834,6 +834,9 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
     resetValue = order[0];
   }
   const runsByState = new Map<string, Run[]>();
+  // Registered outputs that take an input's value at the clock edge (dout <=
+  // din): the same text on every entry into a state is not the same value.
+  const regFromInputs = new Set<string>();
   for (let i = 0; i < order.length; i++) {
     if (order.length > 256) throw new VerilogImportError(`More than 256 states reached from "${R}"; is it really a state register?`);
     const s = order[i];
@@ -861,18 +864,20 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
         else if (nv.k === "id" && nv.name === N) c.warn(`"${N}" is not assigned on every path of state ${names.get(s.toString()) ?? s}; assumed to stay`);
         else { c.warn(`Next state of ${names.get(s.toString()) ?? s} is not a constant (${printExpr(nv)}); that case is left out`); continue; }
       }
-      // Split 1-bit combinational outputs that still depend on inputs (z = x
-      // becomes z=1 on x, z=0 on !x). Values computed from internal data or
-      // functions (tx = shreg[0], tx = parity(d)) are shown as written.
+      // Split 1-bit outputs that still depend on inputs (z = x becomes z=1 on
+      // x, z=0 on !x), combinational or registered (y <= b holds the b sampled
+      // at the transition, not the live b). Values computed from internal data
+      // or functions (tx = shreg[0], tx = parity(d)) are shown as written.
       let forks: Path[] = [p];
-      for (const o of combOut) {
+      for (const o of [...combOut, ...regOut]) {
         if ((c.widths.get(o) ?? 1) !== 1) continue;
+        const env = combOut.has(o) ? "env" : "nb";
         forks = forks.flatMap((q) => {
-          const v = q.env.get(o);
+          const v = q[env].get(o);
           if (!v) return [q];
           const sv = simplify(v, eng.ctx(q));
           if (isConst(sv) || !fromPorts(sv)) return [q];
-          return eng.branch(q, sv).map(([r, b]) => { r.env.set(o, num(b ? 1 : 0, 1)); return r; });
+          return eng.branch(q, sv).map(([r, b]) => { r[env].set(o, num(b ? 1 : 0, 1)); return r; });
         });
       }
       for (const q of forks) {
@@ -880,7 +885,12 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
         const combVals = new Map<string, OutputValue>();
         for (const o of combOut) { const v = q.env.get(o); if (v) combVals.set(o, outputValue(simplify(v, qctx), c.widths.get(o) ?? 1)); }
         const regVals = new Map<string, OutputValue | undefined>();
-        for (const o of regOut) { const v = q.nb.get(o); regVals.set(o, v ? outputValue(simplify(v, qctx), c.widths.get(o) ?? 1) : undefined); }
+        for (const o of regOut) {
+          const v = q.nb.get(o);
+          const sv = v && simplify(v, qctx);
+          regVals.set(o, sv ? outputValue(sv, c.widths.get(o) ?? 1) : undefined);
+          if (sv && !isConst(sv) && [...freeIds(sv)].some((n) => m.decls.get(n)?.dir === "input")) regFromInputs.add(o);
+        }
         runs.push({ assume: q.assume, next, comb: combVals, reg: regVals });
         enqueue(next);
       }
@@ -930,7 +940,7 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
     }
     const rv = resetRegOutputs.get(o);
     if (rv !== undefined) byDest.set(resetValue.toString(), [...(byDest.get(resetValue.toString()) ?? []), rv]);
-    const consistent = [...byDest.values()].every((vs) => vs.every((v) => sameValue(v, vs[0])));
+    const consistent = !regFromInputs.has(o) && [...byDest.values()].every((vs) => vs.every((v) => sameValue(v, vs[0])));
     if (consistent) {
       if (!byDest.size) continue;
       moore.add(o);
