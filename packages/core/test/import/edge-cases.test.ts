@@ -3,7 +3,7 @@
 // less common FSM styles, long case statements, deep nesting).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { importVerilog, listStateMachines, parseExpression } from "../../src/import/index.ts";
+import { importVerilog, listStateMachines, parseExpression, VerilogImportError } from "../../src/import/index.ts";
 import { simplify } from "../../src/import/expr.ts";
 import type { FsmDiagram } from "../../src/model.ts";
 
@@ -364,4 +364,22 @@ module m(input clk, input rst, input go, output busy);
   assign busy = st[4];
 endmodule`);
   assert.deepEqual(stateOutputs(o.diagram), { A: { busy: 0 }, B: { busy: 0 }, C: { busy: 1 } });
+});
+
+test("code nested too deeply for the stack fails with a VerilogImportError", () => {
+  const depth = 20000;
+  const nested = `
+module m(input clk, input rst, input a, output y);
+  localparam S0 = 0, S1 = 1; reg s;
+  always @(posedge clk) if (rst) s <= S0; else ${"begin ".repeat(depth)} s <= a ? S1 : S0; ${"end ".repeat(depth)}
+  assign y = s;
+endmodule`;
+  assert.throws(() => importVerilog(nested), (e: Error) => e instanceof VerilogImportError && /nested too deeply/.test(e.message));
+  const parens = `
+module m(input clk, input rst, input a, output y);
+  localparam S0 = 0, S1 = 1; reg s;
+  always @(posedge clk) if (rst) s <= S0; else if (${"(".repeat(depth)}a${")".repeat(depth)}) s <= S1; else s <= S0;
+  assign y = s;
+endmodule`;
+  assert.throws(() => importVerilog(parens), (e: Error) => e instanceof VerilogImportError && /nested too deeply/.test(e.message));
 });
