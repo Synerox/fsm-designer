@@ -1,5 +1,5 @@
 // The layout taste test tools (tools/layout-taste-test): make-pairs.ts writes
-// a working page. Each
+// a working page, and apply-picks.ts reports what it did to the fixture. Each
 // test runs the real script from a copy under a folder with a space in its
 // name, next to a link to the core source, so the repo's own out/ folder and
 // preferences.json are never touched.
@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import type { FsmDiagram } from "../../src/index.ts";
 
 const TOOLS = fileURLToPath(new URL("../../../../tools/layout-taste-test/", import.meta.url));
 const CORE_SRC = fileURLToPath(new URL("../../src/", import.meta.url));
@@ -62,3 +63,30 @@ export function machines(): Array<[string, FsmDiagram]> {
     assert.ok(existsSync(join(box.tool, "out", "pairs.json")));
   } finally { box.done(); }
 });
+
+test("apply-picks: re-running a round replaces its pairs, says so, and counts what it wrote; bad picks are reported", () => {
+  const box = sandbox(["apply-picks.ts"]);
+  try {
+    const prefs = JSON.parse(readFileSync(new URL("./fixtures/preferences.json", import.meta.url), "utf8")) as Array<{ id: string; machine: string; stepA: number; stepB: number; a: FsmDiagram; b: FsmDiagram }>;
+    const side = (diagram: FsmDiagram, step: number) => ({ arrangement: "x", step, diagram });
+    const pairs = prefs.slice(0, 3).map((p, i) => ({ id: `p0${i + 1}`, machine: p.machine, a: side(p.a, p.stepA), b: side(p.b, p.stepB) }));
+    const fixture = join(box.root, "packages", "core", "test", "layout", "fixtures", "preferences.json");
+    writeFileSync(fixture, JSON.stringify(prefs.slice(0, 5)));
+    writeFileSync(join(box.root, "pairs.json"), JSON.stringify(pairs));
+    writeFileSync(join(box.root, "picks.json"), JSON.stringify({ p01: "a", p02: { choice: "b" }, p03: "same", p99: "a", p04: "x" }));
+    const first = node(box, "apply-picks.ts", ["pairs.json", "picks.json", "r-test"]);
+    assert.match(first.stdout, /of 2 picks; fixture now holds 7 pairs/);
+    assert.equal(JSON.parse(readFileSync(fixture, "utf8")).length, 7);
+    assert.doesNotMatch(first.stderr, /replaced/);
+    // The same round again: its 2 pairs are replaced, not added.
+    const r = node(box, "apply-picks.ts", ["pairs.json", "picks.json", "r-test"]);
+    assert.match(r.stdout, /of 2 picks; fixture now holds 7 pairs/);
+    assert.equal(JSON.parse(readFileSync(fixture, "utf8")).length, 7);
+    assert.match(r.stderr, /replaced 2 pairs already in the fixture under round "r-test"/);
+    assert.match(r.stderr, /p99 is not a pair/);
+    assert.match(r.stderr, /p04 is not a pair/);
+    writeFileSync(join(box.root, "picks.json"), JSON.stringify({ p01: "x" }));
+    assert.match(node(box, "apply-picks.ts", ["pairs.json", "picks.json", "r-test2"]).stderr, /p01 has pick "x"/);
+  } finally { box.done(); }
+});
+
