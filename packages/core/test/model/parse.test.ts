@@ -3,7 +3,7 @@
 // renderer later. Diagrams come from hand-written and agent-written JSON too.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { addState, addTransition, createDiagram, FsmError, parseDiagram, renderSvg, updateState, updateTransition } from "../../src/index.ts";
+import { addState, addTransition, createDiagram, describe, FsmError, parseDiagram, renderSvg, updateState, updateTransition } from "../../src/index.ts";
 
 const base = { version: 1, name: "m", type: "moore", inputs: ["a"], outputs: ["z"] };
 const parse = (extra: object) => parseDiagram({ ...base, ...extra });
@@ -119,4 +119,11 @@ test("output values must be numbers, text or booleans; null in an update removes
   const t = addTransition(m, { from: "A", to: "A", outputs: { y: 1 } });
   updateTransition(m, t.id, { outputs: { y: null as unknown as number } });
   assert.deepEqual(t.outputs, {});
+});
+
+test("describe shows labels and prints booleans as 1/0 like the drawing", () => {
+  const d = parse({ outputs: [{ name: "z" }], states: [{ name: "A", label: "S₀", isInitial: true, outputs: { z: true } }, { name: "B", label: "" }] });
+  const text = describe(d);
+  assert.match(text, /s0 A label "S₀" \[initial\] outputs: z=1/);
+  assert.match(text, /s1 B label ""/);
 });

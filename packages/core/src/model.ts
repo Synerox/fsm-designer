@@ -501,7 +501,8 @@ export function validate(d: FsmDiagram): ValidationIssue[] {
 export function describe(d: FsmDiagram): string {
   const nm = (id: string) => d.states.find((s) => s.id === id)?.name ?? id;
   const sig = (s: Signal) => (s.width > 1 ? `${s.name}[${s.width - 1}:0]` : s.name);
-  const outs = (o: Record<string, OutputValue>) => Object.entries(o).map(([k, v]) => `${k}=${v}`).join(", ");
+  // Booleans as 1/0, as the drawing shows them (formatOutputs in metrics.ts).
+  const outs = (o: Record<string, OutputValue>) => Object.entries(o).map(([k, v]) => `${k}=${typeof v === "boolean" ? Number(v) : v}`).join(", ");
   const lines = [
     `Diagram "${d.name}" (${d.type}), ${d.states.length} states, ${d.transitions.length} transitions`,
     `Inputs: ${d.inputs.map(sig).join(", ") || "none"}`,
@@ -509,7 +510,7 @@ export function describe(d: FsmDiagram): string {
     `Clock: ${d.clock.name}, reset: ${d.reset.name} (${d.reset.activeLow ? "active-low" : "active-high"}, ${d.reset.async ? "async" : "sync"})`,
     "States:",
     ...d.states.map((s) =>
-      `  ${s.id} ${s.name}${s.isInitial ? " [initial]" : ""}${s.isAccepting ? " [accepting]" : ""}${s.x !== undefined && s.y !== undefined ? ` @(${Math.round(s.x)},${Math.round(s.y)})` : ""}${Object.keys(s.outputs).length ? ` outputs: ${outs(s.outputs)}` : ""}`),
+      `  ${s.id} ${s.name}${s.label !== undefined ? ` label ${JSON.stringify(s.label)}` : ""}${s.isInitial ? " [initial]" : ""}${s.isAccepting ? " [accepting]" : ""}${s.x !== undefined && s.y !== undefined ? ` @(${Math.round(s.x)},${Math.round(s.y)})` : ""}${Object.keys(s.outputs).length ? ` outputs: ${outs(s.outputs)}` : ""}`),
     "Transitions:",
     ...d.transitions.map((t) =>
       `  ${t.id} ${nm(t.from)} -> ${nm(t.to)} when ${t.condition || "(always)"}${t.priority !== undefined ? ` (priority ${t.priority})` : ""}${Object.keys(t.outputs).length ? ` / ${outs(t.outputs)}` : ""}`),
