@@ -8,12 +8,10 @@
 
 [![Deploy](https://github.com/Synerox/fsm-designer/actions/workflows/pages.yml/badge.svg)](https://github.com/Synerox/fsm-designer/actions/workflows/pages.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![Platform](https://img.shields.io/badge/platform-Web%20%7C%20Windows-lightgrey)
+![Platform](https://img.shields.io/badge/platform-Web-lightgrey)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?logo=typescript&logoColor=white)
-![Tauri](https://img.shields.io/badge/Tauri-2-24c8db?logo=tauri&logoColor=white)
 
 [**Try it online**](https://synerox.github.io/fsm-designer/) ·
-[Download for Windows](https://github.com/Synerox/fsm-designer/releases/latest) ·
 [How auto-layout works](docs/auto-layout.md) ·
 [MCP server](apps/mcp-server/README.md) ·
 [繁體中文](README.md)
@@ -41,19 +39,15 @@ FSM Designer does this one job well:
 | 🔌 **Verilog import** | Analyses Verilog/SystemVerilog (no AI guessing) to find the state register, reset state and every transition's condition, and tells Moore outputs from Mealy outputs. |
 | 🧭 **One-click auto-layout** | Tries several layouts and picks the best with a score tuned against real user preferences. |
 | 📤 **Export** | PNG, SVG, LaTeX (TikZ `automata`) and `.fsm.json`. Line labels can be shown or hidden, and exports follow the same setting. |
-| 🤖 **AI-ready** | A bundled MCP server lets Claude and other agents create, edit, import, lay out and export diagrams. Their files open straight in the desktop app. |
+| 🤖 **AI-ready** | A bundled MCP server lets Claude and other agents create, edit, import, lay out and export diagrams. Their files open straight in the web app. |
 | 🌏 **Three languages** | English, Traditional Chinese and Japanese. |
-| 💻 **Web and desktop** | The web version needs no install. The Windows app is a few MB and opens and saves `.fsm.json` files directly. |
+| 💻 **No install** | It runs in the browser and keeps your diagram there between visits. |
 
 ## Getting started
 
 ### Online
 
 Open **<https://synerox.github.io/fsm-designer/>**. Nothing to install and no sign-in. Your diagram is kept in the browser, and saving or exporting downloads a file.
-
-### Windows desktop app
-
-Download `FSM Designer_x.y.z_x64-setup.exe` from [Releases](https://github.com/Synerox/fsm-designer/releases/latest) and run it. The installed folder holds a single `FSM Designer.exe`; that is expected, since the whole editor is bundled inside and rendered by Windows' built-in WebView2.
 
 ### From source
 
@@ -63,7 +57,7 @@ Requires [Node.js](https://nodejs.org/) 22.18 or later (the tests and tools run 
 git clone https://github.com/Synerox/fsm-designer.git
 cd fsm-designer
 pnpm install
-pnpm dev:web      # opens http://localhost:5173
+pnpm dev          # opens http://localhost:5173
 ```
 
 ## Using the editor
@@ -110,7 +104,7 @@ Pick a format from the **File** menu:
 | **PNG** | Slides, documents, homework |
 | **SVG** | Vector graphics that scale cleanly and can be edited in Inkscape or Illustrator |
 | **LaTeX (TikZ)** | A TikZ picture that compiles with `pdflatex`, ready for reports and papers; labels in Chinese, Japanese or Korean need `xelatex` or `lualatex` (the file then loads `ctex`). Characters the font lacks print blank: ctex's default font on Linux and Overleaf, Fandol, has no Korean and misses some Traditional Chinese (綠, 黃), so uncomment the `\setCJKmainfont{Noto Serif CJK TC}` line in the preamble or name a CJK font you have |
-| **.fsm.json** | The project file; the web app, desktop app and MCP server all share this format |
+| **.fsm.json** | The project file; the web app and MCP server share this format |
 
 An excerpt of the LaTeX for a 1011 sequence detector:
 
@@ -162,8 +156,7 @@ A pnpm monorepo:
 fsm-designer/
 ├─ packages/core/        shared core: data model, auto-layout, Verilog import, SVG/PNG/LaTeX export
 ├─ apps/
-│  ├─ editor/            the editor (React + Vite), shared by the web and desktop apps
-│  ├─ desktop/           Windows desktop shell (Tauri 2)
+│  ├─ editor/            the web editor (React + Vite)
 │  └─ mcp-server/        MCP server for AI agents
 ├─ tools/layout-taste-test/  builds "pick one of two" pages used to tune the layout score
 └─ docs/                 documentation and screenshots
@@ -173,16 +166,14 @@ fsm-designer/
 
 | Command | What it does |
 | --- | --- |
-| `pnpm dev:web` | Run the editor in the browser (http://localhost:5173) |
-| `pnpm dev` | Desktop app in dev mode; needs Rust and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) |
+| `pnpm dev` | Run the editor in the browser (http://localhost:5173) |
 | `pnpm test` | Build and run every test |
 | `pnpm -r build` | Build core, the editor and the MCP server |
-| `pnpm bundle` | Build the desktop installers (`apps/desktop/src-tauri/target/release/bundle/`) |
 | `pnpm taste-test` | Generate a new round of layout comparison pages |
 
 Some Verilog tests simulate the original code with [Icarus Verilog](https://steveicarus.github.io/iverilog/) and compare it with the diagram cycle by cycle; they skip themselves when `iverilog` isn't installed.
 
-GitHub Actions runs every test (with Icarus Verilog installed) on each pull request. Pushing to `main` runs the tests and deploys the web app to GitHub Pages. Pushing a `v*` tag runs the tests, checks that the tag matches the app version, then builds the Windows installers and publishes them on Releases.
+GitHub Actions runs every test (with Icarus Verilog installed) on each pull request. Pushing to `main` runs the tests and deploys the web app to GitHub Pages.
 
 ## Contributing
 

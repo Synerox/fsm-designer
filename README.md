@@ -8,12 +8,10 @@
 
 [![Deploy](https://github.com/Synerox/fsm-designer/actions/workflows/pages.yml/badge.svg)](https://github.com/Synerox/fsm-designer/actions/workflows/pages.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![Platform](https://img.shields.io/badge/platform-Web%20%7C%20Windows-lightgrey)
+![Platform](https://img.shields.io/badge/platform-Web-lightgrey)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?logo=typescript&logoColor=white)
-![Tauri](https://img.shields.io/badge/Tauri-2-24c8db?logo=tauri&logoColor=white)
 
 [**線上試用**](https://synerox.github.io/fsm-designer/) ·
-[下載桌面版](https://github.com/Synerox/fsm-designer/releases/latest) ·
 [自動排版原理](docs/auto-layout.md) ·
 [MCP server](apps/mcp-server/README.md) ·
 [English](README.en.md)
@@ -41,19 +39,15 @@ FSM Designer 專門做這一件事：
 | 🔌 **從 Verilog 匯入** | 分析 Verilog／SystemVerilog 程式碼（不靠 AI 猜），找出狀態暫存器、reset 狀態、每條轉移的條件，並自動判斷 Moore 或 Mealy 輸出。 |
 | 🧭 **一鍵自動排版** | 比較多種排法，用一套依使用者實際偏好調整過的評分挑出最好的一種。 |
 | 📤 **多種匯出格式** | PNG、SVG、LaTeX（TikZ `automata`）與 `.fsm.json`。線上的文字可以全部顯示或隱藏，匯出時照同樣的設定。 |
-| 🤖 **AI 也能畫** | 內建 MCP server，Claude 等 AI agent 可以建立、修改、匯入、排版並匯出狀態圖，畫好的檔案能直接用桌面版打開繼續改。 |
+| 🤖 **AI 也能畫** | 內建 MCP server，Claude 等 AI agent 可以建立、修改、匯入、排版並匯出狀態圖，畫好的檔案能直接用網頁版打開繼續改。 |
 | 🌏 **三種語言** | 介面支援 English、繁體中文、日本語。 |
-| 💻 **網頁版與桌面版** | 網頁版免安裝；Windows 桌面版只有幾 MB，可以直接開啟、儲存 `.fsm.json` 檔。 |
+| 💻 **網頁版免安裝** | 打開瀏覽器就能用，圖會自動保存在瀏覽器裡。 |
 
 ## 快速開始
 
 ### 線上版
 
 打開 **<https://synerox.github.io/fsm-designer/>** 就能使用，不需要安裝或登入。圖會自動保存在瀏覽器裡，存檔與匯出會以下載檔案的方式儲存。
-
-### Windows 桌面版
-
-到 [Releases](https://github.com/Synerox/fsm-designer/releases/latest) 下載 `FSM Designer_x.y.z_x64-setup.exe` 並執行。安裝後只會有一個 `FSM Designer.exe`，這是正常的：整個編輯器都包在裡面，畫面用 Windows 內建的 WebView2 顯示。
 
 ### 從原始碼執行
 
@@ -63,7 +57,7 @@ FSM Designer 專門做這一件事：
 git clone https://github.com/Synerox/fsm-designer.git
 cd fsm-designer
 pnpm install
-pnpm dev:web      # 在瀏覽器開啟 http://localhost:5173
+pnpm dev          # 在瀏覽器開啟 http://localhost:5173
 ```
 
 ## 操作方式
@@ -110,7 +104,7 @@ pnpm dev:web      # 在瀏覽器開啟 http://localhost:5173
 | **PNG** | 貼進簡報、文件或作業 |
 | **SVG** | 向量圖，放大不失真，可以再用 Inkscape／Illustrator 修改 |
 | **LaTeX (TikZ)** | 產生可用 `pdflatex` 編譯的 TikZ 圖，可以直接放進報告或論文；標籤含中日韓文字時改用 `xelatex` 或 `lualatex`（檔頭會載入 `ctex`）；字型缺的字會印成空白，`ctex` 在 Linux 與 Overleaf 的預設字型 Fandol 沒有韓文、也缺部分繁體字（如「綠」「黃」），這時取消檔頭 `\setCJKmainfont{Noto Serif CJK TC}` 那一行的註解，或換成你有的 CJK 字型 |
-| **.fsm.json** | 專案檔，桌面版、網頁版與 MCP server 都讀寫同一種格式 |
+| **.fsm.json** | 專案檔，網頁版與 MCP server 都讀寫同一種格式 |
 
 以 1011 序列偵測器為例，匯出的 LaTeX 節錄如下：
 
@@ -162,8 +156,7 @@ Claude Desktop 的設定方式與所有工具的說明見 [apps/mcp-server/READM
 fsm-designer/
 ├─ packages/core/        共用核心：資料模型、自動排版、Verilog 匯入、SVG／PNG／LaTeX 匯出
 ├─ apps/
-│  ├─ editor/            編輯器（React + Vite），網頁版與桌面版共用
-│  ├─ desktop/           Windows 桌面版外殼（Tauri 2）
+│  ├─ editor/            網頁版編輯器（React + Vite）
 │  └─ mcp-server/        給 AI agent 用的 MCP server
 ├─ tools/layout-taste-test/  產生「兩種排法選一個」的比較頁，用來調整排版分數
 └─ docs/                 說明文件與截圖
@@ -173,16 +166,14 @@ fsm-designer/
 
 | 指令 | 說明 |
 | --- | --- |
-| `pnpm dev:web` | 在瀏覽器執行編輯器（http://localhost:5173） |
-| `pnpm dev` | 桌面版開發模式，需要 Rust 與 [Tauri 的系統需求](https://tauri.app/start/prerequisites/) |
+| `pnpm dev` | 在瀏覽器執行編輯器（http://localhost:5173） |
 | `pnpm test` | 建置並執行所有測試 |
 | `pnpm -r build` | 建置 core、編輯器與 MCP server |
-| `pnpm bundle` | 產生桌面版安裝檔（`apps/desktop/src-tauri/target/release/bundle/`） |
 | `pnpm taste-test` | 產生新一輪的排版比較頁 |
 
 部分 Verilog 測試會用 [Icarus Verilog](https://steveicarus.github.io/iverilog/) 逐拍比對狀態圖與原始程式碼，沒有安裝 `iverilog` 時會自動略過。
 
-GitHub Actions 會在每個 pull request 執行全部測試（裝好 Icarus Verilog）；推送到 `main` 時會執行測試並把網頁版部署到 GitHub Pages；推送 `v*` 標籤時會先執行測試、確認標籤和版本號一致，再建置 Windows 安裝檔並發布到 Releases。
+GitHub Actions 會在每個 pull request 執行全部測試（裝好 Icarus Verilog）；推送到 `main` 時會執行測試並把網頁版部署到 GitHub Pages。
 
 ## 參與貢獻
 

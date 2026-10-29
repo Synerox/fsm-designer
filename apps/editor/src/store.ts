@@ -25,7 +25,7 @@ interface EditorState {
   selection: Selection;
   past: FsmDiagram[];
   future: FsmDiagram[];
-  filePath: string | null; // desktop: absolute path; browser: file name
+  filePath: string | null; // the name the diagram was opened or saved as
   dirty: boolean;
   /** The doc as last loaded or saved (null if that is not on disk, e.g. an import), so undo back to it is clean. */
   savedDoc: FsmDiagram | null;

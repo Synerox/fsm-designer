@@ -8,8 +8,8 @@ import { Hints } from "./Hints.tsx";
 import { Inspector } from "./Inspector.tsx";
 import { Menu } from "./Menu.tsx";
 import { ImportReport, VerilogImportDialog } from "./VerilogImport.tsx";
-import { autosaveLost, discardMessage, discardUnsaved, exportLatex, exportPng, exportSvg, latexText, newFile, openFile, restoreSession, saveDoc, startAutosave, tidyUp, useAutosave } from "./actions.ts";
-import { baseName, copyText, guardWindowClose, isDesktop, setWindowTitle } from "./platform.ts";
+import { autosaveLost, exportLatex, exportPng, exportSvg, latexText, newFile, openFile, restoreSession, saveDoc, startAutosave, tidyUp, useAutosave } from "./actions.ts";
+import { baseName, copyText, guardWindowClose, setWindowTitle } from "./platform.ts";
 import { PRESSABLE, deleteCopied, deletesSelection, keyPressesButton, ownsKeys, snapCaret, stepCaret, typedText } from "./keys.ts";
 import { modalOpen, useModal } from "./dialog.ts";
 import { drawOptions, selectionParts, copySelection, deleteSelection, editedTransition, getStateText, hasClipboard, pasteClipboard, selectAll, setEdgeText, typeStateText, useEditor } from "./store.ts";
@@ -73,7 +73,7 @@ export function App() {
   const setLabels = useEditor((s) => s.setLabels);
   const { undo, redo } = useEditor.getState();
   // The browser build relies on its autosave; say so when that copy is not this tab's work.
-  const storageProblem = useAutosave((a) => (isDesktop ? null : a.failed ? "failed" : a.otherTab ? "otherTab" : null));
+  const storageProblem = useAutosave((a) => (a.failed ? "failed" : a.otherTab ? "otherTab" : null));
   // The status bar can cut it short, so the title keeps it readable in full.
   const storageWarn = storageProblem === "failed" ? tr("This browser is not keeping your changes; save the file to keep them", "瀏覽器沒有保存你的變更，請存檔以免遺失", "このブラウザーには変更が保存されていません。ファイルを保存してください")
     : storageProblem === "otherTab" ? tr("Another tab has also autosaved here: a reload brings back the diagram edited last", "另一個分頁也在這裡自動保存過：重新整理後只會還原最後編輯的那張圖", "別のタブもここに自動保存しました。再読み込みすると最後に編集した図が戻ります")
@@ -129,12 +129,12 @@ export function App() {
     restoreSession().catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
     const stopAutosave = startAutosave();
     // In a browser a reload or closed tab is safe while the autosave holds the work.
-    const unguard = guardWindowClose(() => useEditor.getState().dirty && (isDesktop || autosaveLost()), discardMessage, discardUnsaved);
-    return () => { stopAutosave(); void unguard.then((f) => f()); };
+    const unguard = guardWindowClose(() => useEditor.getState().dirty && autosaveLost());
+    return () => { stopAutosave(); unguard(); };
   }, []);
 
   useEffect(() => {
-    void setWindowTitle(`${dirty ? "● " : ""}${filePath ? baseName(filePath) : tr("Untitled", "未命名")} — FSM Designer`);
+    setWindowTitle(`${dirty ? "● " : ""}${filePath ? baseName(filePath) : tr("Untitled", "未命名")} — FSM Designer`);
   }, [filePath, dirty, lang]);
 
   // Selecting in the diagram drops any text selected on the page (the canvas
@@ -384,7 +384,7 @@ export function App() {
         <Inspector snap={grid.snap} />
       </main>
       <footer className="statusbar">
-        <p className="status" data-testid="status">{statusText(doc, selection)}{!isDesktop && <span className="muted"> · {tr("Saving and exporting download the file", "存檔與匯出會以下載方式儲存")}</span>}</p>
+        <p className="status" data-testid="status">{statusText(doc, selection)}<span className="muted"> · {tr("Saving and exporting download the file", "存檔與匯出會以下載方式儲存")}</span></p>
         <p className="storage-warn" role="status" data-testid="storage-warn" title={storageWarn ?? undefined}>{storageWarn}</p>
         <div className="view-controls">
           <span className="seg" role="group" aria-label={tr("Grid style", "格線樣式")} title={tr("Grid style", "格線樣式")}>
@@ -410,7 +410,7 @@ export function App() {
       {latex !== null && <LatexDialog latex={latex} onClose={() => setLatex(null)} onSave={run(async () => {
         const name = await exportLatex();
         // A published page saves .tex only as text (see saveViaHost).
-        if (name && !isDesktop && name.endsWith(".tex.txt")) setNotice(tr(`Saved as ${name}: this page can't save .tex files, so rename it to .tex`, `已存成 ${name}：這個頁面無法儲存 .tex 檔，請把副檔名改回 .tex`, `${name} として保存しました。このページは .tex を保存できないため、拡張子を .tex に変更してください`));
+        if (name && name.endsWith(".tex.txt")) setNotice(tr(`Saved as ${name}: this page can't save .tex files, so rename it to .tex`, `已存成 ${name}：這個頁面無法儲存 .tex 檔，請把副檔名改回 .tex`, `${name} として保存しました。このページは .tex を保存できないため、拡張子を .tex に変更してください`));
       })} setNotice={setNotice} />}
       {importing && (
         <VerilogImportDialog

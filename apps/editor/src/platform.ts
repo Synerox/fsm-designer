@@ -1,8 +1,6 @@
-// File access. In the Tauri desktop app this uses native dialogs and writes
-// files directly; in a plain browser it falls back to <input type=file> and
-// downloads so the editor still works for development and a future web build.
+// File access in the browser: <input type=file> to open, downloads to save
+// (or the viewer's `downloads` capability on a published claude.ai page).
 
-import type { InvokeArgs, InvokeOptions } from "@tauri-apps/api/core";
 import { modalKeys } from "./dialog.ts";
 import { tr } from "./i18n.ts";
 
@@ -11,9 +9,7 @@ export interface FileFilter {
   extensions: string[];
 }
 
-export const isDesktop = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-
-// A getter, so the native dialog shows the name in the language of the moment.
+// A getter, so the file picker shows the name in the language of the moment.
 export const FSM_FILTER: FileFilter = { get name() { return tr("FSM diagram", "FSM 狀態圖", "FSM 図"); }, extensions: ["fsm.json", "json"] };
 export const VERILOG_FILTER: FileFilter = { name: "Verilog", extensions: ["v", "sv", "vh", "svh", "txt"] };
 
@@ -26,50 +22,16 @@ export function baseName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }
 
-/**
- * A failed open or save in the UI language: which file, which of the two, and
- * why. The desktop shell rejects with "<path>: <io error>" in English.
- */
+/** A failed open or save in the UI language: which file, which of the two, and why. */
 export function fileError(action: "open" | "save", path: string, e: unknown): Error {
-  const raw = e instanceof Error ? e.message : String(e);
-  const why = reasonText(raw.startsWith(`${path}: `) ? raw.slice(path.length + 2) : raw);
+  const why = e instanceof Error ? e.message : String(e);
   const name = baseName(path);
   return new Error(action === "open"
     ? tr(`Could not open ${name}: ${why}`, `無法開啟 ${name}：${why}`, `${name} を開けませんでした：${why}`)
     : tr(`Could not save ${name}: ${why}`, `無法儲存 ${name}：${why}`, `${name} を保存できませんでした：${why}`));
 }
 
-/** The io errors people meet most, in words; anything else as the OS said it. */
-function reasonText(msg: string): string {
-  // Rust's io::Error text ends in "(os error N)": 13 is EACCES on Unix, 5 is
-  // ERROR_ACCESS_DENIED on Windows, 2 is "not found" on both.
-  if (/\(os error (13|5)\)$/.test(msg)) return tr("permission denied", "沒有權限", "アクセス権がありません");
-  if (/\(os error 2\)$/.test(msg)) return tr("the file does not exist", "檔案不存在", "ファイルが存在しません");
-  if (/did not contain valid UTF-8/.test(msg)) return tr("it is not UTF-8 text", "不是 UTF-8 文字檔", "UTF-8 のテキストではありません");
-  return msg;
-}
-
-async function readTextFile(path: string): Promise<string> {
-  try {
-    return await invoke<string>("read_text_file", { path });
-  } catch (e) {
-    throw fileError("open", path, e);
-  }
-}
-
-// Desktop file I/O goes through the shell's own commands (apps/desktop/src-tauri/src/lib.rs).
-async function invoke<T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T> {
-  const core = await import("@tauri-apps/api/core");
-  return core.invoke<T>(cmd, args, options);
-}
-
-export async function openTextFile(filters: FileFilter[]): Promise<OpenedFile | null> {
-  if (isDesktop) {
-    const { open } = await import("@tauri-apps/plugin-dialog");
-    const path = await open({ multiple: false, directory: false, filters });
-    if (typeof path !== "string") return null;
-    return { path, text: await readTextFile(path) };
-  }
+export function openTextFile(filters: FileFilter[]): Promise<OpenedFile | null> {
   return new Promise((resolve) => {
     const input = document.createElement("input");
     input.type = "file";
@@ -84,58 +46,12 @@ export async function openTextFile(filters: FileFilter[]): Promise<OpenedFile | 
 }
 
 /**
- * Desktop: read a file passed on the command line (`FSM Designer path.fsm.json`,
- * or "Open with" on Windows and Linux). The installers register no .fsm.json
- * association, and macOS hands files over as an Opened event, not argv.
- */
-export function launchFile(): Promise<OpenedFile | null> {
-  if (!isDesktop) return Promise.resolve(null);
-  // The shell hands the path out once, so a reload restores the autosave (with
-  // its unsaved edits) instead of reopening the file from disk. Within one page
-  // load every caller shares that answer: React's dev mode runs the restoring
-  // effect twice, and the second must not see "no file" and load the autosave.
-  launched ??= (async () => {
-    const path = await invoke<string | null>("launch_file");
-    if (!path) return null;
-    return { path, text: await readTextFile(path) };
-  })();
-  return launched;
-}
-
-let launched: Promise<OpenedFile | null> | undefined;
-
-/** Forget the launch file, as a new page load would (tests run several launches in one process). */
-export function forgetLaunchFile(): void {
-  launched = undefined;
-}
-
-/**
- * Save data. With `path` (desktop only) it overwrites that file silently;
- * otherwise it asks where to save. Returns the path written, or null if cancelled.
- * The data can also be a function that makes the bytes (a PNG takes up to a second to
- * render): on desktop it runs only after the save dialog, so the dialog opens
- * at once and a cancel costs nothing.
+ * Save data as a download named after `path` (the file it was opened as) or
+ * `suggestedName`. Returns the name saved under, or null if cancelled. The
+ * data can also be a function that makes the bytes (a PNG takes up to a
+ * second to render).
  */
 export async function saveFile(make: string | Uint8Array | (() => Promise<Uint8Array>), opts: { path?: string | null; suggestedName: string; filters: FileFilter[]; mime: string }): Promise<string | null> {
-  if (isDesktop) {
-    let path = opts.path ?? null;
-    if (!path) {
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      path = await save({ defaultPath: opts.suggestedName, filters: opts.filters });
-      if (!path) return null;
-    }
-    const data = typeof make === "function" ? await make() : make;
-    const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
-    // The bytes go as the raw request body: inside an args object they would be
-    // sent as a JSON array of numbers, 3.5 times their size. Header values must
-    // be ASCII, hence the encoding (lib.rs decodes it).
-    try {
-      await invoke("write_file", bytes, { headers: { "file-path": encodeURIComponent(path) } });
-    } catch (e) {
-      throw fileError("save", path, e);
-    }
-    return path;
-  }
   const data = typeof make === "function" ? await make() : make;
   const name = opts.path ? baseName(opts.path) : opts.suggestedName;
   const host = await hostDownloads();
@@ -254,53 +170,23 @@ function pageConfirm(message: string): Promise<boolean> {
   });
 }
 
-export async function setWindowTitle(title: string): Promise<void> {
+export function setWindowTitle(title: string): void {
   document.title = title;
-  if (!isDesktop) return;
-  const { getCurrentWindow } = await import("@tauri-apps/api/window");
-  await getCurrentWindow().setTitle(title);
 }
 
-let confirmsOpen = 0;
-
-export async function confirmDialog(message: string): Promise<boolean> {
-  confirmsOpen++;
-  try {
-    if (!isDesktop) return await pageConfirm(message);
-    try {
-      const { ask } = await import("@tauri-apps/plugin-dialog");
-      return await ask(message, { title: "FSM Designer", kind: "warning" });
-    } catch {
-      // The native dialog failed (e.g. not permitted): ask in the page, or the
-      // question, and closing the window, could never be answered.
-      return await pageConfirm(message);
-    }
-  } finally {
-    confirmsOpen--;
-  }
+export function confirmDialog(message: string): Promise<boolean> {
+  return pageConfirm(message);
 }
 
 /**
- * Ask before the window or tab goes while `isDirty()` is true; `onDiscard` runs
- * when the user agrees to lose the changes. Desktop asks in a dialog; a
- * browser can only show its own "Leave site?" prompt, so the caller there
- * says dirty only when the autosave does not hold the work.
+ * Ask before the tab goes while `isDirty()` is true. A browser can only show
+ * its own "Leave site?" prompt, so the caller says dirty only when the
+ * autosave does not hold the work. Returns the function that stops asking.
  */
-export async function guardWindowClose(isDirty: () => boolean, message: () => string, onDiscard: () => void): Promise<() => void> {
-  if (!isDesktop) {
-    const onUnload = (e: BeforeUnloadEvent) => { if (isDirty()) e.preventDefault(); };
-    window.addEventListener("beforeunload", onUnload);
-    return () => window.removeEventListener("beforeunload", onUnload);
-  }
-  const { getCurrentWindow } = await import("@tauri-apps/api/window");
-  return getCurrentWindow().onCloseRequested(async (e) => {
-    if (!isDirty()) return;
-    // A question is already open (an earlier close request, or New/Open's):
-    // that one is answered first. Stacked asks closed the window on any Yes.
-    if (confirmsOpen) { e.preventDefault(); return; }
-    if (await confirmDialog(message())) onDiscard();
-    else e.preventDefault();
-  });
+export function guardWindowClose(isDirty: () => boolean): () => void {
+  const onUnload = (e: BeforeUnloadEvent) => { if (isDirty()) e.preventDefault(); };
+  window.addEventListener("beforeunload", onUnload);
+  return () => window.removeEventListener("beforeunload", onUnload);
 }
 
 export async function copyText(text: string): Promise<void> {

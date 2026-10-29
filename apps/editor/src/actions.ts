@@ -3,8 +3,7 @@
 import { create } from "zustand";
 import { autoLayout, ensureLayout, fitStateSizes, importVerilogLaidOut, parseDiagram, planDiagram, prettyText, renderLatex, renderSvg, stateRadius } from "@fsm/core";
 import type { FsmDiagram, ImportOptions, ImportResult, LayoutIssue } from "@fsm/core";
-import { FSM_FILTER, baseName, confirmDialog, fileError, launchFile, openTextFile, saveFile } from "./platform.ts";
-import type { OpenedFile } from "./platform.ts";
+import { FSM_FILTER, baseName, confirmDialog, fileError, openTextFile, saveFile } from "./platform.ts";
 import { pathNumbers } from "./geometry.ts";
 import { DEFAULT_NAME, drawOptions, newDiagram, useEditor } from "./store.ts";
 
@@ -251,7 +250,6 @@ export async function pngBytes(scale = 2): Promise<Uint8Array> {
 }
 
 export async function exportPng(scale = 2): Promise<void> {
-  // The function form renders after the save dialog, not before it (desktop).
   await saveFile(() => pngBytes(scale), { suggestedName: `${stem()}.png`, filters: [{ name: tr("PNG image", "PNG 圖片", "PNG 画像"), extensions: ["png"] }], mime: "image/png" });
 }
 
@@ -323,22 +321,6 @@ export function startAutosave(): () => void {
 }
 
 /**
- * The user closed the window and chose to discard the unsaved changes, so the
- * next launch must not bring them back: it opens what was last saved.
- */
-export function discardUnsaved(): void {
-  // Cancelled, not flushed: the pending write holds the discarded changes.
-  clearTimeout(autosaveTimer);
-  autosaveTimer = undefined;
-  const { savedDoc, filePath } = useEditor.getState();
-  try {
-    // No savedDoc: an import or restored session that was never written anywhere.
-    if (savedDoc) localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({ doc: savedDoc, filePath, dirty: false }));
-    else localStorage.removeItem(AUTOSAVE_KEY);
-  } catch { /* storage off: nothing kept anyway */ }
-}
-
-/**
  * Move the autosave out of the way (kept under SET_ASIDE_KEY, which holds only
  * the latest one), so the next start is a blank diagram. The slot is emptied
  * first: with storage full the copy can fail, and a bad autosave left in place
@@ -378,8 +360,8 @@ async function parseSession(raw: string): Promise<Session> {
 }
 
 /**
- * Start-up: open the file the desktop app was launched with, else bring back
- * the autosaved session. Throws (after doing what it could) to say what failed.
+ * Start-up: bring back the autosaved session. Throws (after doing what it
+ * could) to say what failed.
  */
 export async function restoreSession(): Promise<void> {
   let raw: string | null = null;
@@ -394,26 +376,6 @@ export async function restoreSession(): Promise<void> {
       // Kept for repair by hand: the first edit overwrites the autosave slot.
       setAsideAutosave(raw);
       problem = new Error(tr(`Could not restore the last session: ${errorText(e)}`, `無法還原上次的工作：${errorText(e)}`, `前回のセッションを復元できませんでした：${errorText(e)}`));
-    }
-  }
-  let launched: OpenedFile | null = null;
-  try {
-    launched = await launchFile();
-  } catch (e) {
-    // Read errors already say which file (fileError); the session comes back instead.
-    problem = e instanceof Error ? e : new Error(String(e));
-  }
-  // The autosave is the only copy of work that a crash or kill left unsaved,
-  // and opening the file replaces it 300 ms later: ask first.
-  if (launched && (!session?.dirty || await confirmDialog(tr(
-    `The last session has unsaved changes. Discard them and open ${baseName(launched.path)}?`,
-    `上次的工作有尚未儲存的變更。要放棄這些變更並開啟 ${baseName(launched.path)} 嗎？`,
-    `前回のセッションに保存されていない変更があります。破棄して ${baseName(launched.path)} を開きますか？`)))) {
-    try {
-      await loadText(launched.text, launched.path);
-      session = null;
-    } catch (e) {
-      problem = fileError("open", launched.path, e);
     }
   }
   if (session) {
