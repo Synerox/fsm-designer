@@ -2,9 +2,14 @@
 
 讓 AI agent（Claude Desktop、Claude Code 或任何 MCP client）透過 FSM Designer
 畫狀態轉移圖：從零建立或修改圖、從 **Verilog / SystemVerilog** 程式碼匯入、
-用和桌面版相同的自動排版模式整理，並匯出 **PNG、SVG、LaTeX/TikZ** 或 `.fsm.json`。
-它使用和桌面版編輯器同一套 `@fsm/core`（模型、排版、匯出），所以 agent 畫出來的圖
-和你手動畫的一模一樣，存成的 `.fsm.json` 也可以直接用桌面版開啟繼續編輯。
+用和編輯器相同的自動排版模式整理，並匯出 **PNG、SVG、LaTeX/TikZ** 或 `.fsm.json`。
+它使用和網頁版編輯器同一套 `@fsm/core`（模型、排版、匯出），所以 agent 畫出來的圖
+和你手動畫的一模一樣。
+
+**即時連動網頁版**：agent 呼叫 `open_in_editor` 就會在瀏覽器打開編輯器並顯示這張圖，
+之後 agent 每次修改都會立刻出現在畫面上；你在畫面上拖曳、改字、加狀態，也會自動存回
+同一個 `.fsm.json`，agent 下次讀取就看得到。你選取的狀態或線，agent 也能用
+`get_editor_state` 知道（例如「把這個狀態改成接受狀態」）。詳見下面〈即時連動網頁版〉。
 
 ## 建置
 
@@ -16,10 +21,13 @@ pnpm install
 pnpm -r build        # 會產生 packages\core\dist 與 apps\mcp-server\dist
 ```
 
+`pnpm -r build` 也會建置網頁版編輯器（`apps\editor\dist`），MCP server 會在本機直接提供它，
+所以不需要網路也能用即時連動。
+
 伺服器入口是 `D:\FSMDesigner\apps\mcp-server\dist\index.js`，以 stdio 溝通：
 
 ```
-node dist\index.js [--dir <工作資料夾>] [--app <FSM Designer.exe 路徑>]
+node dist\index.js [--dir <工作資料夾>] [--port <埠號>] [--editor-url <網址>] [--no-live]
 node dist\index.js --help | --version
 ```
 
@@ -27,9 +35,11 @@ node dist\index.js --help | --version
   資料夾不存在會自動建立。沒指定時是使用者家目錄下的 `fsm-workspace`
   （Windows 上是 `%USERPROFILE%\fsm-workspace`），建議明確指定。可以寫 `~/圖` 這種路徑；
   指到一個檔案或沒有寫入權限的資料夾時，伺服器會說明原因並結束。
-- `--app`（或環境變數 `FSM_DESIGNER_APP`）：`open_in_app` 要啟動的桌面版程式。
-  沒指定時會在 `%LOCALAPPDATA%\FSM Designer`、`%ProgramFiles%\FSM Designer`
-  找 `FSM Designer.exe` / `fsm-designer.exe`（安裝檔的預設位置）。
+- `--port`：即時連動用的本機埠，預設 47400（被佔用時依序試 47401…47409）；`0` 表示任選一個空的埠。
+- `--editor-url`：改用別處的編輯器，例如 `https://synerox.github.io/fsm-designer/`（公開版）
+  或 `http://localhost:5173/`（`pnpm dev`）。沒指定時用伺服器自己提供的本機版；
+  沒有建置編輯器時用公開版。
+- `--no-live`：關掉即時連動（不開任何網路埠），`open_in_editor` 會回錯誤。
 - 選項少了值、重複或打錯名稱時，伺服器會印出用法並以代碼 2 結束，不會默默用錯的資料夾。
 - FSM 名稱只能用英數字與 `_`，最多 64 字元；`CON`、`NUL` 這類 Windows 裝置名稱，
   以及只差大小寫的同名圖都會被拒絕（Windows 與 macOS 上它們是同一個檔案）。
@@ -37,7 +47,7 @@ node dist\index.js --help | --version
 同一張圖的修改會逐一排隊執行，並以 `<名稱>.fsm.json.lock` 檔在多個程序之間互斥
 （例如 Claude Desktop 與 Claude Code 同時連到同一個工作資料夾），所以同時呼叫多個
 工具不會互相蓋掉。另一個程序最多等 30 秒；持有鎖的程序已結束時，鎖會自動接手，
-不必手動刪除。寫檔採先寫暫存檔再改名，桌面版不會讀到寫到一半的檔案；工作資料夾裡
+不必手動刪除。寫檔採先寫暫存檔再改名，編輯器不會讀到寫到一半的檔案；工作資料夾裡
 以捷徑（symlink）連到別處的 `.fsm.json` 會寫回原本的檔案；硬連結（hard link）的圖可以讀取與匯出，
 但不會被修改（請改用 symlink 或複本）。
 
@@ -77,15 +87,15 @@ claude mcp list      # 應該看到 fsm-designer: ... ✓ Connected
 3. 完全結束 Claude Desktop（系統匣圖示 ▸ 結束）再重開，輸入框的工具圖示裡會出現 fsm-designer。
 
 若出現「找不到 node」，把 `"command"` 改成 node 的完整路徑，例如
-`"C:\\Program Files\\nodejs\\node.exe"`。桌面版若裝在其他位置，在 `args` 加上
-`"--app", "D:\\路徑\\FSM Designer.exe"`。
+`"C:\\Program Files\\nodejs\\node.exe"`。
 
 ### 試試看
 
 - 「畫一個偵測序列 1011 的 Moore FSM，輸入 x、輸出 z，匯出 PNG 給我看。」
 - 「把 D:\rtl\uart_rx.v 裡的狀態機畫成狀態圖，匯出 LaTeX。」
 - 「S0 和 S1 之間的線改成平行直線，間距 24，隱藏線上文字後匯出 SVG 到 out\seq.svg。」
-- 「在 FSM Designer 裡打開這張圖。」
+- 「在編輯器裡打開這張圖，我一邊看你一邊改。」
+- 「我選的那個狀態，加一條 x 為 1 時回到 IDLE 的轉移。」
 
 ## 工具
 
@@ -97,11 +107,12 @@ claude mcp list      # 應該看到 fsm-designer: ... ✓ Connected
 | `add_state`、`update_state`、`remove_state` | 狀態：名稱、顯示文字 `label`（如 `S₀`）、起始/接受、Moore 輸出、顏色、半徑 `radius`、字體大小、起始箭頭方向 `initialFrom`、位置。可用名稱或 id 指定。 |
 | `add_transition`、`update_transition`、`remove_transition` | 轉移：條件、Mealy 輸出、優先順序、彎曲 `curve`、平行線間距 `gap`、自迴圈方向 `loopSide`、字體大小。 |
 | `set_line_style` | 兩個狀態之間的線：`straight`（直線，來回兩條會平行錯開，`gap` 調間距）、`curved`（曲線）、`auto`（回到自動）。 |
-| `auto_layout` | 自動排版，和桌面版按鈕相同（單一規則，只能調狀態間距 `spacing`）：比較方格、分層流程、蛇形與環形（主迴圈繞成長方形，短迴圈貼在旁邊）挑最好的，避免太長的箭頭，互指的三角形調成正三角形，互不相連的子圖分開排再並排；回傳選中的排法與修不掉的問題。`labels: "none"` 依隱藏文字的畫法排得更緊湊。 |
+| `auto_layout` | 自動排版，和編輯器的「自動排版」按鈕相同（單一規則，只能調狀態間距 `spacing`）：比較方格、分層流程、蛇形與環形（主迴圈繞成長方形，短迴圈貼在旁邊）挑最好的，避免太長的箭頭，互指的三角形調成正三角形，互不相連的子圖分開排再並排；回傳選中的排法與修不掉的問題。`labels: "none"` 依隱藏文字的畫法排得更緊湊。 |
 | `import_verilog` | 分析 Verilog/SystemVerilog（`code` 或檔案 `path`）：找出狀態暫存器、reset 狀態、每條轉移的條件、Moore/Mealy 輸出，排版後存檔並回傳 PNG 與報告。存檔名稱預設是 module 名稱（可用 `name` 改），已有同名的圖時要給 `overwrite: true`。支援寫法見 `packages/core/src/import/README.md`。 |
 | `validate_fsm` | 錯誤（沒有狀態、沒有 reset 狀態、多條無條件轉移）與警告（到不了的狀態、重複條件、未宣告的輸入、不是合法 Verilog 運算式的條件）。 |
-| `export_fsm` | `png`（同時以圖片回傳，agent 可以檢查自己的成果）、`svg`、`latex`（TikZ，可用 pdflatex 編譯）、`json`。`path` 另存檔案（相對路徑放在工作資料夾，給資料夾時存成 `<名稱>.<副檔名>`，不會覆蓋工作資料夾裡的 `.fsm.json`）。給了 `path` 時文字格式只回報寫入的檔案，要同時回傳內容請加 `inline: true`；`labels` = `all` / `noLoops` / `none` 對應桌面版的「全部／隱藏」線上文字。 |
-| `open_in_app` | 用 FSM Designer 桌面版開啟這張圖，讓你接手手動編輯。桌面版不會自動重新讀檔，agent 之後再修改時需要重新開啟。 |
+| `export_fsm` | `png`（同時以圖片回傳，agent 可以檢查自己的成果）、`svg`、`latex`（TikZ，可用 pdflatex 編譯）、`json`。`path` 另存檔案（相對路徑放在工作資料夾，給資料夾時存成 `<名稱>.<副檔名>`，不會覆蓋工作資料夾裡的 `.fsm.json`）。給了 `path` 時文字格式只回報寫入的檔案，要同時回傳內容請加 `inline: true`；`labels` = `all` / `noLoops` / `none` 對應編輯器的「全部／隱藏」線上文字。 |
+| `open_in_editor` | 在網頁版編輯器顯示這張圖並即時連動。已經有連線中的編輯器分頁時直接切換過去，否則開新的瀏覽器分頁；回覆裡有連結，瀏覽器沒自動打開時可以手動點。 |
+| `get_editor_state` | 目前連線的編輯器分頁各顯示哪張圖、使用者選了哪些狀態與轉移、多久前改過，以及開啟編輯器的連結。 |
 
 每張圖也可以用 MCP resource `fsm://<名稱>` 讀取；新增或刪除圖時伺服器會通知 client 重新整理清單。
 `list_fsms` 會另外列出工作資料夾裡無法當作圖使用的 `.fsm.json`（例如檔名有空白）。
@@ -115,12 +126,45 @@ claude mcp list      # 應該看到 fsm-designer: ... ✓ Connected
 - 同一狀態的轉移依 `priority`（小的先）再依清單順序判斷。
 - 預設 clock `clk`、reset `rst_n`（低電位有效、非同步）。
 
+## 即時連動網頁版
+
+MCP server 啟動時會在 `127.0.0.1:47400`（只有本機連得到）提供兩樣東西：網頁版編輯器本身，
+以及 `/live` 這個 WebSocket。`open_in_editor` 打開的網址長這樣：
+
+```
+http://127.0.0.1:47400/#live=47400&token=<配對碼>&fsm=traffic_light
+```
+
+編輯器讀到 `#` 後面的埠號與配對碼就連回 MCP server，並立刻把它們從網址列移除。
+之後：
+
+- agent 透過工具修改這張圖（或另一個 MCP server、手動改檔案）時，新版本會馬上推到畫面上，
+  算一步 Undo，按 Ctrl+Z 可以退回 AI 的修改。agent 新增但沒給位置的狀態，編輯器會擺好位置再存回去。
+- 你在畫面上的修改會在停手約 0.3 秒後存回 `.fsm.json`（和工具用同一把鎖）。Ctrl+S 只會確認已存檔；
+  Save As 仍會下載一份副本。在模組名稱欄改名會連檔名一起改（不會蓋掉已存在的圖）。
+- 兩邊同時改時以檔案裡的版本為準：你的那次修改會被 AI 的版本取代，並提示可以用 Ctrl+Z 找回。
+- 狀態列會顯示連線狀態、目前的圖，並可切換到工作資料夾裡的其他圖或中斷連動。
+  在這個分頁開新檔、開啟其他檔案或匯入 Verilog，就會脫離連動（不會覆寫工作資料夾的圖）。
+- 由 AI 打開的分頁不會還原、也不會覆寫瀏覽器自動暫存的工作，其他分頁裡的草稿不受影響。
+- MCP server 重新啟動（例如重開 Claude Desktop）後，分頁會自動重新連線；配對碼存在
+  `~/.fsm-designer/live-token`（只有你的帳號能讀），所以舊連結仍然有效。
+
+**安全性**：只監聽 `127.0.0.1`；WebSocket 只接受來自伺服器自己、公開版
+`https://synerox.github.io`、`--editor-url` 指定的網站與 `localhost:5173`（開發用）的連線，
+並檢查 Host 標頭（防 DNS rebinding）；連上後第一則訊息必須帶正確的配對碼，否則斷線。
+所以其他網站即使知道埠號也無法讀寫你的圖。配對碼只放在網址的 `#` 之後，不會送到任何網站。
+不想開任何網路埠時用 `--no-live`。
+
+**用公開版（GitHub Pages）連線**：加上 `--editor-url https://synerox.github.io/fsm-designer/`。
+這時是 https 網頁連到本機，Chrome / Edge 第一次可能會詢問是否允許存取「本機網路上的裝置」，
+請按允許；Safari 可能會擋，請改用預設的本機版。
+
 ## 架構
 
-`src/tools.ts` 的工具只透過 `src/store.ts` 的 `DiagramStore` 介面讀寫圖，目前是
-`FileStore`（工作資料夾裡的 `.fsm.json`），桌面版可以直接開啟。日後若桌面版提供
-本機連線（例如 WebSocket），只要另外實作一個 `DiagramStore` 就能讓 agent 直接編輯
-桌面版正在開啟的圖，工具本身不用改。`src/app.ts` 負責啟動桌面版。
+`src/tools.ts` 的工具只透過 `src/store.ts` 的 `DiagramStore` 介面讀寫圖（`FileStore`：工作資料夾裡的
+`.fsm.json`）。`src/bridge.ts` 是即時連動：`liveStore()` 包住 store，每次存檔或刪除就通知連線中的編輯器；
+`LiveBridge` 提供編輯器靜態檔與 `/live` WebSocket，並監看工作資料夾，其他程序改的檔案也會推送。
+編輯器端在 `apps/editor/src/live.ts`。
 
 ## 測試
 
@@ -131,4 +175,5 @@ pnpm --filter @fsm/mcp-server test   # 透過 stdio 啟動真正的伺服器，�
 
 測試涵蓋每個工具的正常與錯誤路徑、每種匯出格式、Verilog 匯入、同一張圖的並行修改
 （同一程序與兩個程序）、已結束程序留下的鎖檔、損壞或版本較新的 `.fsm.json`、命令列參數、
-資源清單通知，以及用假的執行檔測 `open_in_app`（這一項在 Windows 上略過）。
+資源清單通知，以及即時連動（`src/test/live.test.ts`：配對碼、Origin/Host 檢查、路徑穿越、推送、
+存回、版本衝突、改名、刪除、其他程序的修改）。
