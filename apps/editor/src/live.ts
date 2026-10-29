@@ -1,14 +1,16 @@
 // Live link to an AI agent's FSM MCP server on this computer.
 //
 // The server's open_in_editor tool opens the editor with
-// #live=<port>&token=<token>&fsm=<name>. The page then connects to
-// ws://127.0.0.1:<port>/live and shows that workspace diagram: the agent's
-// edits arrive as they are saved, and the user's edits are sent back (a short
-// moment after the last change) and saved into the same .fsm.json. The server
-// refuses an edit made on an older version than the file's and sends the
-// current one; that version then replaces the page's, and Ctrl+Z brings the
-// user's back. Opening, importing or starting another diagram unlinks the page
-// from the workspace diagram; picking one in the status bar links it again.
+// #live=<port>&code=<one-time code>&fsm=<name>. The page connects to
+// ws://127.0.0.1:<port>/live, trades the code for the workspace's token (kept
+// in this tab only, to reconnect after the server restarts) and shows that
+// workspace diagram: the agent's edits arrive as they are saved, and the
+// user's edits are sent back (a short moment after the last change) and saved
+// into the same .fsm.json. The server refuses an edit made on an older version
+// than the file's and sends the current one; that version then replaces the
+// page's, and Ctrl+Z brings the user's back. Opening, importing or starting
+// another diagram unlinks the page from the workspace diagram; picking one in
+// the status bar links it again.
 
 import { create } from "zustand";
 import type { FsmDiagram } from "@fsm/core";
@@ -33,12 +35,21 @@ interface LiveState {
 export const useLive = create<LiveState>(() => ({ status: "off", name: null, names: [], workspace: null, note: null }));
 
 const KEY = "fsm-designer.live";
-const TOKEN = /^[A-Za-z0-9_-]{32,128}$/;
+const SECRET = /^[A-Za-z0-9_-]{20,128}$/;
 const NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 /** How long after the last change an edit is sent. */
 const SEND_MS = 300;
 
-interface Session { port: number; token: string; name: string | null }
+interface Session {
+  port: number;
+  /** The workspace's token, once paired. */
+  token?: string;
+  /** The link's one-time code, until it has been traded for the token. */
+  code?: string;
+  name: string | null;
+  /** The workspace first paired with: a server for another one is never used. */
+  workspace?: string;
+}
 
 /** The link's #live=..., or this tab's earlier session (a reload); the # part is removed from the address bar. */
 function readSession(): Session | null {
@@ -46,23 +57,27 @@ function readSession(): Session | null {
   const h = new URLSearchParams(location.hash.slice(1));
   if (h.has("live")) {
     const port = Number(h.get("live"));
-    const token = h.get("token") ?? "";
+    const code = h.get("code") ?? "";
     const name = h.get("fsm");
-    // Keep the token out of the address bar, history and bookmarks.
+    // Keep the code out of the address bar, history and bookmarks.
     try { history.replaceState(history.state, "", location.pathname + location.search); } catch { /* sandboxed */ }
-    if (!Number.isInteger(port) || port < 1 || port > 65535 || !TOKEN.test(token)) return null;
-    const s = { port, token, name: name && NAME.test(name) ? name : null };
-    store(s);
+    if (!Number.isInteger(port) || port < 1 || port > 65535 || !SECRET.test(code)) return null;
+    const s: Session = { port, code, name: name && NAME.test(name) ? name : null };
+    save(s);
     return s;
   }
   try {
     const s = JSON.parse(sessionStorage.getItem(KEY) ?? "null");
-    if (s && Number.isInteger(s.port) && TOKEN.test(s.token)) return { port: s.port, token: s.token, name: typeof s.name === "string" && NAME.test(s.name) ? s.name : null };
+    if (s && Number.isInteger(s.port) && (SECRET.test(s.token ?? "") || SECRET.test(s.code ?? "")))
+      return {
+        port: s.port, token: SECRET.test(s.token ?? "") ? s.token : undefined, code: SECRET.test(s.code ?? "") ? s.code : undefined,
+        name: typeof s.name === "string" && NAME.test(s.name) ? s.name : null, workspace: typeof s.workspace === "string" ? s.workspace : undefined,
+      };
   } catch { /* storage off */ }
   return null;
 }
 
-function store(s: Session | null): void {
+function save(s: Session | null): void {
   try {
     if (s) sessionStorage.setItem(KEY, JSON.stringify(s));
     else sessionStorage.removeItem(KEY);
@@ -84,10 +99,14 @@ let boundSeq = -1;
 /** The version the server has (its hash), and the doc object it matches. */
 let base = "";
 let synced: FsmDiagram | null = null;
-/** The save on its way, if any. */
-let inflight: { seq: number; doc: FsmDiagram } | null = null;
+/** Saves on their way, by seq. A save sent while another is on its way builds on it ("@chain"). */
+const inflight = new Map<number, { doc: FsmDiagram; auto: boolean }>();
+/** The doc last sent, so it is not sent twice. */
+let lastSent: FsmDiagram | null = null;
 /** A doc the server refused (invalid, or a rename onto a taken name): not sent again until it changes. */
 let refused: FsmDiagram | null = null;
+/** The next save only stores where new states were placed: the user did not edit anything. */
+let autoNext = false;
 let seq = 0;
 let sendTimer: ReturnType<typeof setTimeout> | undefined;
 let selTimer: ReturnType<typeof setTimeout> | undefined;
@@ -105,6 +124,12 @@ function send(m: Record<string, unknown>): boolean {
   if (ws?.readyState !== WebSocket.OPEN) return false;
   ws.send(JSON.stringify(m));
   return true;
+}
+
+/** Change the editor without the change being sent back. */
+function apply(fn: () => void): void {
+  applying = true;
+  try { fn(); } finally { applying = false; }
 }
 
 /** Start the link if this tab has one. Called once at startup. */
@@ -126,7 +151,10 @@ function connect(): void {
     return scheduleRetry();
   }
   ws = sock;
-  sock.onopen = () => sock.send(JSON.stringify({ t: "hello", token: session!.token, v: 1 }));
+  sock.onopen = () => {
+    const s = session;
+    if (s) sock.send(JSON.stringify(s.token ? { t: "hello", token: s.token, v: 1 } : { t: "hello", code: s.code, v: 1 }));
+  };
   // One message at a time: placing a new state (onDoc) is async, and a later message must not overtake it.
   let chain = Promise.resolve();
   sock.onmessage = (e) => {
@@ -137,9 +165,10 @@ function connect(): void {
   sock.onclose = (e) => {
     if (sock !== ws) return;
     ws = null;
-    inflight = null;
+    inflight.clear();
+    lastSent = null;
     if (e.code === 4403) {
-      // A wrong token: the link is from an earlier server, or not ours.
+      // A used or expired code, or a token from another workspace's server.
       useLive.setState({ status: "denied" });
       return;
     }
@@ -161,57 +190,95 @@ export function disconnect(): void {
   clearTimeout(retry);
   sock?.close(1000);
   session = null;
-  store(null);
+  save(null);
   bound = false;
+  inflight.clear();
   useLive.setState({ status: "off", name: null, names: [], workspace: null, note: null });
   // From here the diagram is an ordinary one that is not saved anywhere.
   useEditor.setState({ filePath: null, dirty: true, savedDoc: null });
 }
 
-/** Whether the diagram on screen is a workspace diagram kept in step (so it needs no other saving). */
+/** Whether everything on screen is in the workspace file (so leaving the page loses nothing). */
 export function liveLinked(): boolean {
-  return bound;
+  const { doc } = useEditor.getState();
+  return bound && useLive.getState().status === "connected" && !inflight.size && sendTimer === undefined && (doc === synced || doc === refused);
 }
 
-/** Show workspace diagram `name` here (from the status bar's list). */
-export async function openLive(name: string): Promise<void> {
+/** Show workspace diagram `name` here (from the status bar's list, or asked by the agent). */
+export function openLive(name: string): void {
   if (!session) return;
+  // Sent first, so the server saves it under the diagram it belongs to.
   flushNow();
   send({ t: "open", name });
 }
 
 async function onMessage(m: Record<string, unknown>): Promise<void> {
+  if (!session) return;
   switch (m.t) {
-    case "welcome":
+    case "welcome": {
       retries = 0;
-      useLive.setState({ status: "connected", names: strings(m.names), workspace: typeof m.workspace === "string" ? m.workspace : null });
-      if (session?.name) send({ t: "open", name: session.name });
+      const workspace = typeof m.workspace === "string" ? m.workspace : undefined;
+      if (session.workspace && workspace !== session.workspace) {
+        // Another server took the port after a restart: never mix its diagrams up with ours.
+        unbind();
+        const s = ws;
+        ws = null;
+        s?.close(1000);
+        useLive.setState({ status: "denied" });
+        note(tr("The AI server now on this port uses another workspace; ask the AI to open the editor again.", "這個埠上現在是另一個工作資料夾的 AI server；請讓 AI 重新開啟編輯器。", "このポートの AI サーバーは別のワークスペースです。AI にもう一度開いてもらってください。"), 60000);
+        return;
+      }
+      if (typeof m.token === "string" && SECRET.test(m.token)) session.token = m.token;
+      session.code = undefined;
+      session.workspace = workspace;
+      save(session);
+      useLive.setState({ status: "connected", names: strings(m.names), workspace: workspace ?? null });
+      if (session.name) send({ t: "open", name: session.name });
       return;
+    }
     case "list":
       useLive.setState({ names: strings(m.names) });
       return;
     case "doc":
       return onDoc(String(m.name), String(m.hash), m.doc, m.why === "open");
+    case "switch":
+      if (typeof m.name === "string" && NAME.test(m.name)) openLive(m.name);
+      return;
     case "saved":
       return onSaved(m);
-    case "conflict":
-      inflight = null;
-      if (bound && session?.name === m.name) {
-        await onDoc(String(m.name), String(m.hash), m.doc, false);
-        note(tr("The AI changed this diagram at the same time; its version is shown. Ctrl+Z brings yours back.",
-          "AI 同時修改了這張圖，已改為顯示它的版本；按 Ctrl+Z 可以找回你的修改。",
-          "AI が同時にこの図を変更したため、その版を表示しています。Ctrl+Z で自分の変更に戻せます。"));
+    case "conflict": {
+      const mine = inflight.get(Number(m.seq));
+      inflight.clear();
+      lastSent = null;
+      if (same(String(m.name))) {
+        await onDoc(String(m.name), String(m.hash), m.doc, false, true);
+        if (mine && !mine.auto)
+          note(tr("The AI changed this diagram at the same time; its version is shown. Ctrl+Z brings yours back.",
+            "AI 同時修改了這張圖，已改為顯示它的版本；按 Ctrl+Z 可以找回你的修改。",
+            "AI が同時にこの図を変更したため、その版を表示しています。Ctrl+Z で自分の変更に戻せます。"));
       }
       return;
-    case "rejected":
-      if (inflight && m.seq === inflight.seq) {
-        refused = inflight.doc;
-        inflight = null;
-      }
+    }
+    case "rejected": {
+      const mine = inflight.get(Number(m.seq));
+      if (mine) refused = mine.doc;
+      inflight.clear();
+      lastSent = null;
       note(tr(`Not saved to the workspace: ${m.message}`, `沒有存到工作資料夾：${m.message}`, `ワークスペースに保存されませんでした：${m.message}`), 15000);
       return;
+    }
+    case "renamed":
+      // Another page renamed the diagram this one shows.
+      if (bound && session.name === m.from && typeof m.name === "string" && NAME.test(m.name)) {
+        const name = m.name;
+        session.name = name;
+        save(session);
+        useLive.setState({ name });
+        apply(() => useEditor.setState({ filePath: `${name}.fsm.json` }));
+      }
+      return;
     case "deleted":
-      if (session?.name === m.name) {
+      if (session.name === m.name) {
         unbind();
         note(tr(`${m.name} was deleted from the workspace; this copy is no longer linked.`, `${m.name} 已從工作資料夾刪除；畫面上這份不再連動。`, `${m.name} はワークスペースから削除されました。この図は連動しなくなりました。`), 15000);
       }
@@ -220,49 +287,56 @@ async function onMessage(m: Record<string, unknown>): Promise<void> {
       globalThis.focus?.();
       return;
     case "error":
+      // The diagram this tab showed cannot be opened any more (say, after a reconnect): it is not saved there now.
+      if (m.name !== undefined && m.name === session.name) unbind();
       note(String(m.message ?? "error"), 15000);
       return;
   }
 }
 
+function same(name: string): boolean {
+  return bound && session?.name === name && useEditor.getState().loadSeq === boundSeq;
+}
+
 function unbind(): void {
   bound = false;
-  inflight = null;
+  inflight.clear();
+  lastSent = null;
   clearTimeout(sendTimer);
-  if (session) { session.name = null; store(session); }
+  sendTimer = undefined;
+  if (session) { session.name = null; save(session); }
   useLive.setState({ name: null });
 }
 
-async function onDoc(name: string, hash: string, raw: unknown, opened: boolean): Promise<void> {
+async function onDoc(name: string, hash: string, raw: unknown, opened: boolean, conflict = false): Promise<void> {
   if (!session) return;
-  const same = () => bound && session?.name === name && useEditor.getState().loadSeq === boundSeq;
   // Already this version (a reconnect, or an echo): just send what changed here meanwhile.
-  if (same() && hash === base) {
+  if (same(name) && hash === base) {
     if (useEditor.getState().doc !== synced) schedule(0);
     return;
   }
-  if (!opened && !same()) return; // a late push for a diagram no longer shown
+  if (!opened && !same(name)) return; // a late push for a diagram no longer shown
   let doc: FsmDiagram;
   try {
     // States the agent added without a position are placed here; that is then saved back.
-    doc = await readyToDraw(raw, { keepPlaced: same() });
+    doc = await readyToDraw(raw, { keepPlaced: same(name) });
   } catch (e) {
     note(tr(`Could not show ${name}: ${(e as Error).message}`, `無法顯示 ${name}：${(e as Error).message}`, `${name} を表示できません：${(e as Error).message}`), 15000);
     return;
   }
-  // What the server has, to tell whether the placing changed anything.
+  // Whether placing changed anything, so the positions have to be saved.
   const placed = JSON.stringify(doc) !== JSON.stringify(raw);
   const ed = useEditor.getState();
-  if (same()) {
-    const unsent = ed.doc !== synced;
+  if (same(name)) {
+    const unsent = !conflict && ed.doc !== synced && ed.doc !== refused;
     clearTimeout(sendTimer);
+    sendTimer = undefined;
     base = hash;
     synced = placed ? null : doc;
     refused = null;
     // New states may be off screen: the view fits the diagram again (a new loadSeq does that).
     const grew = doc.states.some((s) => !ed.doc.states.some((o) => o.id === s.id));
-    applying = true;
-    try {
+    apply(() => {
       // One undo step, so the user can take the AI's change back.
       useEditor.setState({
         doc, past: [...ed.past.slice(-499), ed.doc], future: [], selection: keepSelection(doc, ed.selection),
@@ -270,10 +344,8 @@ async function onDoc(name: string, hash: string, raw: unknown, opened: boolean):
         ...(grew ? { loadSeq: ed.loadSeq + 1 } : {}),
       });
       boundSeq = useEditor.getState().loadSeq;
-    } finally {
-      applying = false;
-    }
-    if (placed) schedule(SEND_MS);
+    });
+    if (placed) { autoNext = true; schedule(SEND_MS); }
     if (unsent)
       note(tr("The AI changed this diagram; your last change was replaced (Ctrl+Z brings it back).", "AI 修改了這張圖，你剛才的變更被取代了（按 Ctrl+Z 可以找回）。", "AI がこの図を変更し、直前の変更は置き換えられました（Ctrl+Z で戻せます）。"));
     return;
@@ -286,45 +358,40 @@ async function onDoc(name: string, hash: string, raw: unknown, opened: boolean):
     send({ t: "close" });
     return;
   }
-  applying = true;
-  try {
+  apply(() => {
     useEditor.getState().load(doc, `${name}.fsm.json`);
     if (placed) useEditor.setState({ dirty: true, savedDoc: null });
-  } finally {
-    applying = false;
-  }
+  });
   bound = true;
   boundSeq = useEditor.getState().loadSeq;
   base = hash;
   synced = placed ? null : doc;
   refused = null;
-  inflight = null;
+  inflight.clear();
+  lastSent = null;
   session.name = name;
-  store(session);
+  save(session);
   useLive.setState({ name });
-  if (placed) schedule(SEND_MS);
+  if (placed) { autoNext = true; schedule(SEND_MS); }
 }
 
 function onSaved(m: Record<string, unknown>): void {
-  if (!inflight || m.seq !== inflight.seq || !session) return;
-  const sent = inflight.doc;
-  inflight = null;
+  const sent = inflight.get(Number(m.seq));
+  if (!sent || !session) return;
+  inflight.delete(Number(m.seq));
   base = String(m.hash);
-  synced = sent;
+  synced = sent.doc;
   const name = String(m.name);
   if (name !== session.name) {
     // The module was renamed, and the file with it.
     session.name = name;
-    store(session);
+    save(session);
     useLive.setState({ name });
   }
-  applying = true;
-  try {
-    useEditor.getState().markSaved(`${name}.fsm.json`, sent);
-  } finally {
-    applying = false;
-  }
-  if (useEditor.getState().doc !== synced) schedule(SEND_MS);
+  if (inflight.size) return; // a later save is on its way
+  lastSent = null;
+  apply(() => useEditor.getState().markSaved(`${name}.fsm.json`, sent.doc));
+  if (useEditor.getState().doc !== synced && sendTimer === undefined) schedule(SEND_MS);
 }
 
 function onEditor(s: ReturnType<typeof useEditor.getState>, prev: ReturnType<typeof useEditor.getState>): void {
@@ -335,7 +402,10 @@ function onEditor(s: ReturnType<typeof useEditor.getState>, prev: ReturnType<typ
     unbind();
     return;
   }
-  if (s.doc !== prev.doc && s.doc !== synced) schedule(SEND_MS);
+  if (s.doc !== prev.doc && s.doc !== synced) {
+    autoNext = false;
+    schedule(SEND_MS);
+  }
   if (s.selection !== prev.selection) {
     clearTimeout(selTimer);
     selTimer = setTimeout(sendSelection, 150);
@@ -347,20 +417,26 @@ function schedule(ms: number): void {
   sendTimer = setTimeout(flush, ms);
 }
 
-/** Send the editor's doc if it differs from what the server has; one save at a time. */
+/** Send the editor's doc if the server does not have it yet. */
 function flush(): void {
-  if (!bound || !session?.name || inflight) return;
+  sendTimer = undefined;
+  if (!bound || !session?.name) return;
   const { doc } = useEditor.getState();
-  if (doc === synced || doc === refused) return;
+  if (doc === synced || doc === refused || doc === lastSent) return;
   const s = ++seq;
-  if (send({ t: "save", name: session.name, base, doc, seq: s })) inflight = { seq: s, doc };
+  const auto = autoNext;
+  // While a save is on its way this one builds on it; the server checks that nothing else came in between.
+  if (send({ t: "save", name: session.name, base: inflight.size ? "@chain" : base, doc, seq: s, ...(auto ? { auto } : {}) })) {
+    inflight.set(s, { doc, auto });
+    lastSent = doc;
+    autoNext = false;
+  }
 }
 
 /** Send a pending change at once (closing the tab, switching diagrams, Ctrl+S). */
 export function flushNow(): void {
   if (sendTimer === undefined) return;
   clearTimeout(sendTimer);
-  sendTimer = undefined;
   flush();
 }
 
@@ -368,7 +444,12 @@ export function flushNow(): void {
 export function liveSave(): boolean {
   if (!bound) return false;
   flushNow();
-  note(tr("Saved to the AI's workspace automatically.", "已自動存到 AI 的工作資料夾。", "AI のワークスペースに自動保存されています。"), 3000);
+  if (useLive.getState().status === "connected")
+    note(tr("Saved to the AI's workspace automatically.", "已自動存到 AI 的工作資料夾。", "AI のワークスペースに自動保存されています。"), 3000);
+  else
+    note(tr("Not connected to the AI right now; changes are saved when the connection is back. Save As downloads a copy.",
+      "目前沒有連上 AI；連線恢復後會自動存檔。要先留一份可以用「另存新檔」下載。",
+      "現在 AI に接続されていません。接続が戻ると保存されます。「名前を付けて保存」でコピーをダウンロードできます。"), 8000);
   return true;
 }
 

@@ -17,8 +17,11 @@
 // Who may connect: the WebSocket upgrade must come from an allowed Origin (this
 // server's own page, the published editor, the dev server) with a Host header
 // naming the loopback address (against DNS rebinding), and the first message
-// must carry the token. The token is kept in a file only the user can read, so
-// a page reconnects by itself after the MCP host restarts the server.
+// must pair. The link carries only a one-time code (it passes through the
+// browser launcher's command line and the agent's transcript); the page trades
+// it for the workspace's token, which is kept in a file only the user can
+// read, one per workspace. With that token a page reconnects by itself after
+// the MCP host restarts the server, and never to another workspace's server.
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
@@ -44,8 +47,12 @@ export const DEFAULT_PORT = 47400;
 const PORT_TRIES = 10;
 /** Largest message a page may send: a diagram with 1000 states is well under 1 MB. */
 const MAX_MESSAGE = 8 * 1024 * 1024;
-/** A page that has not sent its token this long after connecting is dropped. */
+/** A page that has not paired this long after connecting is dropped. */
 const HELLO_MS = 5_000;
+/** How long the one-time code in a link stays usable. */
+const CODE_MS = 10 * 60_000;
+/** How long open_in_editor waits for a connected page to show the diagram. */
+const SWITCH_MS = 3_000;
 export const PROTOCOL = 1;
 
 export interface BridgeOptions {
@@ -55,7 +62,7 @@ export interface BridgeOptions {
   editorDir?: string | null;
   /** Editor page to open instead of the one served here, e.g. the published one or a dev server. */
   editorUrl?: string;
-  /** Where the pairing token is kept. Default ~/.fsm-designer/live-token. */
+  /** Where the pairing token is kept. Default ~/.fsm-designer/live-token-<workspace hash>. */
   tokenFile?: string;
   /** Called after the user changed a diagram from the editor. */
   onUserEdit?: (name: string) => void;
@@ -81,16 +88,20 @@ export interface EditorInfo {
 interface Client extends EditorInfo {
   ws: WebSocket;
   authed: boolean;
-  /** Hash of the version of `name` the page has. */
+  /** Hash of the version of `name` last sent to the page. */
   hash?: string;
+  /** Hash the file got from this page's last save, while its next save may build on it ("@chain"). */
+  chain?: string;
+  /** Messages from (and actions on) this page run one at a time, in order. */
+  queue: Promise<void>;
 }
 
 type Incoming =
-  | { t: "hello"; token: string; v?: number }
+  | { t: "hello"; token?: string; code?: string; v?: number }
   | { t: "open"; name: string }
   | { t: "close" }
   | { t: "list" }
-  | { t: "save"; name: string; base: string; doc: unknown; seq?: number }
+  | { t: "save"; name: string; base: string; doc: unknown; seq?: number; auto?: boolean }
   | { t: "select"; name: string; states?: unknown; transitions?: unknown };
 
 /** Stable fingerprint of a diagram's content. */
@@ -123,6 +134,12 @@ export async function openInBrowser(url: string): Promise<void> {
   });
 }
 
+/** The default token file: one per workspace, so a page cannot pair with another workspace's server. */
+export function tokenFileFor(workspace: string): string {
+  const key = createHash("sha256").update(resolve(workspace).toLowerCase()).digest("hex").slice(0, 16);
+  return join(homedir(), ".fsm-designer", `live-token-${key}`);
+}
+
 /** The token from `file`, creating it (readable by this user only) when it is missing or malformed. */
 async function loadToken(file: string): Promise<string> {
   try {
@@ -148,8 +165,14 @@ export class LiveBridge {
   private clients = new Set<Client>();
   private nextId = 1;
   private token = "";
+  /** One-time codes from links not used yet, with when they expire. */
+  private codes = new Map<string, number>();
   private editorDir: string | null;
   private pending = new Map<string, NodeJS.Timeout>();
+  /** Per diagram: the push in progress, so pushes reach pages in the order the saves happened. */
+  private pushes = new Map<string, Promise<void>>();
+  /** Waiting open_in_editor calls, resolved when their page opens the diagram. */
+  private switching = new Set<{ c: Client; name: string; done: () => void }>();
   /** Why the bridge is not running, when start() failed. */
   error?: string;
   port = 0;
@@ -170,20 +193,27 @@ export class LiveBridge {
   /** Start listening. Never throws: a bridge that cannot start leaves the tools working and says why in `error`. */
   async start(): Promise<void> {
     try {
-      this.token = await loadToken(this.opts.tokenFile ?? join(homedir(), ".fsm-designer", "live-token"));
+      this.token = await loadToken(this.opts.tokenFile ?? tokenFileFor(this.store.location));
       if (this.editorDir && !(await stat(join(this.editorDir, "index.html")).then((s) => s.isFile(), () => false))) this.editorDir = null;
       const http = createHttpServer((req, res) => void this.serve(req, res));
       const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE });
       http.on("upgrade", (req, socket, head) => {
-        const why = this.refuse(req);
-        if (why || new URL(req.url ?? "/", "http://x").pathname !== "/live") {
-          socket.end(`HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n${why ?? "not found"}\n`);
-          return;
+        // Nothing a request does may throw out of here: that would end the MCP server, and the agent's session with it.
+        try {
+          const why = this.refuse(req) ?? (pathOf(req.url) !== "/live" ? "not found" : undefined);
+          if (why) {
+            socket.end(`HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n${why}\n`);
+            return;
+          }
+          wss.handleUpgrade(req, socket, head, (ws) => this.accept(ws, String(req.headers.origin)));
+        } catch {
+          socket.destroy();
         }
-        wss.handleUpgrade(req, socket, head, (ws) => this.accept(ws, String(req.headers.origin)));
       });
+      http.on("clientError", (_e, socket) => socket.destroy());
       const first = this.opts.port ?? DEFAULT_PORT;
-      const tries = first === 0 ? 1 : PORT_TRIES;
+      // Only the default port moves on when taken; a port the user asked for is that port or nothing.
+      const tries = this.opts.port === undefined ? PORT_TRIES : 1;
       for (let i = 0; ; i++) {
         try {
           await new Promise<void>((done, fail) => {
@@ -220,10 +250,15 @@ export class LiveBridge {
     return PUBLIC_EDITOR;
   }
 
-  /** The link that opens the editor on `name`, connected to this server. */
+  /** A new link that opens the editor on `name`, connected to this server. Its code works once, for CODE_MS. */
   link(name?: string): string {
+    const now = Date.now();
+    for (const [k, until] of this.codes) if (until < now) this.codes.delete(k);
+    while (this.codes.size >= 100) this.codes.delete(this.codes.keys().next().value!);
+    const code = randomBytes(16).toString("base64url");
+    this.codes.set(code, now + CODE_MS);
     const u = new URL(this.editorBase());
-    const p = new URLSearchParams({ live: String(this.port), token: this.token });
+    const p = new URLSearchParams({ live: String(this.port), code });
     if (name) p.set("fsm", name);
     u.hash = p.toString();
     return u.href;
@@ -264,10 +299,11 @@ export class LiveBridge {
       return send(404, `FSM Designer live link. No editor build is installed here; open ${PUBLIC_EDITOR} instead (or run pnpm -r build).\n`);
     let path: string;
     try {
-      path = decodeURIComponent(new URL(req.url ?? "/", "http://x").pathname);
+      path = decodeURIComponent(pathOf(req.url));
     } catch {
       return send(400, "Bad request\n");
     }
+    if (!path.startsWith("/")) return send(400, "Bad request\n");
     if (path.endsWith("/")) path += "index.html";
     const root = resolve(this.editorDir);
     const file = resolve(root, "." + path);
@@ -282,16 +318,19 @@ export class LiveBridge {
   }
 
   private accept(ws: WebSocket, origin: string): void {
-    const c: Client = { id: this.nextId++, origin, ws, authed: false, connectedAt: Date.now() };
+    const c: Client = { id: this.nextId++, origin, ws, authed: false, connectedAt: Date.now(), queue: Promise.resolve() };
     this.clients.add(c);
     const timer = setTimeout(() => { if (!c.authed) ws.close(4401, "no token"); }, HELLO_MS);
     ws.on("close", () => { clearTimeout(timer); this.clients.delete(c); });
     ws.on("error", () => ws.terminate());
     // One message at a time per page, so a save and the next open cannot overtake each other.
-    let chain = Promise.resolve();
-    ws.on("message", (data, binary) => {
-      chain = chain.then(() => this.handle(c, binary ? "" : data.toString())).catch((e) => this.send(c, { t: "error", message: (e as Error).message }));
-    });
+    ws.on("message", (data, binary) => void this.enqueue(c, () => this.handle(c, binary ? "" : data.toString())));
+  }
+
+  /** Run `fn` in the page's queue; its errors go to the page. */
+  private enqueue(c: Client, fn: () => Promise<void>): Promise<void> {
+    c.queue = c.queue.then(fn).catch((e) => this.send(c, { t: "error", message: (e as Error).message }));
+    return c.queue;
   }
 
   private send(c: Client, msg: Record<string, unknown>): void {
@@ -307,12 +346,20 @@ export class LiveBridge {
       return this.send(c, { t: "error", message: "not a JSON message" });
     }
     if (!c.authed) {
-      if (m.t !== "hello" || typeof m.token !== "string" || !sameToken(m.token, this.token)) {
+      let ok = false;
+      if (m.t === "hello" && typeof m.token === "string") ok = sameToken(m.token, this.token);
+      else if (m.t === "hello" && typeof m.code === "string") {
+        const until = this.codes.get(m.code);
+        this.codes.delete(m.code);
+        ok = until !== undefined && until >= Date.now();
+      }
+      if (!ok) {
         c.ws.close(4403, "bad token");
         return;
       }
       c.authed = true;
-      return this.send(c, { t: "welcome", v: PROTOCOL, workspace: this.store.location, names: await this.store.list() });
+      // The page keeps the token (in its tab only) to reconnect after a restart of this server.
+      return this.send(c, { t: "welcome", v: PROTOCOL, token: this.token, workspace: this.store.location, names: await this.store.list() });
     }
     switch (m.t) {
       case "list":
@@ -320,7 +367,7 @@ export class LiveBridge {
       case "open":
         return this.open(c, String(m.name));
       case "close":
-        c.name = c.hash = c.selection = undefined;
+        c.name = c.hash = c.chain = c.selection = undefined;
         return;
       case "select":
         if (m.name === c.name) c.selection = { states: strings(m.states), transitions: strings(m.transitions) };
@@ -338,8 +385,9 @@ export class LiveBridge {
       const d = await this.store.load(name);
       c.name = name;
       c.hash = hashOf(d);
-      c.selection = undefined;
+      c.chain = c.selection = undefined;
       this.send(c, { t: "doc", name, hash: c.hash, doc: d, why: "open" });
+      for (const w of this.switching) if (w.c === c && w.name === name) w.done();
     } catch (e) {
       this.send(c, { t: "error", name, message: (e as Error).message });
     }
@@ -348,70 +396,109 @@ export class LiveBridge {
   private async save(c: Client, m: Extract<Incoming, { t: "save" }>): Promise<void> {
     const name = String(m.name);
     const seq = typeof m.seq === "number" ? m.seq : undefined;
-    if (name !== c.name) return this.send(c, { t: "error", name, seq, message: `this page does not have ${name} open` });
+    if (name !== c.name) return this.send(c, { t: "rejected", name, seq, message: `this page does not have ${name} open` });
+    // "@chain": on top of this page's previous save, which it has not heard back about yet.
+    const chained = m.base === "@chain";
+    const base = chained ? c.chain : String(m.base);
     let d: FsmDiagram;
     try {
       d = parseDiagram(JSON.parse(JSON.stringify(m.doc ?? null)));
     } catch (e) {
+      c.chain = undefined;
       return this.send(c, { t: "rejected", name, seq, message: `not a valid diagram: ${(e as Error).message}` });
     }
     // The diagram's name is its file name. A changed name (the user renamed the module) is a rename.
     const to = d.name;
+    const reject = (message: string) => {
+      c.chain = undefined;
+      this.send(c, { t: "rejected", name, seq, message });
+    };
     if (to !== name) {
       try {
         checkName(to);
       } catch (e) {
-        return this.send(c, { t: "rejected", name, seq, message: (e as Error).message });
+        return reject((e as Error).message);
       }
+      // On Windows and macOS that is the same file, and elsewhere tools would refuse the pair anyway.
+      if (to.toLowerCase() === name.toLowerCase()) return reject(`${to} differs from ${name} only in letter case; pick another name`);
+      if (await this.taken(to, name)) return reject(`cannot rename to ${to}: the workspace already has a diagram with that name`);
     }
-    const result = await this.store.lock(name, async () => {
+    type Out = Record<string, unknown> & { t: string };
+    const attempt = async (): Promise<Out> => {
       let cur: FsmDiagram;
       try {
         cur = await this.store.load(name);
       } catch (e) {
-        return { t: "rejected", name, seq, message: (e as Error).message } as Record<string, unknown>;
+        return { t: "rejected", name, seq, message: (e as Error).message };
       }
       const curHash = hashOf(cur);
-      if (curHash !== m.base) return { t: "conflict", name, seq, hash: curHash, doc: cur };
       if (to === name) {
+        d.name = name;
+        // Nothing new (another page saved the same, say the same placement of a new state): not a conflict.
+        if (hashOf(d) === curHash) return { t: "saved", name, seq, hash: curHash, same: true };
+        if (curHash !== base) return { t: "conflict", name, seq, hash: curHash, doc: cur };
         await this.store.save(d);
-        const saved = await this.store.load(name);
-        return { t: "saved", name, seq, hash: hashOf(saved), changed: false };
+        return { t: "saved", name, seq, hash: hashOf(await this.store.load(name)) };
       }
-      // Rename: the new name must be free (also in another case: on Windows and macOS that is the same file).
-      return this.store.lock(to, async () => {
-        const clash = (await this.store.list()).find((n) => n.toLowerCase() === to.toLowerCase() && n !== name);
-        if (clash || (await this.store.hasEntry?.(to)))
-          return { t: "rejected", name, seq, message: `cannot rename to ${to}: the workspace already has ${clash ?? to}` };
-        await this.store.save(d);
-        await this.store.remove(name);
-        const saved = await this.store.load(to);
-        return { t: "saved", name: to, from: name, seq, hash: hashOf(saved), changed: true };
-      });
-    }).catch((e) => ({ t: "rejected", name, seq, message: (e as Error).message }) as Record<string, unknown>);
+      if (curHash !== base) return { t: "conflict", name, seq, hash: curHash, doc: cur };
+      if (await this.taken(to, name)) return { t: "rejected", name, seq, message: `cannot rename to ${to}: the workspace already has a diagram with that name` };
+      await this.store.save(d);
+      await this.store.remove(name);
+      return { t: "saved", name: to, from: name, seq, hash: hashOf(await this.store.load(to)) };
+    };
+    // Two locks for a rename, always taken in the same order, so two renames the other way round cannot wait on each other.
+    const result: Out = await (to === name
+      ? this.store.lock(name, attempt)
+      : this.store.lock([name, to].sort()[0], () => this.store.lock([name, to].sort()[1], attempt))
+    ).catch((e) => ({ t: "rejected", name, seq, message: (e as Error).message }));
+    // The page may have been switched to another diagram meanwhile; then only the reply goes out.
+    const still = c.name === name;
     if (result.t === "saved") {
-      c.name = String(result.name);
-      c.hash = String(result.hash);
-      c.lastEditAt = Date.now();
+      const now = String(result.name);
+      if (still) {
+        c.name = now;
+        c.hash = c.chain = String(result.hash);
+        if (!m.auto && !result.same) c.lastEditAt = Date.now();
+      }
       this.send(c, result);
-      // Other pages showing the same diagram follow along.
-      this.changed(c.name);
-      if (result.changed) {
-        this.removed(name);
+      if (result.from) {
+        // Other pages on the diagram follow it to its new name.
+        for (const o of this.clients) {
+          if (o === c || !o.authed || o.name !== name) continue;
+          o.name = now;
+          o.chain = undefined;
+          this.send(o, { t: "renamed", from: name, name: now });
+        }
+        void this.listChanged();
         this.opts.onListChanged?.();
       }
-      this.opts.onUserEdit?.(c.name);
+      void this.changed(now);
+      if (!m.auto && !result.same) this.opts.onUserEdit?.(now);
       return;
     }
-    if (result.t === "conflict") c.hash = String(result.hash);
+    if (still) c.chain = undefined;
+    if (result.t === "conflict" && still) c.hash = String(result.hash);
     this.send(c, result);
+  }
+
+  /** Whether `to` is (or would be the same file as) a diagram other than `from`. */
+  private async taken(to: string, from: string): Promise<boolean> {
+    if (await this.store.hasEntry?.(to)) return true;
+    return (await this.store.list()).some((n) => n !== from && n.toLowerCase() === to.toLowerCase());
   }
 
   /**
    * A diagram may have changed: send the current version to every page that
    * shows an older one. Cheap when nothing changed (one file read).
    */
-  async changed(name: string): Promise<void> {
+  changed(name: string): Promise<void> {
+    const next = (this.pushes.get(name) ?? Promise.resolve()).then(() => this.push(name)).catch(() => {});
+    this.pushes.set(name, next);
+    void next.then(() => { if (this.pushes.get(name) === next) this.pushes.delete(name); });
+    return next;
+  }
+
+  private async push(name: string): Promise<void> {
     const watching = [...this.clients].filter((c) => c.authed && c.name === name);
     if (!watching.length) return;
     let d: FsmDiagram;
@@ -432,7 +519,7 @@ export class LiveBridge {
   removed(name: string): void {
     for (const c of this.clients) {
       if (!c.authed || c.name !== name) continue;
-      c.name = c.hash = c.selection = undefined;
+      c.name = c.hash = c.chain = c.selection = undefined;
       this.send(c, { t: "deleted", name });
     }
   }
@@ -476,21 +563,42 @@ export class LiveBridge {
   }
 
   /**
-   * Show `name` to the user: switch the most recently connected page to it, or
-   * open a new page in the browser. Returns what happened, for the tool reply.
+   * Show `name` to the user: ask the most recently connected page to switch to
+   * it (the page first saves what the user has not sent yet, and may ask the
+   * user before dropping an unsaved diagram of their own), or open a new page
+   * in the browser. Returns what happened, for the tool reply.
    */
-  async show(name: string, opts: { newWindow?: boolean } = {}): Promise<{ how: "switched" | "opened"; url: string }> {
+  async show(name: string, opts: { newWindow?: boolean } = {}): Promise<{ how: "switched" | "asked" | "opened"; url: string }> {
     if (!this.running) throw new Error(`The live editor link is not running${this.error ? ` (${this.error})` : ""}.`);
     const url = this.link(name);
     const page = opts.newWindow ? undefined : [...this.clients].filter((c) => c.authed).pop();
     if (page) {
-      if (page.name === name) await this.changed(name);
-      else await this.open(page, name);
-      this.send(page, { t: "focus" });
-      return { how: "switched", url };
+      if (page.name === name) {
+        await this.changed(name);
+        this.send(page, { t: "focus" });
+        return { how: "switched", url };
+      }
+      let done!: () => void;
+      const shown = new Promise<void>((r) => (done = r));
+      const w = { c: page, name, done };
+      this.switching.add(w);
+      this.send(page, { t: "switch", name });
+      const timer = new Promise<boolean>((r) => setTimeout(() => r(false), SWITCH_MS));
+      const ok = await Promise.race([shown.then(() => true), timer]);
+      this.switching.delete(w);
+      return { how: ok ? "switched" : "asked", url };
     }
     await (this.opts.openUrl ?? openInBrowser)(url);
     return { how: "opened", url };
+  }
+}
+
+/** The path of a request target, or "" when it is not one (never throws). */
+function pathOf(url: string | undefined): string {
+  try {
+    return new URL(url ?? "/", "http://x").pathname;
+  } catch {
+    return "";
   }
 }
 

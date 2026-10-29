@@ -889,12 +889,13 @@ export function registerTools(server: McpServer, store: DiagramStore, live: () =
         "Show a diagram to the user in the FSM Designer web editor on this computer, live: from then on every tool edit of it appears there at once, " +
         "and what the user changes there is saved into the same .fsm.json (read it again with get_fsm before editing further). " +
         "If an editor page is already connected it switches to this diagram; otherwise a browser tab is opened. " +
-        "The reply has the link; give it to the user if no browser window appeared.",
+        "The editor places states that have no position yet and saves those positions into the file. " +
+        "The reply has a link (usable once, for 10 minutes); give it to the user if no browser window appeared.",
       inputSchema: z.object({
         name: fsmName(),
         newWindow: z.boolean().optional().describe("open another browser tab even if an editor page is already connected"),
       }).strict(),
-      annotations: hints({ readOnlyHint: true, openWorldHint: true }),
+      annotations: hints({ openWorldHint: true, idempotentHint: true }),
     },
     guard(async ({ name, newWindow }) => {
       const bridge = live();
@@ -907,9 +908,11 @@ export function registerTools(server: McpServer, store: DiagramStore, live: () =
         if (!bridge.running) throw e;
         return text(`Could not open the browser (${(e as Error).message}). Give the user this link to open: ${bridge.link(name)}`);
       }
-      return text(r.how === "switched"
-        ? `The editor page the user has open now shows ${name}. Changes to it appear there live.`
-        : `Opened ${name} in the web editor in the user's browser (if no window appeared, give the user this link: ${r.url}). Changes to it now appear there live; the user's edits there are saved to the workspace.`);
+      if (r.how === "switched") return text(`The editor page the user has open now shows ${name}. Changes to it appear there live.`);
+      if (r.how === "asked")
+        return text(`Asked the editor page the user has open to show ${name}; it has not done so yet (the user may have to confirm there, or switch to that browser tab). ` +
+          `Check with get_editor_state, or give the user this link: ${r.url}`);
+      return text(`Opened ${name} in the web editor in the user's browser (if no window appeared, give the user this link, usable once: ${r.url}). Changes to it now appear there live; the user's edits there are saved to the workspace.`);
     }),
   );
 
@@ -919,7 +922,7 @@ export function registerTools(server: McpServer, store: DiagramStore, live: () =
       title: "Get editor state",
       description:
         "What the user sees in the FSM Designer web editor: which diagram each connected page shows, what is selected there " +
-        "(so \"this state\" or \"these lines\" can be resolved), and when the user last edited it. Also gives the link that opens the editor.",
+        "(so \"this state\" or \"these lines\" can be resolved), and when the user last edited it.",
       inputSchema: z.object({}).strict(),
       annotations: hints({ readOnlyHint: true }),
     },
@@ -928,8 +931,8 @@ export function registerTools(server: McpServer, store: DiagramStore, live: () =
       if (!bridge) return text("The live editor link is off (server started with --no-live).");
       if (!bridge.running) return text(`The live editor link is not running: ${bridge.error ?? "unknown error"}.`);
       const pages = bridge.editors();
-      const lines = [`Live editor link: 127.0.0.1:${bridge.port}. Editor: ${bridge.editorBase()}`];
-      if (!pages.length) lines.push("No editor page is connected. open_in_editor opens one.");
+      const lines = [`Live editor link: 127.0.0.1:${bridge.port}; editor at ${bridge.editorBase()}.`];
+      if (!pages.length) lines.push("No editor page is connected. open_in_editor opens one on a diagram.");
       for (const p of pages) {
         if (!p.name) {
           lines.push(`Page ${p.id}: connected, showing a diagram that is not in the workspace (or none).`);

@@ -18,14 +18,15 @@ export function LiveBar() {
   return (
     <div className={`live live-${status}`} data-testid="live" role="status" title={tip}>
       <span className="live-dot" aria-hidden="true" />
-      <span className="live-text">{note ?? state}</span>
+      <span className="live-text" title={note ?? state}>{note ?? state}</span>
       {status === "connected" && names.length > 0 && (
         <select
           aria-label={tr("Workspace diagram to show", "要顯示的工作資料夾圖檔", "表示するワークスペースの図")}
           value={name ?? ""}
-          onChange={(e) => { if (e.target.value) void openLive(e.target.value); }}
+          onChange={(e) => { if (e.target.value) openLive(e.target.value); }}
         >
           {!name && <option value="">{tr("Open a workspace diagram…", "開啟工作資料夾中的圖…", "ワークスペースの図を開く…")}</option>}
+          {name && !names.includes(name) && <option value={name}>{name}</option>}
           {names.map((n) => <option key={n} value={n}>{n}</option>)}
         </select>
       )}

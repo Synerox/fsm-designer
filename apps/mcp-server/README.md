@@ -35,7 +35,8 @@ node dist\index.js --help | --version
   資料夾不存在會自動建立。沒指定時是使用者家目錄下的 `fsm-workspace`
   （Windows 上是 `%USERPROFILE%\fsm-workspace`），建議明確指定。可以寫 `~/圖` 這種路徑；
   指到一個檔案或沒有寫入權限的資料夾時，伺服器會說明原因並結束。
-- `--port`：即時連動用的本機埠，預設 47400（被佔用時依序試 47401…47409）；`0` 表示任選一個空的埠。
+- `--port`：即時連動用的本機埠。沒指定時用 47400，被佔用（例如另一個 Claude 也開著 MCP server）時依序試 47401…47409；
+  明確指定的埠被佔用時不會換埠，而是關閉即時連動並在 `get_editor_state` 說明原因。`0` 表示任選一個空的埠。
 - `--editor-url`：改用別處的編輯器，例如 `https://synerox.github.io/fsm-designer/`（公開版）
   或 `http://localhost:5173/`（`pnpm dev`）。沒指定時用伺服器自己提供的本機版；
   沒有建置編輯器時用公開版。
@@ -132,10 +133,12 @@ MCP server 啟動時會在 `127.0.0.1:47400`（只有本機連得到）提供兩
 以及 `/live` 這個 WebSocket。`open_in_editor` 打開的網址長這樣：
 
 ```
-http://127.0.0.1:47400/#live=47400&token=<配對碼>&fsm=traffic_light
+http://127.0.0.1:47400/#live=47400&code=<一次性代碼>&fsm=traffic_light
 ```
 
-編輯器讀到 `#` 後面的埠號與配對碼就連回 MCP server，並立刻把它們從網址列移除。
+編輯器讀到 `#` 後面的埠號與代碼就連回 MCP server，並立刻把它們從網址列移除。這個代碼只能用一次、
+10 分鐘內有效；連上後 MCP server 會給這個分頁該工作資料夾的配對碼（token），分頁只把它存在自己的
+sessionStorage，用來斷線後重新連線。
 之後：
 
 - agent 透過工具修改這張圖（或另一個 MCP server、手動改檔案）時，新版本會馬上推到畫面上，
@@ -146,13 +149,16 @@ http://127.0.0.1:47400/#live=47400&token=<配對碼>&fsm=traffic_light
 - 狀態列會顯示連線狀態、目前的圖，並可切換到工作資料夾裡的其他圖或中斷連動。
   在這個分頁開新檔、開啟其他檔案或匯入 Verilog，就會脫離連動（不會覆寫工作資料夾的圖）。
 - 由 AI 打開的分頁不會還原、也不會覆寫瀏覽器自動暫存的工作，其他分頁裡的草稿不受影響。
-- MCP server 重新啟動（例如重開 Claude Desktop）後，分頁會自動重新連線；配對碼存在
-  `~/.fsm-designer/live-token`（只有你的帳號能讀），所以舊連結仍然有效。
+- MCP server 重新啟動（例如重開 Claude Desktop）後，只要還在同一個埠，分頁會自動重新連線並重新載入最新版本。
+  配對碼每個工作資料夾各一個，存在 `~/.fsm-designer/live-token-<代號>`（只有你的帳號能讀）；
+  所以分頁不會連到另一個工作資料夾的 MCP server，就算它剛好搶到同一個埠。埠號變了（`--port 0` 或備用埠）
+  時請讓 agent 再呼叫一次 `open_in_editor`。
 
 **安全性**：只監聽 `127.0.0.1`；WebSocket 只接受來自伺服器自己、公開版
 `https://synerox.github.io`、`--editor-url` 指定的網站與 `localhost:5173`（開發用）的連線，
-並檢查 Host 標頭（防 DNS rebinding）；連上後第一則訊息必須帶正確的配對碼，否則斷線。
-所以其他網站即使知道埠號也無法讀寫你的圖。配對碼只放在網址的 `#` 之後，不會送到任何網站。
+並檢查 Host 標頭（防 DNS rebinding）；連上後第一則訊息必須帶一次性代碼或配對碼，否則斷線。
+所以其他網站即使知道埠號也無法讀寫你的圖。開瀏覽器的指令列與 agent 的對話紀錄裡只會出現一次性代碼，
+不會有長期有效的配對碼；代碼只放在網址的 `#` 之後，不會送到任何網站。
 不想開任何網路埠時用 `--no-live`。
 
 **用公開版（GitHub Pages）連線**：加上 `--editor-url https://synerox.github.io/fsm-designer/`。

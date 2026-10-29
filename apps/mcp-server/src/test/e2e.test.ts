@@ -334,7 +334,12 @@ test("open_in_editor shows the diagram on a connected editor page, live", async 
     const page = new WebSocket(`ws://127.0.0.1:${port}/live`, { headers: { Origin: "https://synerox.github.io" } });
     ws.page = page;
     const inbox: Array<Record<string, unknown>> = [];
-    page.on("message", (m) => inbox.push(JSON.parse(m.toString())));
+    page.on("message", (m) => {
+      const msg = JSON.parse(m.toString());
+      // Like the editor: asked to switch, it opens the diagram.
+      if (msg.t === "switch") page.send(JSON.stringify({ t: "open", name: msg.name }));
+      inbox.push(msg);
+    });
     await new Promise((r) => page.once("open", r));
     page.send(JSON.stringify({ t: "hello", token: (await readFile(tokenFile, "utf8")).trim() }));
     const wait = async (t: string) => {
