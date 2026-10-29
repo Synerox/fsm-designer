@@ -63,7 +63,10 @@ button.chip[aria-pressed="true"] { border-color: transparent; background: var(--
 .menubar .logo { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--text); box-shadow: inset 0 0 0 2px var(--surface), inset 0 0 0 4px var(--accent); }
 .menubar .group { display: inline-flex; align-items: center; gap: 2px; }
 .kicker { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: 0.06em; margin: 0 4px 0 2px; }
-.menubar .file { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; color: var(--muted); max-width: 40ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menubar .github-link { margin-left: auto; margin-right: 8px; width: 30px; height: 30px; display: inline-grid; place-items: center; flex: none; border-radius: 999px; color: var(--text); }
+.menubar .github-link:hover { background: var(--surface-hover); }
+.menubar .github-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.menubar .file { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); max-width: 40ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .menubar .file .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
 .menubar .icon-menu { margin-left: 8px; flex: none; }
 .icon-menu .menu-trigger { width: 30px; height: 30px; padding: 0; justify-content: center; border-color: transparent; background: transparent; color: var(--text); }
