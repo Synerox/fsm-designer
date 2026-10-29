@@ -10,6 +10,8 @@ import { Menu } from "./Menu.tsx";
 import { ImportReport, VerilogImportDialog } from "./VerilogImport.tsx";
 import { autosaveLost, exportLatex, exportPng, exportSvg, latexText, newFile, openFile, restoreSession, saveDoc, startAutosave, tidyUp, useAutosave } from "./actions.ts";
 import { baseName, copyText, guardWindowClose, setWindowTitle } from "./platform.ts";
+import { liveLinked, liveTab, startLive, useLive } from "./live.ts";
+import { LiveBar } from "./LiveBar.tsx";
 import { PRESSABLE, deleteCopied, deletesSelection, keyPressesButton, ownsKeys, snapCaret, stepCaret, typedText } from "./keys.ts";
 import { modalOpen, useModal } from "./dialog.ts";
 import { drawOptions, selectionParts, copySelection, deleteSelection, editedTransition, getStateText, hasClipboard, pasteClipboard, selectAll, setEdgeText, typeStateText, useEditor } from "./store.ts";
@@ -68,6 +70,7 @@ export function App() {
   const canUndo = useEditor((s) => s.past.length > 0);
   const canRedo = useEditor((s) => s.future.length > 0);
   const loadSeq = useEditor((s) => s.loadSeq);
+  const liveName = useLive((s) => s.name);
   const hasStates = useEditor((s) => s.doc.states.length > 0);
   const labels = useEditor((s) => s.labels);
   const setLabels = useEditor((s) => s.setLabels);
@@ -126,10 +129,13 @@ export function App() {
   };
 
   useEffect(() => {
-    restoreSession().catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
-    const stopAutosave = startAutosave();
+    // A tab opened by the AI shows its workspace diagram, which is saved there: it
+    // neither brings back nor overwrites the autosave that other tabs' work is in.
+    if (liveTab) startLive();
+    else restoreSession().catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
+    const stopAutosave = liveTab ? () => {} : startAutosave();
     // In a browser a reload or closed tab is safe while the autosave holds the work.
-    const unguard = guardWindowClose(() => useEditor.getState().dirty && autosaveLost());
+    const unguard = guardWindowClose(() => useEditor.getState().dirty && (liveTab ? !liveLinked() : autosaveLost()));
     return () => { stopAutosave(); unguard(); };
   }, []);
 
@@ -384,8 +390,9 @@ export function App() {
         <Inspector snap={grid.snap} />
       </main>
       <footer className="statusbar">
-        <p className="status" data-testid="status">{statusText(doc, selection)}<span className="muted"> · {tr("Saving and exporting download the file", "存檔與匯出會以下載方式儲存")}</span></p>
+        <p className="status" data-testid="status">{statusText(doc, selection)}{!liveName && <span className="muted"> · {tr("Saving and exporting download the file", "存檔與匯出會以下載方式儲存")}</span>}</p>
         <p className="storage-warn" role="status" data-testid="storage-warn" title={storageWarn ?? undefined}>{storageWarn}</p>
+        <LiveBar />
         <div className="view-controls">
           <span className="seg" role="group" aria-label={tr("Grid style", "格線樣式")} title={tr("Grid style", "格線樣式")}>
             {GRID_STYLES().map(([style, name]) => (
