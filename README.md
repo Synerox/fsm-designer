@@ -39,7 +39,7 @@ FSM Designer 專門做這一件事：
 | 🔌 **從 Verilog 匯入** | 分析 Verilog／SystemVerilog 程式碼（不靠 AI 猜），找出狀態暫存器、reset 狀態、每條轉移的條件，並自動判斷 Moore 或 Mealy 輸出。 |
 | 🧭 **一鍵自動排版** | 比較多種排法，用一套依使用者實際偏好調整過的評分挑出最好的一種。 |
 | 📤 **多種匯出格式** | PNG、SVG、LaTeX（TikZ `automata`）與 `.fsm.json`。線上的文字可以全部顯示或隱藏，匯出時照同樣的設定。 |
-| 🤖 **AI 也能畫** | 內建 MCP server，Claude 等 AI agent 可以建立、修改、匯入、排版並匯出狀態圖，畫好的檔案能直接用網頁版打開繼續改。 |
+| 🤖 **AI 也能畫** | 內建 MCP server，Claude 等 AI agent 可以建立、修改、匯入、排版並匯出狀態圖，還能在網頁版即時看到 AI 畫圖、一起修改。 |
 | 🌏 **三種語言** | 介面支援 English、繁體中文、日本語。 |
 | 💻 **網頁版免安裝** | 打開瀏覽器就能用，圖會自動保存在瀏覽器裡。 |
 
@@ -145,6 +145,10 @@ claude mcp add fsm-designer -- node /path/to/fsm-designer/apps/mcp-server/dist/i
 > 畫一個偵測序列 1011 的 Moore FSM，輸入 x、輸出 z，匯出 PNG 給我看。
 >
 > 把 `rtl/uart_rx.v` 裡的狀態機畫成狀態圖，匯出 LaTeX。
+>
+> 在編輯器裡打開這張圖，我一邊看你一邊改。
+
+AI 呼叫 `open_in_editor` 會在瀏覽器打開網頁版並**即時連動**：AI 的每次修改馬上出現在畫面上，你在畫面上的修改也會自動存回給 AI，AI 還能知道你選了哪個狀態。連線只在本機（`127.0.0.1`）並需要配對碼。
 
 Claude Desktop 的設定方式與所有工具的說明見 [apps/mcp-server/README.md](apps/mcp-server/README.md)。
 

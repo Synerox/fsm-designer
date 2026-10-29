@@ -1,7 +1,7 @@
 // End-to-end: start the real server over stdio and drive it like an agent would.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,7 +21,7 @@ const textOf = (r: Out) => r.content.filter((c) => c.type === "text").map((c) =>
 before(async () => {
   dir = await mkdtemp(join(tmpdir(), "fsm-mcp-"));
   client = new Client({ name: "e2e", version: "0" });
-  await client.connect(new StdioClientTransport({ command: process.execPath, args: [entry, "--dir", dir], stderr: "ignore" }));
+  await client.connect(new StdioClientTransport({ command: process.execPath, args: [entry, "--dir", dir, "--no-live"], stderr: "ignore" }));
 });
 after(async () => {
   await client.close();
@@ -33,7 +33,7 @@ test("lists the expected tools", async () => {
   const names = tools.map((t) => t.name).sort();
   for (const n of ["create_fsm", "list_fsms", "get_fsm", "delete_fsm", "set_signals", "add_state", "update_state", "remove_state",
     "add_transition", "update_transition", "remove_transition", "validate_fsm", "auto_layout", "export_fsm", "import_verilog",
-    "set_line_style", "open_in_app"])
+    "set_line_style", "open_in_editor", "get_editor_state"])
     assert.ok(names.includes(n), `missing ${n}`);
 });
 
@@ -270,7 +270,7 @@ endmodule`;
 test("concurrent edits from one and from two server processes are all kept", async () => {
   assert.ok(!(await call("create_fsm", { name: "race", states: [{ name: "S" }] })).isError);
   const other = new Client({ name: "e2e-2", version: "0" });
-  await other.connect(new StdioClientTransport({ command: process.execPath, args: [entry, "--dir", dir], stderr: "ignore" }));
+  await other.connect(new StdioClientTransport({ command: process.execPath, args: [entry, "--dir", dir, "--no-live"], stderr: "ignore" }));
   try {
     const results = await Promise.all([
       ...Array.from({ length: 12 }, (_, i) => call("add_state", { fsm: "race", name: `A${i}` })),
@@ -317,26 +317,59 @@ test("command line: --help, --version and bad options", async () => {
   assert.match(unknown.err, /unknown option --bogus/);
 });
 
-test("open_in_app starts the desktop app on the diagram file", { skip: process.platform === "win32" }, async () => {
-  const fake = join(dir, "fake-app.sh");
-  const log = join(dir, "opened.txt");
-  await writeFile(fake, `#!/bin/sh\necho "$1" > "${log}"\n`);
-  await chmod(fake, 0o755);
-  const c = new Client({ name: "e2e-app", version: "0" });
-  await c.connect(new StdioClientTransport({ command: process.execPath, args: [entry, "--dir", dir, "--app", fake], stderr: "ignore" }));
+test("open_in_editor shows the diagram on a connected editor page, live", async () => {
+  const { WebSocket } = await import("ws");
+  const { getDefaultEnvironment } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+  const tokenFile = join(dir, "live-token");
+  const c = new Client({ name: "e2e-live", version: "0" });
+  await c.connect(new StdioClientTransport({
+    command: process.execPath, args: [entry, "--dir", dir, "--port", "0"], stderr: "ignore",
+    env: { ...getDefaultEnvironment(), FSM_LIVE_TOKEN_FILE: tokenFile },
+  }));
+  const ws = { page: undefined as InstanceType<typeof WebSocket> | undefined };
   try {
-    const r = (await c.callTool({ name: "open_in_app", arguments: { name: "styled" } })) as Out;
+    const state = textOf((await c.callTool({ name: "get_editor_state", arguments: {} })) as Out);
+    const port = Number(/127\.0\.0\.1:(\d+)/.exec(state)![1]);
+    assert.match(state, /No editor page is connected/);
+    const page = new WebSocket(`ws://127.0.0.1:${port}/live`, { headers: { Origin: "https://synerox.github.io" } });
+    ws.page = page;
+    const inbox: Array<Record<string, unknown>> = [];
+    page.on("message", (m) => {
+      const msg = JSON.parse(m.toString());
+      // Like the editor: asked to switch, it opens the diagram.
+      if (msg.t === "switch") page.send(JSON.stringify({ t: "open", name: msg.name }));
+      inbox.push(msg);
+    });
+    await new Promise((r) => page.once("open", r));
+    page.send(JSON.stringify({ t: "hello", token: (await readFile(tokenFile, "utf8")).trim() }));
+    const wait = async (t: string) => {
+      for (let i = 0; i < 100; i++) {
+        const k = inbox.findIndex((m) => m.t === t);
+        if (k >= 0) return inbox.splice(k, 1)[0];
+        await new Promise((r) => setTimeout(r, 30));
+      }
+      throw new Error(`no ${t}`);
+    };
+    await wait("welcome");
+    const r = (await c.callTool({ name: "open_in_editor", arguments: { name: "styled" } })) as Out;
     assert.ok(!r.isError, textOf(r));
-    for (let i = 0; i < 50; i++) {
-      try { if ((await readFile(log, "utf8")).trim()) break; } catch { /* not yet */ }
-      await new Promise((res) => setTimeout(res, 50));
-    }
-    assert.equal((await readFile(log, "utf8")).trim(), join(dir, "styled.fsm.json"));
-    const missing = (await c.callTool({ name: "open_in_app", arguments: { name: "nope" } })) as Out;
+    assert.match(textOf(r), /now shows styled/);
+    assert.equal((await wait("doc")).name, "styled");
+    // A tool edit reaches the page by itself.
+    const add = (await c.callTool({ name: "add_state", arguments: { fsm: "styled", name: "LIVE1" } })) as Out;
+    assert.ok(!add.isError, textOf(add));
+    const pushed = await wait("doc");
+    assert.ok((pushed.doc as { states: Array<{ name: string }> }).states.some((s) => s.name === "LIVE1"));
+    page.send(JSON.stringify({ t: "select", name: "styled", states: ["LIVE1"], transitions: [] }));
+    await new Promise((res) => setTimeout(res, 100));
+    assert.match(textOf((await c.callTool({ name: "get_editor_state", arguments: {} })) as Out), /showing styled; selected: states LIVE1/);
+    const missing = (await c.callTool({ name: "open_in_editor", arguments: { name: "nope" } })) as Out;
     assert.ok(missing.isError);
   } finally {
+    ws.page?.close();
     await c.close();
   }
-  const r = await call("open_in_app", { name: "styled" }); // default server: no app installed here
-  if (r.isError) assert.match(textOf(r), /--app/);
+  const off = await call("open_in_editor", { name: "styled" });
+  assert.ok(off.isError);
+  assert.match(textOf(off), /--no-live/);
 });

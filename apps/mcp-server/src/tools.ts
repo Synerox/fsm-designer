@@ -4,8 +4,7 @@
 
 import { readFile, writeFile, mkdir, stat } from "node:fs/promises";
 import { dirname } from "node:path";
-import { launchApp } from "./app.ts";
-import type { AppOptions } from "./app.ts";
+import type { LiveBridge } from "./bridge.ts";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
@@ -281,7 +280,7 @@ function layoutNote(r: core.TidyResult | undefined): string {
 
 // ---- registration -----------------------------------------------------------
 
-export function registerTools(server: McpServer, store: DiagramStore, app: AppOptions = {}): void {
+export function registerTools(server: McpServer, store: DiagramStore, live: () => LiveBridge | undefined = () => undefined): void {
   server.registerTool(
     "create_fsm",
     {
@@ -794,7 +793,7 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
       title: "Export FSM",
       description:
         "Export a diagram. Formats: png (also returned as an image so you can look at it), svg, latex (TikZ, compiles with pdflatex), " +
-        "json (.fsm.json, opens in the FSM Designer app). Text formats are returned as text; give `path` to write a file instead (inline: true returns both) " +
+        "json (.fsm.json, opens in the FSM Designer editor). Text formats are returned as text; give `path` to write a file instead (inline: true returns both) " +
         "(relative paths are inside the workspace folder, absolute paths and ~ are used as given, a folder gets <name>.<ext>; " +
         "the workspace's own .fsm.json files are never overwritten). " +
         "`labels: \"none\"` hides the text on the lines and the outputs in states, like the editor's label switch. " +
@@ -883,21 +882,78 @@ export function registerTools(server: McpServer, store: DiagramStore, app: AppOp
   );
 
   server.registerTool(
-    "open_in_app",
+    "open_in_editor",
     {
-      title: "Open in FSM Designer",
+      title: "Show in the FSM Designer editor",
       description:
-        "Open a diagram in the FSM Designer desktop app on this computer so the user can see and keep editing it by hand. " +
-        "The app shows the file as it is now: after more tool edits, call this again (the user may need to reopen it).",
-      inputSchema: z.object({ name: fsmName() }).strict(),
-      annotations: hints({ readOnlyHint: true, openWorldHint: true }),
+        "Show a diagram to the user in the FSM Designer web editor on this computer, live: from then on every tool edit of it appears there at once, " +
+        "and what the user changes there is saved into the same .fsm.json (read it again with get_fsm before editing further). " +
+        "If an editor page is already connected it switches to this diagram; otherwise a browser tab is opened. " +
+        "The editor places states that have no position yet and saves those positions into the file. " +
+        "The reply has a link (usable once, for 10 minutes); give it to the user if no browser window appeared.",
+      inputSchema: z.object({
+        name: fsmName(),
+        newWindow: z.boolean().optional().describe("open another browser tab even if an editor page is already connected"),
+      }).strict(),
+      annotations: hints({ openWorldHint: true, idempotentHint: true }),
     },
-    guard(async ({ name }) => {
+    guard(async ({ name, newWindow }) => {
+      const bridge = live();
+      if (!bridge) throw new Error("The live editor link is turned off (the server was started with --no-live). Export the diagram with export_fsm instead, or restart the server without --no-live");
       await store.load(name);
-      if (!store.fileOf) throw new Error("This workspace has no files the app can open");
-      const file = store.fileOf(name);
-      const how = await launchApp(file, app);
-      return text(`Opened ${file} in FSM Designer (${how}).`);
+      let r;
+      try {
+        r = await bridge.show(name, { newWindow });
+      } catch (e) {
+        if (!bridge.running) throw e;
+        return text(`Could not open the browser (${(e as Error).message}). Give the user this link to open: ${bridge.link(name)}`);
+      }
+      if (r.how === "switched") return text(`The editor page the user has open now shows ${name}. Changes to it appear there live.`);
+      if (r.how === "asked")
+        return text(`Asked the editor page the user has open to show ${name}; it has not done so yet (the user may have to confirm there, or switch to that browser tab). ` +
+          `Check with get_editor_state, or give the user this link: ${r.url}`);
+      return text(`Opened ${name} in the web editor in the user's browser (if no window appeared, give the user this link, usable once: ${r.url}). Changes to it now appear there live; the user's edits there are saved to the workspace.`);
+    }),
+  );
+
+  server.registerTool(
+    "get_editor_state",
+    {
+      title: "Get editor state",
+      description:
+        "What the user sees in the FSM Designer web editor: which diagram each connected page shows, what is selected there " +
+        "(so \"this state\" or \"these lines\" can be resolved), and when the user last edited it.",
+      inputSchema: z.object({}).strict(),
+      annotations: hints({ readOnlyHint: true }),
+    },
+    guard(async () => {
+      const bridge = live();
+      if (!bridge) return text("The live editor link is off (server started with --no-live).");
+      if (!bridge.running) return text(`The live editor link is not running: ${bridge.error ?? "unknown error"}.`);
+      const pages = bridge.editors();
+      const lines = [`Live editor link: 127.0.0.1:${bridge.port}; editor at ${bridge.editorBase()}.`];
+      if (!pages.length) lines.push("No editor page is connected. open_in_editor opens one on a diagram.");
+      for (const p of pages) {
+        if (!p.name) {
+          lines.push(`Page ${p.id}: connected, showing a diagram that is not in the workspace (or none).`);
+          continue;
+        }
+        let sel = "nothing selected";
+        if (p.selection && (p.selection.states.length || p.selection.transitions.length)) {
+          let d: FsmDiagram | undefined;
+          try { d = await store.load(p.name); } catch { /* deleted meanwhile */ }
+          const ts = p.selection.transitions.map((id) => {
+            const t = d?.transitions.find((x) => x.id === id);
+            if (!t || !d) return id;
+            const n = (sid: string) => d!.states.find((s) => s.id === sid)?.name ?? sid;
+            return `${id} (${n(t.from)} -> ${n(t.to)}${t.condition ? ` if ${t.condition}` : ""})`;
+          });
+          sel = [p.selection.states.length ? `states ${p.selection.states.join(", ")}` : "", ts.length ? `transitions ${ts.join(", ")}` : ""].filter(Boolean).join("; ");
+        }
+        const edited = p.lastEditAt ? `; the user last edited it ${Math.max(0, Math.round((Date.now() - p.lastEditAt) / 1000))} s ago` : "";
+        lines.push(`Page ${p.id}: showing ${p.name}; selected: ${sel}${edited}.`);
+      }
+      return text(lines.join("\n"));
     }),
   );
 

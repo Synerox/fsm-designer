@@ -166,7 +166,8 @@ export const useEditor = create<EditorState>((set, get) => ({
   },
 }));
 
-function keepSelection(d: FsmDiagram, sel: Selection): Selection {
+/** `sel` without the parts that `d` no longer has. */
+export function keepSelection(d: FsmDiagram, sel: Selection): Selection {
   if (!sel) return null;
   if (sel.kind === "multi")
     return multiSelection(

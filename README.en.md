@@ -39,7 +39,7 @@ FSM Designer does this one job well:
 | 🔌 **Verilog import** | Analyses Verilog/SystemVerilog (no AI guessing) to find the state register, reset state and every transition's condition, and tells Moore outputs from Mealy outputs. |
 | 🧭 **One-click auto-layout** | Tries several layouts and picks the best with a score tuned against real user preferences. |
 | 📤 **Export** | PNG, SVG, LaTeX (TikZ `automata`) and `.fsm.json`. Line labels can be shown or hidden, and exports follow the same setting. |
-| 🤖 **AI-ready** | A bundled MCP server lets Claude and other agents create, edit, import, lay out and export diagrams. Their files open straight in the web app. |
+| 🤖 **AI-ready** | A bundled MCP server lets Claude and other agents create, edit, import, lay out and export diagrams. You can watch them draw in the web app and edit along, live. |
 | 🌏 **Three languages** | English, Traditional Chinese and Japanese. |
 | 💻 **No install** | It runs in the browser and keeps your diagram there between visits. |
 
@@ -145,6 +145,10 @@ Then ask things like:
 > Draw a Moore FSM that detects the sequence 1011, with input x and output z, and show me a PNG.
 >
 > Turn the state machine in `rtl/uart_rx.v` into a diagram and export it as LaTeX.
+>
+> Open it in the editor so I can watch and tweak it.
+
+`open_in_editor` opens the web editor **linked live** to the agent: every tool edit shows up at once, your own edits are saved back for the agent, and the agent can see what you have selected. The link stays on this computer (`127.0.0.1`) and needs a pairing token.
 
 Claude Desktop setup and the full tool list are in [apps/mcp-server/README.md](apps/mcp-server/README.md) (in Chinese).
 

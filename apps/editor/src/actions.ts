@@ -8,6 +8,7 @@ import { pathNumbers } from "./geometry.ts";
 import { DEFAULT_NAME, drawOptions, newDiagram, useEditor } from "./store.ts";
 
 import { tr } from "./i18n.ts";
+import { liveSave } from "./live.ts";
 
 const AUTOSAVE_KEY = "fsm-designer:autosave";
 /** Where an autosave that could not be restored is kept, so the next edit does not destroy it. */
@@ -96,22 +97,32 @@ export async function loadText(text: string, path: string | null): Promise<void>
   } catch {
     throw new Error(tr("it is not a valid JSON file", "不是有效的 JSON 檔案", "有効な JSON ファイルではありません"));
   }
+  const d = await readyToDraw(json);
+  useEditor.getState().load(d, path);
+}
+
+/**
+ * A diagram from a file or from the AI's workspace, ready for the canvas.
+ *
+ * A file whose states are all placed (everything the editor saves) opens as
+ * it was saved: in the editor text never resizes a state, so its circles and
+ * positions are the user's. Files made elsewhere (agents) can come without
+ * coordinates and with names and outputs too big for their circles: grow
+ * the circles, and re-lay out if they now crowd. A hand-edited null or NaN
+ * coordinate counts as missing too: drawing would refuse it and blank the app.
+ */
+export async function readyToDraw(json: unknown, opts: { keepPlaced?: boolean } = {}): Promise<FsmDiagram> {
   const d = upgradeLabels(readDiagram(json));
-  // A file whose states are all placed (everything the editor saves) opens as
-  // it was saved: in the editor text never resizes a state, so its circles and
-  // positions are the user's. Files made elsewhere (agents) can come without
-  // coordinates and with names and outputs too big for their circles: grow
-  // the circles, and re-lay out if they now crowd. A hand-edited null or NaN
-  // coordinate counts as missing too: drawing would refuse it and blank the app.
   if (!d.states.every(isPlaced)) {
     const before = d.states.map((s) => s.radius);
     fitStateSizes(d);
     const grown = d.states.some((s, i) => s.radius !== before[i]);
-    if (grown && crowded(d)) await autoLayout(d, { draw: drawOptions() });
+    // keepPlaced: a new state in a diagram the user is looking at is placed among the others, which stay put.
+    if (grown && !opts.keepPlaced && crowded(d)) await autoLayout(d, { draw: drawOptions() });
     else await ensureLayout(d);
   }
   checkDrawable(d);
-  useEditor.getState().load(d, path);
+  return d;
 }
 
 const isPlaced = (s: FsmDiagram["states"][number]) => Number.isFinite(s.x) && Number.isFinite(s.y);
@@ -196,6 +207,8 @@ export async function tidyUp(): Promise<{ moved: boolean; issues: LayoutIssue[] 
 }
 
 export async function saveDoc(saveAs = false): Promise<void> {
+  // A diagram linked to the AI's workspace is saved there as it changes; Save As still downloads a copy.
+  if (!saveAs && liveSave()) return;
   const { doc, filePath, markSaved } = useEditor.getState();
   const path = await saveFile(serialize(doc), {
     path: saveAs ? null : filePath,

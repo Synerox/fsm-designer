@@ -39,7 +39,7 @@ const TRI = {
 before(async () => {
   dir = await mkdtemp(join(tmpdir(), "fsm-mcp-h-"));
   client = new Client({ name: "hardening", version: "0" });
-  await client.connect(new StdioClientTransport({ command: process.execPath, args: [entry, "--dir", dir], stderr: "ignore" }));
+  await client.connect(new StdioClientTransport({ command: process.execPath, args: [entry, "--dir", dir, "--no-live"], stderr: "ignore" }));
 });
 after(async () => {
   await client.close();
@@ -316,7 +316,11 @@ test("command line: --dir must be a folder; options are checked", async () => {
   assert.match(r.err, /not a folder|not a directory/i);
   for (const [args, re] of [
     [["--dir", dir, "--dir", dir], /--dir given twice/],
-    [["--dir", "--app"], /--dir needs a value/],
+    [["--dir", "--port"], /--dir needs a value/],
+    [["--dir", dir, "--port", "http"], /--port must be a port number/],
+    [["--dir", dir, "--port", "70000"], /--port must be a port number/],
+    [["--dir", dir, "--editor-url", "javascript:alert(1)"], /--editor-url must be an http/],
+    [["--dir", dir, "--no-live", "--port", "1"], /cannot be combined/],
     [["--dir", dir, "extra"], /unexpected argument extra/],
     [["--dir", ""], /--dir needs a value/],
   ] as const) {
@@ -331,7 +335,7 @@ test("locks: many servers breaking the same stale lock never lose an edit", asyn
   const { hostname } = await import("node:os");
   const extra = await Promise.all([0, 1].map(async (i) => {
     const c = new Client({ name: `stale-${i}`, version: "0" });
-    await c.connect(new StdioClientTransport({ command: process.execPath, args: [entry, "--dir", dir], stderr: "ignore" }));
+    await c.connect(new StdioClientTransport({ command: process.execPath, args: [entry, "--dir", dir, "--no-live"], stderr: "ignore" }));
     return c;
   }));
   try {
@@ -459,7 +463,7 @@ test("files: linked names share one lock, devices and pipes are refused, hard-li
 
 test("locks are fair: a server editing back to back does not starve another server's call", async () => {
   const other = new Client({ name: "fair", version: "0" });
-  await other.connect(new StdioClientTransport({ command: process.execPath, args: [entry, "--dir", dir], stderr: "ignore" }));
+  await other.connect(new StdioClientTransport({ command: process.execPath, args: [entry, "--dir", dir, "--no-live"], stderr: "ignore" }));
   try {
     await ok("create_fsm", { name: "busy", states: Array.from({ length: 200 }, (_, i) => ({ name: `S${i}`, x: (i % 20) * 120, y: Math.floor(i / 20) * 120 })) });
     let stop = false;

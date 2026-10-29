@@ -1,6 +1,5 @@
 // Where the MCP tools read and write diagrams. Tool handlers only talk to this
-// interface, so a "live document" backend (the desktop app over its local
-// WebSocket) can replace the file store without touching the tools.
+// interface; bridge.ts wraps it so the web editor sees every save live.
 
 import { access, chmod, chown, constants, link, lstat, mkdir, readdir, readFile, realpath, rm, writeFile, rename, open, stat, unlink, utimes } from "node:fs/promises";
 import { readFileSync, readlinkSync, unlinkSync } from "node:fs";
@@ -24,7 +23,9 @@ export interface DiagramStore {
    * workspace). Every tool that changes a diagram wraps its work in this.
    */
   lock<T>(name: string, fn: () => Promise<T>): Promise<T>;
-  /** The file a diagram is saved in, when it lives on disk (used to open it in the desktop app). */
+  /** lock() for several diagrams at once, taken in one fixed order (names that are one file are locked once). */
+  lockAll?<T>(names: string[], fn: () => Promise<T>): Promise<T>;
+  /** The file a diagram is saved in, when it lives on disk . */
   fileOf?(name: string): string;
   /** Resolve a user-supplied export path (relative paths go into the workspace). */
   resolvePath(p: string): string;
@@ -529,14 +530,23 @@ export class FileStore implements DiagramStore {
     await rm(file);
   }
   async lock<T>(name: string, fn: () => Promise<T>): Promise<T> {
+    return this.lockAll([name], fn);
+  }
+  async lockAll<T>(names: string[], fn: () => Promise<T>): Promise<T> {
     // The wait counts from the call, not from the turn in this process's queue.
     const deadline = Date.now() + LOCK_WAIT_MS;
     await mkdir(this.dir, { recursive: true });
     // Lock the real file, so names that symlink to one diagram share one lock.
     // (Hard-linked diagrams are refused when saving; see save.)
-    const real = await realpath(this.file(name)).catch(async () => join(await realpath(this.dir).catch(() => this.dir), basename(this.file(name))));
-    // Lower-cased: on Windows and macOS "Seq" and "seq" are the same file.
-    return this.queue.run(real.toLowerCase(), () => withFileLock(`${real}.lock`, fn, deadline));
+    const reals = await Promise.all(names.map((name) =>
+      realpath(this.file(name)).catch(async () => join(await realpath(this.dir).catch(() => this.dir), basename(this.file(name))))));
+    // Keyed lower-cased (on Windows and macOS "Seq" and "seq" are the same file), and taken in
+    // the order of those keys, so two calls locking the same pair never wait on each other.
+    const byKey = new Map(reals.map((r) => [r.toLowerCase(), r]));
+    const keys = [...byKey.keys()].sort();
+    const take = (i: number): Promise<T> => i === keys.length ? fn()
+      : this.queue.run(keys[i], () => withFileLock(`${byKey.get(keys[i])}.lock`, () => take(i + 1), deadline));
+    return take(0);
   }
   resolvePath(p: string) {
     return resolve(this.dir, userPath(p));
