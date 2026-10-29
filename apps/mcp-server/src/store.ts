@@ -1,6 +1,5 @@
 // Where the MCP tools read and write diagrams. Tool handlers only talk to this
-// interface, so a "live document" backend (the desktop app over its local
-// WebSocket) can replace the file store without touching the tools.
+// interface; bridge.ts wraps it so the web editor sees every save live.
 
 import { access, chmod, chown, constants, link, lstat, mkdir, readdir, readFile, realpath, rm, writeFile, rename, open, stat, unlink, utimes } from "node:fs/promises";
 import { readFileSync, readlinkSync, unlinkSync } from "node:fs";
@@ -24,7 +23,7 @@ export interface DiagramStore {
    * workspace). Every tool that changes a diagram wraps its work in this.
    */
   lock<T>(name: string, fn: () => Promise<T>): Promise<T>;
-  /** The file a diagram is saved in, when it lives on disk (used to open it in the desktop app). */
+  /** The file a diagram is saved in, when it lives on disk . */
   fileOf?(name: string): string;
   /** Resolve a user-supplied export path (relative paths go into the workspace). */
   resolvePath(p: string): string;
