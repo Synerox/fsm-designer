@@ -2,21 +2,24 @@
   "name": "@fsm/core",
   "version": "0.1.0",
   "license": "MIT",
+  "private": true,
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
+      "source": "./src/index.ts",
       "default": "./dist/index.js"
     },
     "./browser": {
       "types": "./dist/browser.d.ts",
+      "source": "./src/browser.ts",
       "default": "./dist/browser.js"
     }
   },
   "scripts": {
-    "build": "tsc -p .",
+    "build": "tsc -p . && tsc -p tsconfig.test.json",
     "test": "node --test \"test/**/*.test.ts\""
   },
   "optionalDependencies": {

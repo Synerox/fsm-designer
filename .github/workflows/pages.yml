@@ -27,6 +27,8 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+      # For the Verilog importer's cycle-by-cycle checks, which skip without it.
+      - run: sudo apt-get update && sudo apt-get install -y iverilog
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
       # Relative asset paths, so the page works under /<repo>/.

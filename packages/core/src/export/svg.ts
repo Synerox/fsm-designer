@@ -63,16 +63,40 @@ export interface PlanOptions {
 
 function edgeLines(d: FsmDiagram, ts: Transition[], opts: PlanOptions, hidden: boolean): string[] {
   const shown = opts.shownEdge?.from === ts[0].from && opts.shownEdge.to === ts[0].to;
-  return hidden && !shown ? [] : ts.flatMap((t) => labelLines(transitionLabel(d, t, opts)));
+  if (hidden && !shown) return [];
+  // Stacked labels read top to bottom in the order the transitions are
+  // checked (priority, then file order), as outgoing() evaluates them.
+  const order = outgoing(d, ts[0].from);
+  const checked = [...ts].sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  return checked.flatMap((t) => transitionLines(d, t, opts));
 }
+
+/**
+ * The lines one transition's label is drawn as (none when it has no text).
+ * The condition and the outputs are wrapped separately: a condition can hold
+ * a division (" / "), which re-splitting the joined label with labelLines()
+ * would take for the outputs separator. Anything that must line up with the
+ * drawn lines (the editor's line owners and text cursor) uses this.
+ */
+export function transitionLines(d: FsmDiagram, t: Transition, opts: PlanOptions = {}): string[] {
+  const { cond, outs } = labelParts(d, t, opts);
+  const text = joinLabel(cond, outs);
+  if (text.length <= WRAP_CHARS) return text ? [text] : [];
+  return [...wrapCondition(cond, WRAP_CHARS), ...(outs ? [`/ ${outs}`] : [])];
+}
+
+function labelParts(d: FsmDiagram, t: Transition, opts: PlanOptions): { cond: string; outs: string } {
+  let cond = t.condition;
+  if (isUnconditional(t) && (opts.elseLabels ?? true)) cond = outgoing(d, t.from).length > 1 ? "else" : "";
+  return { cond, outs: d.type === "mealy" ? formatOutputs(t.outputs) : "" };
+}
+
+const joinLabel = (cond: string, outs: string) => (outs ? (cond ? `${cond} / ${outs}` : `/ ${outs}`) : cond);
 
 /** Text drawn on a transition: "cond" (Moore) or "cond / z=1" (Mealy). */
 export function transitionLabel(d: FsmDiagram, t: Transition, opts: PlanOptions = {}): string {
-  let cond = t.condition;
-  if (isUnconditional(t) && (opts.elseLabels ?? true)) cond = outgoing(d, t.from).length > 1 ? "else" : "";
-  const outs = d.type === "mealy" ? formatOutputs(t.outputs) : "";
-  if (outs) return cond ? `${cond} / ${outs}` : `/ ${outs}`;
-  return cond;
+  const { cond, outs } = labelParts(d, t, opts);
+  return joinLabel(cond, outs);
 }
 
 /** Labels longer than this many characters are wrapped. */
@@ -81,15 +105,24 @@ export const WRAP_CHARS = 36;
 /**
  * Lines of a transition label: a long label is broken after `||` (and, if a
  * line is still long, after `&&` outside or one level inside parentheses),
- * with Mealy outputs on a line of their own.
+ * with Mealy outputs on a line of their own. The text is a whole
+ * transitionLabel(): its last top-level " / " is taken as the outputs
+ * separator, so a Moore condition with a division should go through
+ * planDiagram, which knows which part is which.
  */
 export function labelLines(text: string, max = WRAP_CHARS): string[] {
   if (text.length <= max) return text ? [text] : [];
   const slash = splitAfter(text, " / ", 0);
   if (slash.length > 1) {
+    // Only the last piece is outputs: a " / " before it is a division in the condition.
     const cond = slash.slice(0, -1).join("").replace(/ \/ $/, "");
-    return [...(cond ? labelLines(cond, max) : []), `/ ${slash[slash.length - 1]}`];
+    return [...wrapCondition(cond, max), `/ ${slash[slash.length - 1]}`];
   }
+  return wrapCondition(text, max);
+}
+
+function wrapCondition(text: string, max: number): string[] {
+  if (text.length <= max) return text ? [text] : [];
   return pack(splitAfter(text, " || ", 0), max).flatMap((l) => (l.length > max ? pack(splitAfter(l, " && ", 1), max) : [l]));
 }
 
@@ -179,8 +212,12 @@ export function drawnSubLines(d: FsmDiagram, s: State, opts: PlanOptions = {}): 
   return opts.labels === "none" ? [] : stateSubLines(d, s);
 }
 
+/** A number set by hand, or undefined when it is unset or not a finite number (null, NaN or 1e999 from a hand-edited file). */
+const given = (v: number | undefined) => (Number.isFinite(v) ? v : undefined);
+
 export function planDiagram(d: FsmDiagram, opts: PlanOptions = {}): DiagramPlan {
-  const missing = d.states.filter((s) => s.x === undefined || s.y === undefined);
+  // A null or NaN coordinate (JSON writes NaN as null) is as good as none: drawing it at 0 would hide the problem.
+  const missing = d.states.filter((s) => !Number.isFinite(s.x) || !Number.isFinite(s.y));
   if (missing.length) throw new Error(`States without positions: ${missing.map((s) => s.name).join(", ")}. Run auto layout first.`);
   const byId = new Map(d.states.map((s) => [s.id, s]));
   const R = new Map(d.states.map((s) => [s.id, stateRadius(d, s)]));
@@ -197,7 +234,7 @@ export function planDiagram(d: FsmDiagram, opts: PlanOptions = {}): DiagramPlan 
   // self loops and the initial arrow.
   const busy = new Map<string, number[]>(d.states.map((s) => [s.id, []]));
   const initial = d.states.find((s) => s.isInitial);
-  const initialAngle = initial?.initialAngle ?? Math.PI; // initial arrow comes from the left by default
+  const initialAngle = given(initial?.initialAngle) ?? Math.PI; // initial arrow comes from the left by default
   if (initial) busy.get(initial.id)!.push(initialAngle);
 
   // Sampled polylines of every edge drawn so far, for label collision checks.
@@ -217,30 +254,40 @@ export function planDiagram(d: FsmDiagram, opts: PlanOptions = {}): DiagramPlan 
     const n = { x: dir.y, y: -dir.x }; // left of travel (screen)
     const mid = { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 };
     const reverse = groups.has(`${b.id}\u0000${a.id}`);
-    const manual = ts.find((t) => t.curve !== undefined)?.curve;
+    const manual = ts.map((t) => given(t.curve)).find((c) => c !== undefined);
 
     // Straight lines both ways would sit on top of each other: shift each to
     // the left of its own travel, which puts them on opposite sides.
     const back = groups.get(`${b.id}\u0000${a.id}`);
     const reverseStraight = back?.some((t) => t.curve === 0) ?? false;
     // Half the distance between the two lines (either direction may carry it), kept inside the smaller circle.
-    const gap = ts.find((t) => t.gap !== undefined)?.gap ?? back?.find((t) => t.gap !== undefined)?.gap ?? PARALLEL_GAP;
+    const gap = [...ts, ...(back ?? [])].map((t) => given(t.gap)).find((g) => g !== undefined) ?? PARALLEL_GAP;
     const half = Math.min(gap / 2, Math.min(ra, rb) * 0.8);
     const straightPair = (curve: number) => curve === 0 && reverseStraight;
+    // When the circles touch or overlap, border to border would run from B
+    // back to A and the arrowhead would point the wrong way. Start the line
+    // an arrowhead's length before B's border instead: the part inside A is
+    // hidden under A's fill, since states are drawn over edges.
+    const forward = (p0: Pt, p1: Pt) =>
+      (p1.x - p0.x) * dir.x + (p1.y - p0.y) * dir.y >= 10 ? p0 : { x: p1.x - dir.x * 10, y: p1.y - dir.y * 10 };
     const build = (curve: number) => {
       if (straightPair(curve)) {
         const o = half;
         const along = (r: number) => Math.sqrt(Math.max(r * r - o * o, 0));
-        const p0 = { x: A.x + dir.x * along(ra) + n.x * o, y: A.y + dir.y * along(ra) + n.y * o };
         const p1 = { x: B.x - dir.x * along(rb + 1) + n.x * o, y: B.y - dir.y * along(rb + 1) + n.y * o };
+        const p0 = forward({ x: A.x + dir.x * along(ra) + n.x * o, y: A.y + dir.y * along(ra) + n.y * o }, p1);
         const ctrl = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
         const samples = Array.from({ length: 21 }, (_, i) => ({ x: p0.x + ((p1.x - p0.x) * i) / 20, y: p0.y + ((p1.y - p0.y) * i) / 20 }));
         return { curve, ctrl, p0, p1, samples };
       }
-      const ctrl = { x: mid.x + n.x * curve * 2, y: mid.y + n.y * curve * 2 };
+      let ctrl = { x: mid.x + n.x * curve * 2, y: mid.y + n.y * curve * 2 };
       const ua = unit(sub(ctrl, A)), ub = unit(sub(ctrl, B));
-      const p0 = { x: A.x + ua.x * ra, y: A.y + ua.y * ra };
+      let p0 = { x: A.x + ua.x * ra, y: A.y + ua.y * ra };
       const p1 = { x: B.x + ub.x * (rb + 1), y: B.y + ub.y * (rb + 1) };
+      if (curve === 0 && forward(p0, p1) !== p0) {
+        p0 = forward(p0, p1);
+        ctrl = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
+      }
       const samples = Array.from({ length: 21 }, (_, i) => quad(p0, ctrl, p1, i / 20).p);
       return { curve, ctrl, p0, p1, samples };
     };
@@ -296,7 +343,7 @@ export function planDiagram(d: FsmDiagram, opts: PlanOptions = {}): DiagramPlan 
     if (a.id !== ts[0].to) continue;
     const ra = R.get(a.id)!;
     const used = busy.get(a.id)!;
-    const manual = ts.find((t) => t.loopAngle !== undefined)?.loopAngle;
+    const manual = ts.map((t) => given(t.loopAngle)).find((v) => v !== undefined);
     let best = manual ?? -Math.PI / 2, bestGap = -1;
     for (let k = 0; k < 16 && manual === undefined; k++) {
       // Prefer straight up/down/left/right on ties.
@@ -324,7 +371,35 @@ export function planDiagram(d: FsmDiagram, opts: PlanOptions = {}): DiagramPlan 
     pending.push({ plan, own: g.samples, candidates: [{ at: g.apex, n: out }, side(0.35), side(0.65), side(0.2), side(0.8)] });
   }
 
+  // Initial arrow (from the left by default). Its line goes into the
+  // collision set like an edge's, so no label is placed on top of it; it is
+  // added only now so it does not change where self loops go (busy already
+  // holds its direction).
+  let initialArrow: DiagramPlan["initialArrow"];
+  if (initial) {
+    const r = R.get(initial.id)!;
+    const c = Math.cos(initialAngle), s = Math.sin(initialAngle);
+    initialArrow = {
+      from: { x: initial.x! + c * (r + 38), y: initial.y! + s * (r + 38) },
+      to: { x: initial.x! + c * (r + 1), y: initial.y! + s * (r + 1) },
+      state: initial,
+      angle: initialAngle,
+    };
+    const { from, to } = initialArrow;
+    drawn.push(Array.from({ length: 11 }, (_, i) => ({ x: from.x + ((to.x - from.x) * i) / 10, y: from.y + ((to.y - from.y) * i) / 10 })));
+  }
+
   // Place labels greedily, avoiding states, other labels and other edges.
+  // Each try tests every drawn line point by point, the main cost of planning
+  // a large diagram, so a line whose bounding box is clear of the rect (with
+  // a pixel to spare beyond the 1 px rectSegmentHits allows, so no hit is
+  // missed and the result is the same) is skipped without looking at it.
+  const boxes = drawn.map((pts) => ({
+    minX: Math.min(...pts.map((p) => p.x)), maxX: Math.max(...pts.map((p) => p.x)),
+    minY: Math.min(...pts.map((p) => p.y)), maxY: Math.max(...pts.map((p) => p.y)),
+  }));
+  const nearBox = (r: Rect, b: (typeof boxes)[number]) =>
+    b.maxX > r.x - r.w / 2 - 2 && b.minX < r.x + r.w / 2 + 2 && b.maxY > r.y - r.h / 2 - 2 && b.minY < r.y + r.h / 2 + 2;
   const placed: Rect[] = [];
   for (const { plan, own, candidates } of pending) {
     if (!plan.lines.length) continue;
@@ -338,24 +413,11 @@ export function planDiagram(d: FsmDiagram, opts: PlanOptions = {}): DiagramPlan 
       let score = rank;
       for (const s of d.states) if (rectCircleOverlap(rect, P(s), R.get(s.id)!)) score += 10;
       for (const p of placed) if (rectsOverlap(rect, p)) score += 10;
-      for (const pts of drawn) if (pts !== own && rectSegmentHits(rect, pts)) score += 3;
+      drawn.forEach((pts, k) => { if (pts !== own && nearBox(rect, boxes[k]) && rectSegmentHits(rect, pts)) score += 3; });
       if (score < bestScore) { bestScore = score; best = rect; }
     });
     plan.label = best;
     placed.push(best!);
-  }
-
-  // Initial arrow from the left.
-  let initialArrow: DiagramPlan["initialArrow"];
-  if (initial) {
-    const r = R.get(initial.id)!;
-    const c = Math.cos(initialAngle), s = Math.sin(initialAngle);
-    initialArrow = {
-      from: { x: initial.x! + c * (r + 38), y: initial.y! + s * (r + 38) },
-      to: { x: initial.x! + c * (r + 1), y: initial.y! + s * (r + 1) },
-      state: initial,
-      angle: initialAngle,
-    };
   }
 
   // Bounds.
@@ -378,6 +440,10 @@ export function planDiagram(d: FsmDiagram, opts: PlanOptions = {}): DiagramPlan 
   return { states: d.states.map((s) => ({ state: s, r: R.get(s.id)! })), edges, initialArrow, bounds: bx };
 }
 
+// Characters XML 1.0 does not allow anywhere, even escaped. One pasted into a
+// label would make the whole file fail to parse (and the PNG export, which
+// loads this SVG as an image, fail with it), so they are dropped.
+const XML_ILLEGAL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g;
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const f = (n: number) => (Math.round(n * 10) / 10).toString();
 
@@ -443,5 +509,5 @@ export function renderSvg(d: FsmDiagram, opts: SvgOptions = {}): string {
     ...out,
     `</svg>`,
     "",
-  ].filter((x, i, arr) => x !== "" || i === arr.length - 1).join("\n");
+  ].filter((x, i, arr) => x !== "" || i === arr.length - 1).join("\n").replace(XML_ILLEGAL, "");
 }

@@ -12,9 +12,10 @@
 //     on an unknown signal forks the run; every finished run is one cube of
 //     input conditions with a next state and output values.
 //  4. Outputs that are the same in every run of a state depend on the state
-//     only (Moore); outputs that vary with inputs are Mealy and go on the
-//     transitions. Registered outputs that always take the same value when
-//     entering a state are that state's Moore outputs.
+//     only (Moore); outputs that vary with inputs, or whose value reads an
+//     input (q = data), are Mealy and go on the transitions. Registered
+//     outputs that always take the same value when entering a state are that
+//     state's Moore outputs.
 //  5. Runs are grouped by (next state, Mealy outputs) and each group's
 //     condition is minimised with Quine-McCluskey.
 
@@ -22,7 +23,7 @@ import { addSignal, addState, addTransition, createDiagram, DEFAULT_RESET } from
 import { fitStateSizes } from "../metrics.ts";
 import type { FsmDiagram, OutputValue } from "../model.ts";
 import { minimize } from "./boolmin.ts";
-import { caseMatch, FALSE, formatNum, freeIds, isConst, isNum, mask, num, printExpr, simplify, TRUE, widthOf, wildcardBits } from "./expr.ts";
+import { caseMatch, FALSE, fitWidth, formatNum, freeIds, isConst, isNum, lowBits, mask, num, printExpr, simplify, simplifyCond, TRUE, widthOf, wildcardBits } from "./expr.ts";
 import type { EvalCtx, Expr, Num } from "./expr.ts";
 import type { Always, Module, Stmt } from "./parser.ts";
 
@@ -75,6 +76,12 @@ interface Path {
   nb: Map<string, Expr>; // values registered at the clock edge
   subst: Map<string, Expr>; // input values implied by assumptions
   assume: Map<string, Assumption>;
+  /**
+   * Values each multi-bit input can still take under the path's assumptions
+   * about it (sig: those assumptions, printed), so the next assumption only
+   * filters these instead of re-enumerating every value against all of them.
+   */
+  dom?: Map<string, { sig: string[]; vals: number[] }>;
 }
 
 interface Run {
@@ -91,6 +98,10 @@ const STATE_NAME = /state|^st$|_st$|^cs$|^ps$|^curr?|^cur_|fsm/i;
 class Ctx {
   readonly params = new Map<string, Num>();
   readonly widths = new Map<string, number>();
+  /** Signals declared signed: a value tried for one of them compares as two's complement. */
+  readonly signed = new Set<string>();
+  /** Declared ranges other than [w-1:0] (reg [0:2], reg [4:3]), where index i is not bit i. */
+  readonly ranges = new Map<string, { msb: number; lsb: number }>();
   readonly warnings: string[] = [];
   readonly m: Module;
   constructor(m: Module) {
@@ -107,6 +118,9 @@ class Ctx {
     for (const d of m.decls.values()) {
       const w = d.width ?? (d.enumType ? enumWidth(m, d.enumType, pctx) : d.range ? rangeWidth(d.range, pctx) : 1);
       this.widths.set(d.name, w ?? 1);
+      if (d.signed) this.signed.add(d.name);
+      const msb = d.range && simplify(d.range.msb, pctx), lsb = d.range && simplify(d.range.lsb, pctx);
+      if (msb && lsb && isConst(msb) && isConst(lsb) && (lsb.v !== 0n || msb.v < lsb.v)) this.ranges.set(d.name, { msb: Number(msb.v), lsb: Number(lsb.v) });
     }
   }
   warn(msg: string) { if (!this.warnings.includes(msg)) this.warnings.push(msg); }
@@ -205,9 +219,64 @@ function writesOf(s: Stmt): Set<string> {
   return w;
 }
 
-function makeBlocks(m: Module): Block[] {
+// ---- bit positions ----------------------------------------------------------------
+
+function mapExpr(e: Expr, f: (e: Expr) => Expr): Expr {
+  const m = (x: Expr) => mapExpr(x, f);
+  switch (e.k) {
+    case "un": return f({ ...e, a: m(e.a) });
+    case "bin": return f({ ...e, a: m(e.a), b: m(e.b) });
+    case "tern": return f({ ...e, c: m(e.c), a: m(e.a), b: m(e.b) });
+    case "idx": return f({ ...e, a: m(e.a), i: m(e.i) });
+    case "part": return f({ ...e, a: m(e.a), msb: m(e.msb), lsb: m(e.lsb) });
+    case "cat": return f({ ...e, parts: e.parts.map(m) });
+    case "rep": return f({ ...e, n: m(e.n), parts: e.parts.map(m) });
+    case "call": return f({ ...e, args: e.args.map(m) });
+    default: return f(e);
+  }
+}
+
+function mapStmt(s: Stmt, f: (e: Expr) => Expr): Stmt {
+  switch (s.k) {
+    case "block": return { ...s, body: s.body.map((b) => mapStmt(b, f)) };
+    case "assign": return { ...s, lhs: mapExpr(s.lhs, f), rhs: mapExpr(s.rhs, f) };
+    case "if": return { ...s, c: mapExpr(s.c, f), t: mapStmt(s.t, f), ...(s.e ? { e: mapStmt(s.e, f) } : {}) };
+    case "case": return { ...s, subject: mapExpr(s.subject, f), items: s.items.map((it) => ({ labels: it.labels?.map((l) => mapExpr(l, f)) ?? null, body: mapStmt(it.body, f) })) };
+    case "skip": return s;
+  }
+}
+
+/**
+ * Selects on a vector declared [0:2] or [4:3] rewritten to bit positions (the
+ * LSB is bit 0), the way the rest of the importer and the diagram read them:
+ * in reg [0:2] state, state[0] is the MSB. A parameter index keeps its name
+ * on the number (state[IDLE] still names a one-hot state IDLE).
+ */
+function bitPositions(c: Ctx, s: Stmt): Stmt {
+  if (!c.ranges.size) return s;
+  const pctx: EvalCtx = { lookup: (n) => c.params.get(n), width: (n) => c.widths.get(n) };
+  return mapStmt(s, (e) => {
+    if ((e.k !== "idx" && e.k !== "part") || e.a.k !== "id") return e;
+    const r = c.ranges.get(e.a.name);
+    if (!r) return e;
+    const down = r.msb >= r.lsb;
+    const pos = (i: Expr): Expr => {
+      const v = simplify(i, pctx);
+      if (isConst(v)) return num(down ? Number(v.v) - r.lsb : r.lsb - Number(v.v), null, i.k === "id" && c.params.has(i.name) ? { index: i.name } : {});
+      return down ? { k: "bin", op: "-", a: i, b: num(r.lsb) } : { k: "bin", op: "-", a: num(r.lsb), b: i };
+    };
+    if (e.k === "idx") return { ...e, i: pos(e.i) };
+    if (e.mode === ":") return { ...e, msb: pos(e.msb), lsb: pos(e.lsb) };
+    // a[base +: w] counts up from base in index order: down the bits of an ascending vector.
+    const mode = down ? e.mode : e.mode === "+:" ? "-:" : "+:";
+    return { ...e, msb: pos(e.msb), mode };
+  });
+}
+
+function makeBlocks(m: Module, c: Ctx): Block[] {
   const blocks: Block[] = [];
   const mk = (seq: boolean, stmt: Stmt, line: number, always?: Always) => {
+    stmt = bitPositions(c, stmt);
     const writes = new Set<string>(), reads = new Set<string>();
     eachStmt(stmt, (x) => {
       if (x.k === "assign") {
@@ -254,6 +323,34 @@ interface Candidate {
   values: Set<string>;
 }
 
+/** The values a right-hand side can take: itself, or the leaves of a ?: chain (s <= a ? S1 : S0). */
+function leaves(e: Expr): Expr[] {
+  return e.k === "tern" ? [...leaves(e.a), ...leaves(e.b)] : [e];
+}
+
+/**
+ * For a case on a concatenation that holds `names` ({state, in}), the part
+ * that does and the bits below it, so each label's state field can be read.
+ */
+function catField(subject: Expr, names: Set<string>, ctx: EvalCtx): { index: number; parts: number; w: number; shift: number } | undefined {
+  if (subject.k !== "cat") return undefined;
+  let shift = subject.parts.reduce((a, p) => a + widthOf(p, ctx), 0);
+  for (const [index, p] of subject.parts.entries()) {
+    const w = widthOf(p, ctx);
+    shift -= w;
+    if (p.k === "id" && names.has(p.name)) return { index, parts: subject.parts.length, w, shift };
+  }
+  return undefined;
+}
+
+/** The state field of a case label on a concatenation, when those bits are all 0/1. */
+function fieldOf(label: Expr, f: { w: number; shift: number }, ctx: EvalCtx): bigint | undefined {
+  const v = simplify(label, ctx);
+  if (!isNum(v)) return undefined;
+  const bits = mask(-1n, f.w) << BigInt(f.shift);
+  return ((v.x | v.z) & bits) === 0n ? (v.v & bits) >> BigInt(f.shift) : undefined;
+}
+
 function findCandidates(c: Ctx, blocks: Block[]): Candidate[] {
   const m = c.m;
   const pctx: EvalCtx = { lookup: (n) => c.params.get(n), width: (n) => c.widths.get(n) };
@@ -270,9 +367,12 @@ function findCandidates(c: Ctx, blocks: Block[]): Candidate[] {
     const nexts = new Map<string, number>();
     for (const b of blocks.filter((x) => x.seq && x.writes.has(name))) {
       for (const a of assignsTo(b.stmt, name)) {
-        const v = a.lhs.k === "id" ? constOf(a.rhs) : undefined;
-        if (v) values.add(v.v.toString());
-        if (a.rhs.k === "id" && combWritten.has(a.rhs.name)) nexts.set(a.rhs.name, (nexts.get(a.rhs.name) ?? 0) + 1);
+        for (const l of a.lhs.k === "id" ? leaves(a.rhs) : []) {
+          const v = constOf(l);
+          if (v) values.add(v.v.toString());
+          // state <= next, or state <= rst ? IDLE : next
+          if (l.k === "id" && combWritten.has(l.name)) nexts.set(l.name, (nexts.get(l.name) ?? 0) + 1);
+        }
         if (a.rhs.k === "bin" && ["+", "-"].includes(a.rhs.op) && freeIds(a.rhs).has(name)) counter = true;
       }
     }
@@ -281,35 +381,54 @@ function findCandidates(c: Ctx, blocks: Block[]): Candidate[] {
       for (const b of blocks.filter((x) => !x.seq && x.writes.has(next))) {
         for (const a of assignsTo(b.stmt, next)) {
           if (a.lhs.k !== "id") continue;
-          const v = constOf(a.rhs);
-          if (v) values.add(v.v.toString());
+          for (const l of leaves(a.rhs)) { const v = constOf(l); if (v) values.add(v.v.toString()); }
           if (a.rhs.k === "bin" && ["+", "-"].includes(a.rhs.op) && freeIds(a.rhs).has(name)) counter = true;
         }
       }
     }
-    // Usage: case subject, comparisons with constants, one-hot bit tests.
+    // Usage: case subject (alone or in a concatenation: case ({state, in})),
+    // comparisons with constants, one-hot bit tests (state[IDLE], or st[0]
+    // with a plain index). Any vector is bit-tested with plain indices (msb =
+    // data[7]), so those count only on two or more bits of a register whose
+    // values are all one-hot or zero, and never as evidence alone.
     const names = new Set([name, ...(next ? [next] : [])]);
     let caseUses = 0, compares = 0, bitTests = 0;
+    const numericBits = new Set<string>();
     for (const b of blocks) {
       eachStmt(b.stmt, (x) => {
         if (x.k === "case" && x.subject.k === "id" && names.has(x.subject.name)) {
           caseUses++;
           for (const it of x.items) for (const l of it.labels ?? []) { const v = constOf(l); if (v) values.add(v.v.toString()); }
         }
+        const f = x.k === "case" ? catField(x.subject, names, pctx) : undefined;
+        if (x.k === "case" && f) {
+          caseUses++;
+          for (const it of x.items) for (const l of it.labels ?? []) { const v = fieldOf(l, f, pctx); if (v !== undefined) values.add(v.toString()); }
+        }
       });
       eachExpr(b.stmt, (e) => subExprs(e, (s) => {
         if (s.k === "bin" && (s.op === "==" || s.op === "!=") && s.a.k === "id" && names.has(s.a.name) && constOf(s.b)) compares++;
-        if (s.k === "idx" && s.a.k === "id" && names.has(s.a.name) && s.i.k === "id" && c.params.has(s.i.name)) bitTests++;
+        if (s.k === "idx" && s.a.k === "id" && names.has(s.a.name) && paramIndex(s.i, c)) bitTests++;
+        else if (s.k === "idx" && s.a.k === "id" && names.has(s.a.name) && s.i.k === "num" && constOf(s.i)) numericBits.add(s.i.v.toString());
       }));
     }
+    const oneHotValues = [...values].every((k) => { const v = BigInt(k); return (v & (v - 1n)) === 0n; });
+    const numericBitTests = numericBits.size >= 2 && oneHotValues;
     const enumTyped = decl?.enumType !== undefined;
     score = values.size * 2 + caseUses * 3 + compares + bitTests + (STATE_NAME.test(name) ? 3 : 0) + (enumTyped ? 3 : 0) + (next ? 2 : 0);
     if (counter) score -= 20;
     if (decl?.dir === "output") score -= 2;
     const enough = values.size >= 2 || bitTests >= 2 || (enumTyped && caseUses > 0);
-    if (enough && (caseUses > 0 || compares > 0 || bitTests > 0)) out.push({ name, next, score, values });
+    if (enough && (caseUses > 0 || compares > 0 || bitTests > 0 || numericBitTests)) out.push({ name, next, score, values });
   }
   return out.sort((a, b) => b.score - a.score);
+}
+
+/** A bit index written as a parameter (state[IDLE]), with the bit it selects. */
+function paramIndex(i: Expr, c: Ctx): { name: string; pos: number } | undefined {
+  if (i.k === "id" && c.params.has(i.name)) return { name: i.name, pos: Number(c.params.get(i.name)!.v) };
+  if (i.k === "num" && i.index && c.params.has(i.index)) return { name: i.index, pos: Number(i.v) };
+  return undefined;
 }
 
 // ---- reset and clock ----------------------------------------------------------
@@ -320,9 +439,19 @@ interface ResetInfo {
   async: boolean;
 }
 
-function firstIf(s: Stmt): Extract<Stmt, { k: "if" }> | undefined {
+/**
+ * The if a reset would be in: the block's first if, past statements that do
+ * not touch the state register (cnt <= cnt + 1; t = a & b; before the reset).
+ */
+function firstIf(s: Stmt, stateVar: string): Extract<Stmt, { k: "if" }> | undefined {
   if (s.k === "if") return s;
-  if (s.k === "block") for (const b of s.body) { if (b.k === "if") return b; if (b.k === "block") { const r = firstIf(b); if (r) return r; } else if (b.k !== "skip") return undefined; }
+  if (s.k === "block") {
+    for (const b of s.body) {
+      if (b.k === "if") return b;
+      if (b.k === "block") { const r = firstIf(b, stateVar); if (r) return r; }
+      else if (b.k !== "skip" && !(b.k === "assign" && !lhsBase(b.lhs).includes(stateVar))) return undefined;
+    }
+  }
   return undefined;
 }
 
@@ -339,7 +468,7 @@ function resetLiteral(c: Expr): { name: string; activeLow: boolean } | undefined
 function findReset(c: Ctx, stateBlocks: Block[], stateVar: string): { reset?: ResetInfo; clock: string } {
   const b = stateBlocks[0];
   const edges = b.always?.sens.filter((s) => s.edge) ?? [];
-  const ifs = firstIf(b.stmt);
+  const ifs = firstIf(b.stmt, stateVar);
   let lit = ifs ? resetLiteral(ifs.c) : undefined;
   // state <= !rst_n ? IDLE : next;
   const tern = assignsTo(b.stmt, stateVar).map((a) => a.rhs).find((e) => e.k === "tern" && resetLiteral(e.c));
@@ -357,8 +486,23 @@ function findReset(c: Ctx, stateBlocks: Block[], stateVar: string): { reset?: Re
     if (edge && edges.length > 1) {
       reset = { name: lit.name, activeLow: lit.activeLow, async: true };
     } else if (!edge && c.m.decls.get(lit.name)?.dir !== "output") {
-      const setsState = assignsTo(ifs!.t, stateVar).length > 0;
-      if (RESET_NAME.test(lit.name) || (setsState && ifs!.e)) reset = { name: lit.name, activeLow: lit.activeLow, async: false };
+      // Without a reset-like name, a guess, and said so: only an if that
+      // sets the state to a constant while its else follows a computed next
+      // state (if (go) s <= S1; else s <= n;) counts as a synchronous reset.
+      // if (en) s <= n; else s <= s; is an enable; if (start) s <= RUN; else
+      // if (done) s <= IDLE; is the machine itself; and a declared initial
+      // value (reg s = IDLE) already gives the start state.
+      const pctx: EvalCtx = { lookup: (n) => c.params.get(n), width: (n) => c.widths.get(n) };
+      const isConstRhs = (a: { rhs: Expr }) => isConst(simplify(a.rhs, pctx));
+      const sets = assignsTo(ifs!.t, stateVar);
+      const setsConst = sets.length > 0 && sets.every(isConstRhs);
+      const elseFollows = !!ifs!.e && assignsTo(ifs!.e, stateVar).some((a) => !isConstRhs(a));
+      const declaredInit = c.m.decls.get(stateVar)?.init !== undefined || c.m.always.some((x) => x.kind === "initial" && assignsTo(x.body, stateVar).length > 0);
+      if (RESET_NAME.test(lit.name)) reset = { name: lit.name, activeLow: lit.activeLow, async: false };
+      else if (setsConst && elseFollows && !declaredInit) {
+        reset = { name: lit.name, activeLow: lit.activeLow, async: false };
+        c.warn(`Taking "${lit.name}" for a synchronous reset because it sets "${stateVar}" to a constant`);
+      }
     }
   }
   const clockEdge = edges.find((e) => e.sig !== reset?.name && e.edge === "posedge") ?? edges.find((e) => e.sig !== reset?.name);
@@ -394,10 +538,24 @@ class Engine {
   }
 
   ctx(p: Path): EvalCtx {
+    const width = (n: string) => this.c.widths.get(n);
+    const assumed = (k: string) => p.assume.get(k)?.val;
+    const outer = (n: string) => p.subst.get(n) ?? this.fixed.get(n) ?? this.c.params.get(n);
+    const signed = (n: string) => this.c.signed.has(n);
     return {
-      lookup: (n) => p.env.get(n) ?? p.subst.get(n) ?? this.fixed.get(n) ?? this.c.params.get(n),
-      width: (n) => this.c.widths.get(n),
-      assumed: (k) => p.assume.get(k)?.val,
+      // A stored value (t = a & b, or a state-dependent wire) was simplified
+      // when it was written; what this run has assumed since (a = 1) must
+      // still be applied to it, or it never folds and the run forks on the
+      // same atom until the limit. Its free names are inputs and register
+      // values from before the clock edge, so only those are looked up.
+      lookup: (n) => {
+        const e = p.env.get(n);
+        if (e === undefined) return outer(n);
+        return isNum(e) || !p.assume.size ? e : simplify(e, { lookup: outer, width, assumed, signed });
+      },
+      width,
+      assumed,
+      signed,
     };
   }
 
@@ -415,7 +573,14 @@ class Engine {
         return ps;
       }
       case "assign": {
-        const v = simplify(s.rhs, this.ctx(p));
+        // st[go ? GO : IDLE] <= 1'b1: fork on the index, so each run writes one bit.
+        if (s.lhs.k === "idx") {
+          const i = simplify(s.lhs.i, this.ctx(p));
+          if (i.k === "tern") { const lhs = s.lhs; return this.branch(p, i.c).flatMap(([q, b]) => this.exec({ ...s, lhs: { ...lhs, i: b ? i.a : i.b } }, q, seq)); }
+        }
+        // (Evaluated at the width of what it is assigned to: y = go + 1'b1 is 2 for a 2-bit y.)
+        const ctx = this.ctx(p);
+        const v = simplify(s.rhs, ctx, widthOf(s.lhs, ctx));
         // x ? A : B with an unknown x: fork, so each run assigns a constant.
         if (v.k === "tern") return this.branch(p, v.c).flatMap(([q, b]) => this.exec({ ...s, rhs: b ? v.a : v.b }, q, seq));
         const q = clonePath(p);
@@ -469,7 +634,11 @@ class Engine {
       if (!seq || !nb) q.env.set(name, val);
       if (seq) q.nb.set(name, val);
     };
-    if (lhs.k === "id") return set(lhs.name, v);
+    if (lhs.k === "id") {
+      // Stored at the variable's width: a 1-bit z = data keeps data[0].
+      const w = this.c.widths.get(lhs.name);
+      return set(lhs.name, w === undefined ? v : fitWidth(v, w, ctx, this.c.signed.has(lhs.name)));
+    }
     if ((lhs.k === "idx" || lhs.k === "part") && lhs.a.k === "id") {
       const name = lhs.a.name;
       const w = this.c.widths.get(name) ?? 1;
@@ -530,7 +699,7 @@ class Engine {
     const work = [p];
     while (work.length) {
       const q = work.shift()!;
-      const v = simplify(cond, this.ctx(q));
+      const v = simplifyCond(cond, this.ctx(q));
       if (isConst(v)) { out.push([q, v.v !== 0n]); continue; }
       const atom = this.coarse ? v : pickAtom(v, this.ctx(q));
       for (const val of [true, false]) {
@@ -552,7 +721,7 @@ class Engine {
       if (w === 1) r.subst.set(atom.name, num(val ? 1 : 0, 1));
       else if (!val) r.subst.set(atom.name, num(0, w));
     } else if (atom.k === "bin" && (atom.op === "==" || atom.op === "===") && atom.a.k === "id" && isConst(atom.b) && val) {
-      r.subst.set(atom.a.name, num(atom.b.v, this.c.widths.get(atom.a.name) ?? atom.b.w));
+      r.subst.set(atom.a.name, num(atom.b.v, this.c.widths.get(atom.a.name) ?? atom.b.w, this.c.signed.has(atom.a.name) ? { signed: true } : {}));
     } else if (atom.k === "un" && atom.op === "!" && atom.a.k === "id") {
       r.subst.set(atom.a.name, num(val ? 0 : 1, 1));
     }
@@ -561,7 +730,7 @@ class Engine {
 }
 
 function clonePath(p: Path): Path {
-  return { env: new Map(p.env), nb: new Map(p.nb), subst: new Map(p.subst), assume: new Map(p.assume) };
+  return { env: new Map(p.env), nb: new Map(p.nb), subst: new Map(p.subst), assume: new Map(p.assume), dom: new Map(p.dom) };
 }
 
 /** The first sub-expression a condition depends on that is not itself boolean structure. */
@@ -577,7 +746,12 @@ function pickAtom(e: Expr, ctx: EvalCtx): Expr {
   return e;
 }
 
-/** Is there an input assignment that satisfies every assumption of the path? Checked per signal. */
+/**
+ * Is there an input assignment that satisfies every assumption of the path?
+ * Checked per signal, by trying its values (up to 12 bits). A single
+ * assumption is checked too: cnt > 4'd15 on a 4-bit cnt can never hold, and a
+ * branch the code can never take must not become a transition.
+ */
 function feasible(p: Path, c: Ctx, ctx: EvalCtx): boolean {
   const groups = new Map<string, Assumption[]>();
   for (const a of p.assume.values()) {
@@ -590,16 +764,64 @@ function feasible(p: Path, c: Ctx, ctx: EvalCtx): boolean {
     groups.set(ids[0], g);
   }
   for (const [id, as] of groups) {
-    const w = c.widths.get(id) ?? 1;
-    if (w > 12 || as.length < 2) continue;
-    let ok = false;
-    for (let x = 0; x < 1 << w && !ok; x++) {
-      const vctx: EvalCtx = { lookup: (n) => (n === id ? num(x, w) : undefined), width: ctx.width };
-      ok = as.every((a) => { const r = simplify(a.atom, vctx); return isConst(r) && (r.v !== 0n) === a.val; });
+    const w = c.widths.get(id);
+    if (w === undefined || w > 12) continue; // (an undeclared name's width is unknown)
+    const tests = as.map((a) => valueTest(a.atom, id, w, c.signed.has(id), ctx));
+    // An atom that does not fold to a constant even with id known (par(d),
+    // $onehot(d), d === 4'bxx01) cannot be decided here: such a signal is
+    // left alone (counted as feasible, nothing cached), never pruned.
+    let undecided = false;
+    const holds = (x: number, from: number) => {
+      for (let i = from; i < as.length; i++) {
+        const r = tests[i](x);
+        if (r === undefined) { undecided = true; return true; }
+        if (r !== as[i].val) return false;
+      }
+      return true;
+    };
+    const sig = as.map((a) => `${a.val ? "" : "!"}${printExpr(a.atom)}`);
+    const known = p.dom?.get(id);
+    let vals: number[];
+    if (known && known.sig.length <= sig.length && known.sig.every((s, i) => s === sig[i])) {
+      // The usual case on a long else-if chain: one new assumption on top of
+      // the parent path's, so only the values still possible are tried.
+      vals = known.vals.filter((x) => holds(x, known.sig.length));
+    } else if (!p.dom || as.length === 1) {
+      // Just look for one value (no list to keep for later assumptions).
+      let ok = false;
+      for (let x = 0; x < 1 << w && !ok; x++) ok = holds(x, 0);
+      if (!ok && !undecided) return false;
+      continue;
+    } else {
+      vals = [];
+      for (let x = 0; x < 1 << w && !undecided; x++) if (holds(x, 0)) vals.push(x);
     }
-    if (!ok) return false;
+    if (undecided) { p.dom?.delete(id); continue; }
+    if (!vals.length) return false;
+    p.dom!.set(id, { sig, vals });
   }
   return true;
+}
+
+/** The truth of `atom` (which reads only `id`) for each value of id. */
+function valueTest(atom: Expr, id: string, w: number, signed: boolean, ctx: EvalCtx): (x: number) => boolean | undefined {
+  // id == 5, id < 4'd9 ...: compared directly, the common case and the hot loop
+  // (left to simplify when both sides are signed).
+  if (atom.k === "bin" && atom.a.k === "id" && isConst(atom.b) && !(signed && atom.b.signed) && atom.b.v <= BigInt(Number.MAX_SAFE_INTEGER)) {
+    const k = Number(atom.b.v);
+    switch (atom.op) {
+      case "==": case "===": return (x) => x === k;
+      case "!=": case "!==": return (x) => x !== k;
+      case "<": return (x) => x < k;
+      case "<=": return (x) => x <= k;
+      case ">": return (x) => x > k;
+      case ">=": return (x) => x >= k;
+    }
+  }
+  return (x) => {
+    const r = simplify(atom, { lookup: (n) => (n === id ? num(x, w, signed ? { signed } : {}) : undefined), width: ctx.width });
+    return isConst(r) ? r.v !== 0n : undefined;
+  };
 }
 
 // ---- output values ------------------------------------------------------------
@@ -620,13 +842,14 @@ const sameValue = (a: OutputValue | undefined, b: OutputValue | undefined) => St
 
 /** Registers in m that look like state registers, most likely first. */
 export function stateRegisters(m: Module): string[] {
-  const cands = findCandidates(new Ctx(m), makeBlocks(m));
+  const c = new Ctx(m);
+  const cands = findCandidates(c, makeBlocks(m, c));
   return cands.filter((x, i) => i === 0 || x.score >= 6).map((x) => x.name);
 }
 
 export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
   const c = new Ctx(m);
-  const blocks = makeBlocks(m);
+  const blocks = makeBlocks(m, c);
   const cands = findCandidates(c, blocks);
   let cand = opts.stateVar ? cands.find((x) => x.name === opts.stateVar) : cands[0];
   if (opts.stateVar && !cand) {
@@ -634,10 +857,12 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
     cand = { name: opts.stateVar, score: 0, values: new Set() };
   }
   if (!cand) {
-    // A statement that did not parse drops its whole always block, which is the usual reason for not finding the FSM.
-    const syntax = m.skipped.filter((s) => /^line \d+:/.test(s));
-    const hint = syntax.length ? `. These parts did not parse and were skipped: ${syntax.join("; ")}` : "";
-    throw new VerilogImportError(`No state machine found in module ${m.name}: no register written in a clocked always block takes two or more constant state values${hint}`);
+    // A syntax error drops the always block it is in, which is the likely
+    // reason nothing was found: say where it is rather than only that no FSM is there.
+    const errors = m.errors;
+    // Starts like the plain case below, which the editor translates by that prefix.
+    if (errors.length) throw new VerilogImportError(`No state machine found in module ${m.name}: code that did not parse was skipped, ${errors[0]}${errors.length > 1 ? ` (and ${errors.length - 1} more syntax error${errors.length > 2 ? "s" : ""})` : ""}`);
+    throw new VerilogImportError(`No state machine found in module ${m.name}: no register written in a clocked always block takes two or more constant state values`);
   }
   for (const o of cands) if (o !== cand && o.score >= 6 && !opts.stateVar) c.warn(`Register "${o.name}" also looks like a state register; import it with stateVar: "${o.name}"`);
   const R = cand.name;
@@ -689,14 +914,23 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
     if (name && !names.has(k)) names.set(k, name);
   };
   const indexNames: string[] = [];
+  const indexPos = new Map<string, number>();
+  const numericIndices = new Set<number>();
   for (const b of blocks) {
     eachStmt(b.stmt, (x) => {
       if (x.k === "assign" && x.lhs.k === "id" && stateNames.has(x.lhs.name)) {
-        const v = simplify(x.rhs, pctx);
-        if (isConst(v)) addName(v.v, named(x.rhs));
+        for (const l of leaves(x.rhs)) { const v = simplify(l, pctx); if (isConst(v)) addName(v.v, named(l)); }
       }
       if (x.k === "case" && x.subject.k === "id" && stateNames.has(x.subject.name)) {
         for (const it of x.items) for (const l of it.labels ?? []) { const v = simplify(l, pctx); if (isConst(v)) addName(v.v, named(l)); }
+      }
+      const f = x.k === "case" ? catField(x.subject, stateNames, pctx) : undefined;
+      if (x.k === "case" && f) {
+        for (const it of x.items) for (const l of it.labels ?? []) {
+          const v = fieldOf(l, f, pctx);
+          // {S0, 1'b1}: the label's own part names the state.
+          if (v !== undefined) addName(v, l.k === "cat" && l.parts.length === f.parts ? named(l.parts[f.index]) : undefined);
+        }
       }
     });
     eachExpr(b.stmt, (e) => subExprs(e, (s) => {
@@ -704,7 +938,9 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
         const v = simplify(s.b, pctx);
         if (isConst(v)) addName(v.v, named(s.b));
       }
-      if (s.k === "idx" && s.a.k === "id" && stateNames.has(s.a.name) && s.i.k === "id" && c.params.has(s.i.name) && !indexNames.includes(s.i.name)) indexNames.push(s.i.name);
+      const pi = s.k === "idx" && s.a.k === "id" && stateNames.has(s.a.name) ? paramIndex(s.i, c) : undefined;
+      if (pi && !indexPos.has(pi.name)) { indexNames.push(pi.name); indexPos.set(pi.name, pi.pos); }
+      else if (s.k === "idx" && s.a.k === "id" && stateNames.has(s.a.name) && s.i.k === "num" && isConst(s.i) && !s.i.index) numericIndices.add(Number(s.i.v));
     }));
   }
   const enumType = m.decls.get(R)?.enumType;
@@ -713,13 +949,20 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
   }
   // One-hot written with indices: state[IDLE], next[S1] = 1'b1.
   if (indexNames.length >= 2 && Rw >= indexNames.length) {
-    const idx = indexNames.map((n) => Number(c.params.get(n)!.v));
+    const idx = indexNames.map((n) => indexPos.get(n)!);
     if (idx.every((i) => i < Rw) && new Set(idx).size === idx.length) {
       oneHotIndex = true;
       names.clear();
       declaredValues.clear();
       indexNames.forEach((n, i) => addName(1n << BigInt(idx[i]), n));
     }
+  } else if (numericIndices.size >= 2 && !names.size && [...numericIndices].every((i) => i < Rw) && [...declaredValues].every((k) => { const v = BigInt(k); return (v & (v - 1n)) === 0n; })) {
+    // The same with plain indices (case (1'b1) st[0]: ... nx[1] = 1'b1), when
+    // nothing names the states and every value written is one-hot (or the
+    // all-zero default the bits are set on).
+    oneHotIndex = true;
+    declaredValues.clear();
+    for (const i of numericIndices) addName(1n << BigInt(i));
   }
 
   // Initial values (FPGA style, no reset): reg [1:0] state = IDLE; or initial state = IDLE;
@@ -737,7 +980,7 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
   };
   const fixedBase = new Map<string, Expr>();
   const limit = opts.maxPaths ?? 4096;
-  const empty = (): Path => ({ env: new Map(), nb: new Map(), subst: new Map(), assume: new Map() });
+  const empty = (): Path => ({ env: new Map(), nb: new Map(), subst: new Map(), assume: new Map(), dom: new Map() });
 
   // Reset state: run the state register's block with reset asserted.
   let resetValue: bigint | undefined;
@@ -771,6 +1014,13 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
     resetValue = order[0];
   }
   const runsByState = new Map<string, Run[]>();
+  // Registered outputs that take an input's value at the clock edge (dout <=
+  // din): the same text on every entry into a state is not the same value.
+  const regFromInputs = new Set<string>();
+  // Combinational outputs whose value reads an input (q = data): they follow
+  // the inputs, so they are Mealy even in a state with a single run.
+  const combFromInputs = new Set<string>();
+  const readsInput = (e: Expr) => [...freeIds(e)].some((n) => m.decls.get(n)?.dir === "input");
   for (let i = 0; i < order.length; i++) {
     if (order.length > 256) throw new VerilogImportError(`More than 256 states reached from "${R}"; is it really a state register?`);
     const s = order[i];
@@ -798,26 +1048,41 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
         else if (nv.k === "id" && nv.name === N) c.warn(`"${N}" is not assigned on every path of state ${names.get(s.toString()) ?? s}; assumed to stay`);
         else { c.warn(`Next state of ${names.get(s.toString()) ?? s} is not a constant (${printExpr(nv)}); that case is left out`); continue; }
       }
-      // Split 1-bit combinational outputs that still depend on inputs (z = x
-      // becomes z=1 on x, z=0 on !x). Values computed from internal data or
-      // functions (tx = shreg[0], tx = parity(d)) are shown as written.
+      // Split 1-bit outputs that still depend on inputs (z = x becomes z=1 on
+      // x, z=0 on !x), combinational or registered (y <= b holds the b sampled
+      // at the transition, not the live b). Values computed from internal data
+      // or functions (tx = shreg[0], tx = parity(d)) are shown as written.
       let forks: Path[] = [p];
-      for (const o of combOut) {
+      for (const o of [...combOut, ...regOut]) {
         if ((c.widths.get(o) ?? 1) !== 1) continue;
+        const env = combOut.has(o) ? "env" : "nb";
         forks = forks.flatMap((q) => {
-          const v = q.env.get(o);
+          const v = q[env].get(o);
           if (!v) return [q];
-          const sv = simplify(v, eng.ctx(q));
+          // (Bit 0 only: assigning data[3:0] to a 1-bit z keeps data[0], not data != 0.)
+          const qctx = eng.ctx(q);
+          const sv = lowBits(simplify(v, qctx), 1, qctx);
           if (isConst(sv) || !fromPorts(sv)) return [q];
-          return eng.branch(q, sv).map(([r, b]) => { r.env.set(o, num(b ? 1 : 0, 1)); return r; });
+          return eng.branch(q, sv).map(([r, b]) => { r[env].set(o, num(b ? 1 : 0, 1)); return r; });
         });
       }
       for (const q of forks) {
         const qctx = eng.ctx(q);
         const combVals = new Map<string, OutputValue>();
-        for (const o of combOut) { const v = q.env.get(o); if (v) combVals.set(o, outputValue(simplify(v, qctx), c.widths.get(o) ?? 1)); }
+        for (const o of combOut) {
+          const v = q.env.get(o);
+          if (!v) continue;
+          const sv = simplify(v, qctx);
+          combVals.set(o, outputValue(sv, c.widths.get(o) ?? 1));
+          if (!isConst(sv) && readsInput(sv)) combFromInputs.add(o);
+        }
         const regVals = new Map<string, OutputValue | undefined>();
-        for (const o of regOut) { const v = q.nb.get(o); regVals.set(o, v ? outputValue(simplify(v, qctx), c.widths.get(o) ?? 1) : undefined); }
+        for (const o of regOut) {
+          const v = q.nb.get(o);
+          const sv = v && simplify(v, qctx);
+          regVals.set(o, sv ? outputValue(sv, c.widths.get(o) ?? 1) : undefined);
+          if (sv && !isConst(sv) && readsInput(sv)) regFromInputs.add(o);
+        }
         runs.push({ assume: q.assume, next, comb: combVals, reg: regVals });
         enqueue(next);
       }
@@ -847,7 +1112,7 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
     mooreValue.set(state, mm);
   };
   for (const o of combOut) {
-    let same = true;
+    let same = !combFromInputs.has(o);
     for (const runs of runsByState.values()) {
       const vals = runs.filter((r) => r.comb.has(o)).map((r) => r.comb.get(o));
       if (vals.some((v) => !sameValue(v, vals[0]))) { same = false; break; }
@@ -867,7 +1132,7 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
     }
     const rv = resetRegOutputs.get(o);
     if (rv !== undefined) byDest.set(resetValue.toString(), [...(byDest.get(resetValue.toString()) ?? []), rv]);
-    const consistent = [...byDest.values()].every((vs) => vs.every((v) => sameValue(v, vs[0])));
+    const consistent = !regFromInputs.has(o) && [...byDest.values()].every((vs) => vs.every((v) => sameValue(v, vs[0])));
     if (consistent) {
       if (!byDest.size) continue;
       moore.add(o);
@@ -927,7 +1192,9 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
       groups.set(key, g);
     }
     const conds = conditions([...groups.values()].map((g) => g.runs), runs, c, internal);
-    const list = [...groups.values()].map((g, i) => ({ to: g.next, condition: conds[i], outputs: g.outs }));
+    // (A group no input value can reach has no condition: leave it out rather
+    // than draw it as an unconditional transition.)
+    const list = [...groups.values()].flatMap((g, i) => (conds[i] === undefined ? [] : [{ to: g.next, condition: conds[i]!, outputs: g.outs }]));
     transitionsOf.set(k, list);
   }
 
@@ -987,6 +1254,12 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
 
   fitStateSizes(d);
 
+  // A select rewritten by bitPositions no longer reads as in the source: say why.
+  const texts = shownTexts(d);
+  for (const [n, r] of c.ranges) {
+    if (n !== R && n !== N && texts.some((t) => t.includes(`${n}[`))) c.warn(`"${n}" is declared [${r.msb}:${r.lsb}]; its bit selects are shown as positions from the LSB (${n}[${r.msb}] reads ${n}[${Math.abs(r.msb - r.lsb)}])`);
+  }
+
   const blockCount = new Set(blocks.filter((b) => b.writes.has(R) || (N && b.writes.has(N)) || allOut.some((o) => b.writes.has(o))).filter((b) => b.always)).size;
   const assigns = blocks.filter((b) => !b.always && allOut.some((o) => b.writes.has(o))).length;
   const style = `${blockCount} always block${blockCount === 1 ? "" : "s"}${assigns ? ` + ${assigns} assign${assigns === 1 ? "" : "s"}` : ""}`;
@@ -1006,13 +1279,17 @@ export function extractFsm(m: Module, opts: ImportOptions = {}): ImportResult {
   };
 }
 
-function namedConstants(d: FsmDiagram, c: Ctx): Record<string, string> {
-  const out: Record<string, string> = {};
-  const texts = [
+/** Every condition and output value the diagram shows as text. */
+function shownTexts(d: FsmDiagram): string[] {
+  return [
     ...d.states.flatMap((s) => Object.values(s.outputs)),
     ...d.transitions.flatMap((t) => [t.condition, ...Object.values(t.outputs)]),
   ].filter((v): v is string => typeof v === "string");
-  for (const t of texts) for (const id of t.match(/[A-Za-z_]\w*/g) ?? []) if (c.params.has(id)) out[id] = formatNum({ ...c.params.get(id)!, src: undefined, name: undefined });
+}
+
+function namedConstants(d: FsmDiagram, c: Ctx): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const t of shownTexts(d)) for (const id of t.match(/[A-Za-z_]\w*/g) ?? []) if (c.params.has(id)) out[id] = formatNum({ ...c.params.get(id)!, src: undefined, name: undefined });
   return out;
 }
 
@@ -1027,14 +1304,61 @@ function tryAdd(d: FsmDiagram, kind: "inputs" | "outputs", name: string, width: 
 // ---- conditions ---------------------------------------------------------------------
 
 /**
+ * Which minterms over `atoms` (bit k-1-i is atom i, as in conditions) some
+ * input values can produce: the test feasible() makes for one path, done once
+ * for all 2^k of them. Each input of up to 12 bits that atoms read alone is
+ * run through its values once, collecting the combinations of those atoms'
+ * truth values it gives; a minterm is possible when each input's part of it
+ * is one of them. (Checking every minterm with feasible() took seconds for ten
+ * compares on one 12-bit input: 2^10 minterms times 2^12 values.)
+ */
+function mintermCheck(atoms: Expr[], c: Ctx): (m: number) => boolean {
+  const k = atoms.length;
+  const bit = (i: number) => 1 << (k - 1 - i);
+  const ctx: EvalCtx = { lookup: () => undefined, width: (n) => c.widths.get(n) };
+  let fixedMask = 0, fixedVal = 0;
+  const bySignal = new Map<string, Array<{ i: number; atom: Expr }>>();
+  atoms.forEach((a, i) => {
+    const v = simplify(a, ctx);
+    if (isConst(v)) { fixedMask |= bit(i); if (v.v !== 0n) fixedVal |= bit(i); return; }
+    const ids = [...freeIds(v)];
+    if (ids.length !== 1) return;
+    bySignal.set(ids[0], [...(bySignal.get(ids[0]) ?? []), { i, atom: v }]);
+  });
+  const checks: Array<{ mask: number; seen: Set<number> }> = [];
+  for (const [id, as] of bySignal) {
+    const w = c.widths.get(id);
+    if (w === undefined || w > 12) continue;
+    const tests = as.map((a) => valueTest(a.atom, id, w, c.signed.has(id), ctx));
+    const seen = new Set<number>();
+    let undecided = false;
+    for (let x = 0; x < 1 << w && !undecided; x++) {
+      let pattern = 0;
+      for (let j = 0; j < as.length; j++) {
+        const r = tests[j](x);
+        if (r === undefined) { undecided = true; break; } // (left alone, as in feasible)
+        if (r) pattern |= bit(as[j].i);
+      }
+      seen.add(pattern);
+    }
+    if (!undecided) checks.push({ mask: as.reduce((s, a) => s | bit(a.i), 0), seen });
+  }
+  return (m) => (m & fixedMask) === fixedVal && checks.every((ch) => ch.seen.has(m & ch.mask));
+}
+
+/**
  * One condition string per group. Each group is a set of runs; the runs of a
  * state partition its input space, so the conditions are mutually exclusive.
+ * undefined for a group that no input value reaches (all its runs turn out
+ * impossible once every assumption is checked together): its condition would
+ * be the empty one, which means "always".
  */
-function conditions(groups: Run[][], all: Run[], c: Ctx, internal: Set<string>): string[] {
+function conditions(groups: Run[][], all: Run[], c: Ctx, internal: Set<string>): Array<string | undefined> {
   if (groups.length === 1) return [""];
   const atoms: Assumption["atom"][] = [];
   const keys: string[] = [];
-  for (const r of all) for (const [k, a] of r.assume) if (!keys.includes(k)) { keys.push(k); atoms.push(a.atom); }
+  const index = new Map<string, number>();
+  for (const r of all) for (const [k, a] of r.assume) if (!index.has(k)) { index.set(k, keys.length); keys.push(k); atoms.push(a.atom); }
   for (const a of atoms) for (const n of freeIds(a)) if (!c.params.has(n)) internal.add(n);
   const lit = (i: number, val: boolean) => {
     if (val) return printExpr(atoms[i]);
@@ -1048,19 +1372,25 @@ function conditions(groups: Run[][], all: Run[], c: Ctx, internal: Set<string>):
   };
   const k = keys.length;
   if (k <= 10) {
-    const dummy: Path = { env: new Map(), nb: new Map(), subst: new Map(), assume: new Map() };
-    const ctx: EvalCtx = { lookup: () => undefined, width: (n) => c.widths.get(n) };
+    const possible = mintermCheck(atoms, c);
+    // Each run as a cube over the atoms: the bits it assumes, and their values.
+    const cube = (r: Run) => {
+      let care = 0, val = 0;
+      for (const [key, a] of r.assume) { const b = 1 << (k - 1 - index.get(key)!); care |= b; if (a.val) val |= b; }
+      return { care, val };
+    };
+    const cubes = groups.map((g) => g.map(cube));
     const on: number[][] = groups.map(() => []);
     const dc: number[] = [];
     for (let m = 0; m < 1 << k; m++) {
-      const val = (i: number) => ((m >> (k - 1 - i)) & 1) === 1;
-      const assume = new Map<string, Assumption>(keys.map((key, i) => [key, { atom: atoms[i], val: val(i) }]));
-      if (!feasible({ ...dummy, assume }, c, ctx)) { dc.push(m); continue; }
-      const gi = groups.findIndex((g) => g.some((r) => [...r.assume].every(([key, a]) => assume.get(key)!.val === a.val)));
+      if (!possible(m)) { dc.push(m); continue; }
+      const gi = cubes.findIndex((g) => g.some((r) => (m & r.care) === r.val));
       if (gi < 0) dc.push(m);
       else on[gi].push(m);
     }
+    const reached = on.filter((o) => o.length).length;
     return groups.map((_, gi) => {
+      if (!on[gi].length && reached) return undefined;
       const others = on.some((o, j) => j !== gi && o.length);
       if (!others) return "";
       const cubes = minimize(k, on[gi], dc);
@@ -1071,6 +1401,23 @@ function conditions(groups: Run[][], all: Run[], c: Ctx, internal: Set<string>):
       }));
     });
   }
-  // Too many atoms to minimise exactly: list the runs' cubes.
-  return groups.map((g) => fmt(g.map((r) => [...r.assume.keys()].map((key): [number, boolean] => [keys.indexOf(key), r.assume.get(key)!.val]))));
+  // Too many atoms to minimise exactly: list the runs' cubes, without the
+  // literals that an equality in the same cube already decides (op == 8'd4
+  // makes op != 8'd0 ... op != 8'd3 redundant, and a case with many labels
+  // would otherwise repeat every earlier label in every later one).
+  const ctx: EvalCtx = { lookup: () => undefined, width: (n) => c.widths.get(n) };
+  return groups.map((g) => fmt(g.map((r) => {
+    const cube = [...r.assume].map(([key, a]): [number, boolean] => [index.get(key)!, a.val]);
+    const eq = new Map<string, { at: number; value: Num }>();
+    for (const [i, v] of cube) { const a = atoms[i]; if (v && a.k === "bin" && (a.op === "==" || a.op === "===") && a.a.k === "id" && isConst(a.b)) eq.set(a.a.name, { at: i, value: a.b }); }
+    if (!eq.size) return cube;
+    return cube.filter(([i, v]) => {
+      const ids = [...freeIds(atoms[i])];
+      const known = ids.length === 1 ? eq.get(ids[0]) : undefined;
+      if (!known || known.at === i) return true;
+      const w = c.widths.get(ids[0]) ?? known.value.w ?? 32;
+      const r = simplify(atoms[i], { ...ctx, lookup: (n) => (n === ids[0] ? num(known.value.v, w) : undefined) });
+      return !(isConst(r) && (r.v !== 0n) === v);
+    });
+  })));
 }

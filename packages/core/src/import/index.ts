@@ -13,6 +13,18 @@ export { parseExpression } from "./parser.ts";
 
 /** Parse Verilog source and extract its FSM. States have no positions yet (see importVerilogLaidOut). */
 export function importVerilog(source: string, opts: ImportOptions = {}): ImportResult {
+  try {
+    return importModules(source, opts);
+  } catch (e) {
+    // Parsing and running the code recurse with its nesting: thousands of
+    // nested begin/end blocks or parentheses overflow the stack (sooner in
+    // Node than in a browser). Callers expect a VerilogImportError, not a crash.
+    if (e instanceof RangeError) throw new VerilogImportError(/call stack/i.test(e.message) ? "The Verilog is nested too deeply to import" : `Could not import the Verilog: ${e.message}`);
+    throw e;
+  }
+}
+
+function importModules(source: string, opts: ImportOptions): ImportResult {
   const file = parseVerilog(source);
   if (!file.modules.length) throw new VerilogImportError("No module found in the Verilog source");
   if (opts.module) {

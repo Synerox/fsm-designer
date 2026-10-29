@@ -16,13 +16,13 @@
 // snapping is on; hold Alt to place freely.
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { ReactElement, SVGProps } from "react";
+import type { Dispatch, ReactElement, SVGProps, SetStateAction } from "react";
 import type { PointerEvent as RPointerEvent } from "react";
-import { SMALL_SIZE, SUB_LINE_H, drawnSubLines, planDiagram, stateDisplay, stateFontSize, unreachableStates } from "@fsm/core";
+import { SMALL_SIZE, SUB_LINE_H, drawnSubLines, stateDisplay, stateFontSize, unreachableStates } from "@fsm/core";
 import type { DiagramPlan, EdgePlan } from "@fsm/core";
-import { drawOptions, mergeSelections, createState, createTransition, edgeTransitions, isEdgeSelected, isStateSelected, multiSelection, selectionParts, setInitial, toggleInSelection, useEditor } from "./store.ts";
+import { canvasOptions, caretSpot, editedTransition, mergeSelections, createState, createTransition, edgeTransitions, isEdgeSelected, isStateSelected, lineOwners, multiSelection, selectionParts, setInitial, stackOrder, toggleInSelection, useEditor, viewPlan } from "./store.ts";
 import type { Selection } from "./store.ts";
-import { GRID, SNAP_PX, angleOf, boxOf, circleHitsBox, edgePoints, inBox, segmentHitsBox, borderPoint, curveThrough, edgeMidpoint, loopPath, snapAngle, snapPoint, snapToGrid, stateAt } from "./geometry.ts";
+import { GRID, MAX_ZOOM, MIN_ZOOM, SNAP_PX, angleOf, boxOf, circleHitsBox, edgePoints, inBox, segmentHitsBox, borderPoint, curveThrough, edgeMidpoint, loopPath, snapAngle, snapPoint, snapToGrid, stateAt } from "./geometry.ts";
 import type { Guide, Pt } from "./geometry.ts";
 import { tr } from "./i18n.ts";
 
@@ -31,6 +31,7 @@ const ACCENT = "#2563eb";
 const SELECT = "#2383e2";
 const CROSSING = "#3fa34d"; // right-to-left box: selects whatever it touches
 const FONT = "Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif";
+const DRAG_PX = 4; // screen pixels the pointer must travel before a press on a state or a box drag starts dragging
 
 export interface View {
   x: number;
@@ -45,9 +46,6 @@ export interface GridOptions {
   snap: boolean;
 }
 
-export const MIN_ZOOM = 0.1;
-export const MAX_ZOOM = 8;
-
 /** Zoom by `factor` keeping screen point (mx, my) still. */
 export function zoomAround(v: View, factor: number, mx: number, my: number): View {
   const k = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.k * factor));
@@ -55,21 +53,21 @@ export function zoomAround(v: View, factor: number, mx: number, my: number): Vie
 }
 
 type Gesture =
-  | { kind: "move"; id: string; dx: number; dy: number; key: string }
+  | { kind: "move"; id: string; dx: number; dy: number; start: Pt; moved: boolean; key: string }
   | { kind: "curve"; from: string; to: string; key: string }
   | { kind: "loop"; id: string; key: string }
   | { kind: "initial"; id: string; key: string }
   | { kind: "resize"; id: string; key: string }
   | { kind: "link"; from: string | null; start: Pt }
   | { kind: "pan"; sx: number; sy: number; vx: number; vy: number }
-  | { kind: "moveMany"; start: Pt; anchor: Pt; orig: Array<{ id: string; x: number; y: number }>; key: string }
+  | { kind: "moveMany"; start: Pt; moved: boolean; anchor: Pt; orig: Array<{ id: string; x: number; y: number }>; key: string }
   | { kind: "box"; start: Pt; item: SingleItem | null; moved: boolean };
 
 type SingleItem = Exclude<Selection, null | { kind: "multi" }>;
 
 let gestureSeq = 0;
 
-export function Canvas({ view, setView, grid }: { view: View; setView: (v: View) => void; grid: GridOptions }) {
+export function Canvas({ view, setView, grid }: { view: View; setView: Dispatch<SetStateAction<View>>; grid: GridOptions }) {
   const doc = useEditor((s) => s.doc);
   const selection = useEditor((s) => s.selection);
   const edit = useEditor((s) => s.edit);
@@ -93,9 +91,11 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
   const shownFrom = selection?.kind === "edge" ? selection.from : undefined;
   const shownTo = selection?.kind === "edge" ? selection.to : undefined;
   const plan = useMemo<DiagramPlan>(
-    () => planDiagram(doc, { ...drawOptions(labels), shownEdge: shownFrom && shownTo ? { from: shownFrom, to: shownTo } : undefined }),
+    () => viewPlan(doc, canvasOptions(labels, shownFrom && shownTo ? { kind: "edge", from: shownFrom, to: shownTo } : null)),
     [doc, labels, shownFrom, shownTo],
   );
+  // The plan can be one made before a text-only edit (see viewPlan): states are drawn from the doc.
+  const current = useMemo(() => new Map(doc.states.map((s) => [s.id, s])), [doc]);
   // States the initial state never leads to are drawn dashed.
   const lost = useMemo(() => unreachableStates(doc), [doc]);
   // While box selecting, highlight what the box would add to the selection.
@@ -108,6 +108,8 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
   };
 
   // Wheel: scroll, or zoom around the cursor with ctrl/cmd (also trackpad pinch).
+  // Updates build on the latest view: several wheel events can arrive before
+  // React re-renders, and each must add to the one before.
   useEffect(() => {
     const el = svgRef.current!;
     const onWheel = (e: WheelEvent) => {
@@ -118,16 +120,21 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
         // A mouse wheel notch (deltaY around 100) zooms 10%; small trackpad
         // pinch deltas zoom smoothly in proportion.
         const factor = Math.abs(dy) >= 50 ? (dy > 0 ? 1 / 1.1 : 1.1) : Math.exp(-dy * 0.01);
-        setView(zoomAround(view, factor, e.clientX - r.left, e.clientY - r.top));
+        const mx = e.clientX - r.left, my = e.clientY - r.top;
+        setView((v) => zoomAround(v, factor, mx, my));
       } else {
-        setView({ ...view, x: view.x - e.deltaX, y: view.y - e.deltaY });
+        const { deltaX, deltaY } = e;
+        setView((v) => ({ ...v, x: v.x - deltaX, y: v.y - deltaY }));
       }
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, [view, setView]);
+  }, [setView]);
 
   const onPointerDown = (e: RPointerEvent<SVGSVGElement>) => {
+    // Focus that came from the mouse shows no ring, even once keys are typed
+    // (Chrome turns :focus-visible on at the first key press); onBlur clears it.
+    svgRef.current!.dataset.pointer = "";
     if (e.button !== 0 && e.button !== 1) return;
     svgRef.current!.setPointerCapture(e.pointerId);
     const p = toWorld(e);
@@ -166,14 +173,18 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
     if (stateId && selection?.kind === "multi" && isStateSelected(selection, stateId)) {
       const orig = selection.states.map((id) => byId.get(id)!.state).map((v) => ({ id: v.id, x: v.x!, y: v.y! }));
       const a = byId.get(stateId)!.state;
-      gesture.current = { kind: "moveMany", start: p, anchor: { x: a.x!, y: a.y! }, orig, key };
+      gesture.current = { kind: "moveMany", start: p, moved: false, anchor: { x: a.x!, y: a.y! }, orig, key };
     } else if (stateId) {
       const s = byId.get(stateId)!.state;
       select({ kind: "state", id: stateId });
-      gesture.current = { kind: "move", id: stateId, dx: s.x! - p.x, dy: s.y! - p.y, key };
+      gesture.current = { kind: "move", id: stateId, dx: s.x! - p.x, dy: s.y! - p.y, start: p, moved: false, key };
     } else if (edgeEl) {
       const [from, to] = edgeEl.getAttribute("data-edge")!.split(" ");
-      select({ kind: "edge", from, to });
+      // A click on one of the stacked label lines picks that transition for
+      // typing; a click on the arc keeps the one already picked.
+      const tid = target.closest("[data-tid]")?.getAttribute("data-tid")
+        ?? (selection?.kind === "edge" && selection.from === from && selection.to === to ? selection.tid : undefined);
+      select({ kind: "edge", from, to, ...(tid ? { tid } : {}) });
       gesture.current = from === to ? { kind: "loop", id: from, key } : { kind: "curve", from, to, key };
     } else if (onInitial) {
       const init = doc.states.find((s) => s.isInitial)!;
@@ -188,17 +199,31 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
   const onPointerMove = (e: RPointerEvent<SVGSVGElement>) => {
     const g = gesture.current;
     if (!g) return;
+    // An undo or redo while the button is held can take away what is being
+    // dragged: the gesture ends there.
+    const held = g.kind === "curve" ? [g.from, g.to] : g.kind === "move" || g.kind === "loop" || g.kind === "resize" || g.kind === "initial" ? [g.id] : g.kind === "link" && g.from ? [g.from] : [];
+    if (held.some((id) => !byId.has(id))) {
+      gesture.current = null;
+      setLink(null);
+      setGuides([]);
+      return;
+    }
     const p = toWorld(e);
+    // A click wobbles by a pixel or so: a state only starts moving (and
+    // snapping to the grid, which would shift an off-grid one) once the
+    // pointer has really left the spot it was pressed at.
+    if (g.kind === "box" || g.kind === "move" || g.kind === "moveMany") {
+      if (!g.moved && Math.hypot(p.x - g.start.x, p.y - g.start.y) * view.k < DRAG_PX) return;
+      g.moved = true;
+    }
     switch (g.kind) {
       case "pan":
-        setView({ ...view, x: g.vx + e.clientX - g.sx, y: g.vy + e.clientY - g.sy });
+        setView((v) => ({ ...v, x: g.vx + e.clientX - g.sx, y: g.vy + e.clientY - g.sy }));
         break;
       case "link":
         setLink({ from: g.from, start: g.start, at: p });
         break;
       case "box":
-        if (!g.moved && Math.hypot(p.x - g.start.x, p.y - g.start.y) * view.k < 4) break;
-        g.moved = true;
         setBox({ a: g.start, b: p });
         break;
       case "moveMany": {
@@ -222,9 +247,8 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
         const snapped = snapPoint({ x: p.x + g.dx, y: p.y + g.dy }, others, e.altKey ? 0 : SNAP_PX / view.k, grid.snap && !e.altKey);
         setGuides(snapped.guides);
         edit((d) => {
-          const s = d.states.find((v) => v.id === g.id)!;
-          s.x = snapped.p.x;
-          s.y = snapped.p.y;
+          const s = d.states.find((v) => v.id === g.id);
+          if (s) { s.x = snapped.p.x; s.y = snapped.p.y; }
         }, g.key);
         break;
       }
@@ -243,13 +267,13 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
       case "resize": {
         const s = byId.get(g.id)!.state;
         const radius = Math.min(200, Math.max(10, Math.round(Math.hypot(p.x - s.x!, p.y - s.y!))));
-        edit((d) => { d.states.find((v) => v.id === g.id)!.radius = radius; }, g.key);
+        edit((d) => { const s = d.states.find((v) => v.id === g.id); if (s) s.radius = radius; }, g.key);
         break;
       }
       case "initial": {
         const s = byId.get(g.id)!.state;
         const angle = snapAngle(angleOf({ x: s.x!, y: s.y! }, p));
-        edit((d) => { d.states.find((v) => v.id === g.id)!.initialAngle = angle; }, g.key);
+        edit((d) => { const s = d.states.find((v) => v.id === g.id); if (s) s.initialAngle = angle; }, g.key);
         break;
       }
     }
@@ -270,6 +294,7 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
     }
     if (!g || g.kind !== "link") return;
     setLink(null);
+    if (g.from && !byId.has(g.from)) return; // undone while dragging
     const p = toWorld(e);
     const target = linkTarget(plan, g.from, p);
     if (!target) return;
@@ -298,7 +323,8 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
       select({ kind: "state", id: stateId });
       return;
     }
-    if (document.elementFromPoint(e.clientX, e.clientY)?.closest("[data-edge],[data-initial]")) return;
+    // Lines, the start arrow and the resize handle (half of it lies outside the circle) are not empty space.
+    if (document.elementFromPoint(e.clientX, e.clientY)?.closest("[data-edge],[data-initial],[data-resize]")) return;
     let id = "";
     const at = grid.snap && !e.altKey ? { x: snapToGrid(p.x), y: snapToGrid(p.y) } : p;
     edit((d) => { id = createState(d, at.x, at.y).id; });
@@ -310,10 +336,16 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
       ref={svgRef}
       className="canvas"
       data-testid="canvas"
+      // A named, focusable surface; keys typed with it focused go to the
+      // window handler like anywhere else (editing the selection's text).
+      role="application"
+      aria-label={tr("State diagram canvas", "狀態圖畫布", "状態遷移図のキャンバス")}
+      tabIndex={0}
+      onBlur={(e) => { delete e.currentTarget.dataset.pointer; }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      onPointerCancel={() => { gesture.current = null; setLink(null); setGuides([]); }}
+      onPointerCancel={() => { gesture.current = null; setLink(null); setBox(null); setGuides([]); }}
       onDoubleClick={onDoubleClick}
       fontFamily={FONT}
     >
@@ -331,11 +363,25 @@ export function Canvas({ view, setView, grid }: { view: View; setView: (v: View)
       {grid.style === "line" && <GridLines view={view} w={size.w} h={size.h} />}
       {grid.style === "dot" && <GridDots view={view} />}
       <g transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
-        {plan.edges.map((e) => (
-          <Edge key={edgeKey(e)} e={e} selected={isEdgeSelected(shown, e.transitions[0].from, e.transitions[0].to)} caret={shown?.kind === "edge" ? caret : undefined} mid={edgeMidpoint(plan, e)} />
-        ))}
+        {plan.edges.map((e) => {
+          const editing = shown?.kind === "edge" && isEdgeSelected(shown, e.transitions[0].from, e.transitions[0].to);
+          const t = editing ? editedTransition(doc, shown) : undefined;
+          return (
+            <Edge
+              key={edgeKey(e)}
+              e={e}
+              owners={e.lines.length ? lineOwners(doc, e.transitions) : []}
+              stack={stackOrder(doc, e.transitions)}
+              selected={isEdgeSelected(shown, e.transitions[0].from, e.transitions[0].to)}
+              edited={t ? e.transitions.indexOf(t) : -1}
+              spot={t ? caretSpot(doc, t, Math.min(caret ?? t.condition.length, t.condition.length)) : null}
+              mid={edgeMidpoint(plan, e)}
+            />
+          );
+        })}
         {plan.initialArrow && <InitialArrow a={plan.initialArrow} selected={selectionParts(shown).initial} />}
-        {plan.states.map(({ state: s, r }) => {
+        {plan.states.map(({ state: planned, r }) => {
+          const s = current.get(planned.id) ?? planned;
           const selected = isStateSelected(shown, s.id);
           // Hidden outputs come back while the state is selected, like a line's text.
           const sub = drawnSubLines(doc, s, { labels: selected ? "all" : labels });
@@ -468,8 +514,9 @@ function GridDots({ view }: { view: View }) {
  */
 function linkTarget(plan: DiagramPlan, from: string | null, p: Pt): string | null {
   const hit = stateAt(plan, p);
-  if (hit || !from) return hit;
-  const { state: s, r } = plan.states.find((v) => v.state.id === from)!;
+  const src = from ? plan.states.find((v) => v.state.id === from) : undefined;
+  if (hit || !src) return hit;
+  const { state: s, r } = src;
   return Math.hypot(p.x - s.x!, p.y - s.y!) < r * 3.5 ? from : null;
 }
 
@@ -529,16 +576,28 @@ function CaretText({ x, y, text, caret, fontSize, ...rest }: { x: number; y: num
   );
 }
 
-function Edge({ e, selected, caret: caretAt, mid }: { e: EdgePlan; selected: boolean; caret: number | null | undefined; mid: Pt }) {
+/**
+ * A line with its stacked label lines (one or more per transition, see
+ * lineOwners). On the selected line the text cursor is drawn in the
+ * transition being edited (`edited`, its index; -1 when none) at `spot`;
+ * one with no text gets a cursor between the others' lines, where its text
+ * will appear (`stack` is the order the labels are stacked in, see
+ * stackOrder), or at the middle of the line when nothing is written on it.
+ */
+function Edge({ e, owners, stack, selected, edited, spot, mid }: { e: EdgePlan; owners: number[]; stack: number[]; selected: boolean; edited: number; spot: { line: number; offset: number } | null; mid: Pt }) {
   const color = selected ? SELECT : STROKE;
   const lines = e.lines;
-  const showCaret = selected && caretAt !== undefined;
-  const cond = e.transitions[0].condition;
-  // Caret position within the condition text (the first label line).
-  const at = showCaret && cond ? Math.min(caretAt ?? cond.length, cond.length) : null;
-  const caret: Pt | null = showCaret && !cond ? (e.label && lines.length ? null : mid) : null;
   const lh = e.fontSize * 1.3;
   const top = e.label ? e.label.y - (lines.length * lh) / 2 + lh / 2 : 0;
+  const first = owners.indexOf(edited);
+  const caretLine = edited >= 0 && spot && first >= 0 ? first + spot.line : -1;
+  let gap: { at: Pt; h: number } | null = null;
+  if (edited >= 0 && !spot) {
+    if (e.label && lines.length) {
+      const next = owners.findIndex((o) => stack.indexOf(o) > stack.indexOf(edited));
+      gap = { at: { x: e.label.x, y: top + (next < 0 ? lines.length : next) * lh - lh / 2 }, h: lh * 0.35 };
+    } else gap = { at: mid, h: 8 };
+  }
   return (
     <g data-edge={edgeKey(e)} className="edge">
       <path d={e.path} fill="none" stroke="transparent" strokeWidth={14} />
@@ -547,10 +606,11 @@ function Edge({ e, selected, caret: caretAt, mid }: { e: EdgePlan; selected: boo
       {e.label && lines.map((l, i) => (
         <CaretText
           key={i}
+          data-tid={e.transitions[owners[i]]?.id}
           x={e.label!.x}
           y={top + i * lh}
           text={l}
-          caret={i === 0 && at !== null && l === cond ? at : i === 0 && showCaret && !cond ? 0 : null}
+          caret={i === caretLine ? spot!.offset : null}
           fontSize={e.fontSize}
           fill={color}
           stroke="#ffffff"
@@ -559,7 +619,7 @@ function Edge({ e, selected, caret: caretAt, mid }: { e: EdgePlan; selected: boo
           paintOrder="stroke"
         />
       ))}
-      {caret && <line className="caret-line" x1={caret.x} x2={caret.x} y1={caret.y - 8} y2={caret.y + 8} stroke={SELECT} strokeWidth={1.4} pointerEvents="none" />}
+      {gap && <line className="caret-line" x1={gap.at.x} x2={gap.at.x} y1={gap.at.y - gap.h} y2={gap.at.y + gap.h} stroke={SELECT} strokeWidth={1.4} pointerEvents="none" />}
     </g>
   );
 }
@@ -577,6 +637,9 @@ function InitialArrow({ a, selected }: { a: NonNullable<DiagramPlan["initialArro
 
 function LinkPreview({ link, plan }: { link: { from: string | null; start: Pt; at: Pt }; plan: DiagramPlan }) {
   const find = (id: string) => plan.states.find((p) => p.state.id === id)!;
+  // The source can be undone away mid-drag; this renders before the next
+  // pointer move ends the gesture.
+  if (link.from && !plan.states.some((p) => p.state.id === link.from)) return null;
   const over = linkTarget(plan, link.from, link.at);
   let d: string;
   if (link.from) {

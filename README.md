@@ -57,7 +57,7 @@ FSM Designer 專門做這一件事：
 
 ### 從原始碼執行
 
-需要 [Node.js](https://nodejs.org/) 22 以上與 [pnpm](https://pnpm.io/)。
+需要 [Node.js](https://nodejs.org/) 22.18 以上（測試和工具直接執行 `.ts` 檔，22.18 起才不用加參數）與 [pnpm](https://pnpm.io/) 10。
 
 ```sh
 git clone https://github.com/Synerox/fsm-designer.git
@@ -75,7 +75,7 @@ pnpm dev:web      # 在瀏覽器開啟 http://localhost:5173
 | Shift + 從狀態拖曳 | 新增轉移；拖回自己就是自迴圈 |
 | Shift + 從空白處拖曳到狀態 | 新增起始箭頭 |
 | 拖曳線條 | 彎曲或旋轉線條 |
-| 選取後直接打字 | 編輯名稱或條件；`_0` + 空白鍵變下標 ₀，`\alpha` + 空白鍵變 α |
+| 選取後直接打字 | 編輯名稱或條件；狀態名稱裡 `_0` + 空白鍵變下標 ₀（條件保留 `_0`，像 Verilog 的 `data_0`），`\alpha` + 空白鍵變 α |
 | Ctrl + 拖曳 | 框選 |
 | Ctrl + I | 匯入 Verilog |
 | F | 讓整張圖符合視窗 |
@@ -109,7 +109,7 @@ pnpm dev:web      # 在瀏覽器開啟 http://localhost:5173
 | --- | --- |
 | **PNG** | 貼進簡報、文件或作業 |
 | **SVG** | 向量圖，放大不失真，可以再用 Inkscape／Illustrator 修改 |
-| **LaTeX (TikZ)** | 產生可用 `pdflatex` 編譯的 TikZ 圖，可以直接放進報告或論文 |
+| **LaTeX (TikZ)** | 產生可用 `pdflatex` 編譯的 TikZ 圖，可以直接放進報告或論文；標籤含中日韓文字時改用 `xelatex` 或 `lualatex`（檔頭會載入 `ctex`）；字型缺的字會印成空白，`ctex` 在 Linux 與 Overleaf 的預設字型 Fandol 沒有韓文、也缺部分繁體字（如「綠」「黃」），這時取消檔頭 `\setCJKmainfont{Noto Serif CJK TC}` 那一行的註解，或換成你有的 CJK 字型 |
 | **.fsm.json** | 專案檔，桌面版、網頁版與 MCP server 都讀寫同一種格式 |
 
 以 1011 序列偵測器為例，匯出的 LaTeX 節錄如下：
@@ -182,7 +182,7 @@ fsm-designer/
 
 部分 Verilog 測試會用 [Icarus Verilog](https://steveicarus.github.io/iverilog/) 逐拍比對狀態圖與原始程式碼，沒有安裝 `iverilog` 時會自動略過。
 
-推送到 `main` 時，GitHub Actions 會執行測試並把網頁版部署到 GitHub Pages；推送 `v*` 標籤時會建置 Windows 安裝檔並發布到 Releases。
+GitHub Actions 會在每個 pull request 執行全部測試（裝好 Icarus Verilog）；推送到 `main` 時會執行測試並把網頁版部署到 GitHub Pages；推送 `v*` 標籤時會先執行測試、確認標籤和版本號一致，再建置 Windows 安裝檔並發布到 Releases。
 
 ## 參與貢獻
 

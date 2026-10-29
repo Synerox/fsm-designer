@@ -1,18 +1,23 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import type { MouseEvent as RMouseEvent, RefObject } from "react";
 import { expandShortcut, planDiagram } from "@fsm/core";
-import { Canvas, MAX_ZOOM, zoomAround } from "./Canvas.tsx";
+import { Canvas, zoomAround } from "./Canvas.tsx";
+import { fitView } from "./geometry.ts";
 import type { GridOptions, GridStyle, View } from "./Canvas.tsx";
 import { Hints } from "./Hints.tsx";
 import { Inspector } from "./Inspector.tsx";
 import { Menu } from "./Menu.tsx";
 import { ImportReport, VerilogImportDialog } from "./VerilogImport.tsx";
-import { discardMessage, exportLatex, exportPng, exportSvg, latexText, newFile, openFile, restoreSession, saveDoc, startAutosave, tidyUp } from "./actions.ts";
+import { autosaveLost, discardMessage, discardUnsaved, exportLatex, exportPng, exportSvg, latexText, newFile, openFile, restoreSession, saveDoc, startAutosave, tidyUp, useAutosave } from "./actions.ts";
 import { baseName, copyText, guardWindowClose, isDesktop, setWindowTitle } from "./platform.ts";
-import { drawOptions, selectionParts, copySelection, deleteSelection, edgeTransitions, getStateText, hasClipboard, pasteClipboard, selectAll, setEdgeText, setStateText, useEditor } from "./store.ts";
+import { PRESSABLE, deleteCopied, deletesSelection, keyPressesButton, ownsKeys, snapCaret, stepCaret, typedText } from "./keys.ts";
+import { modalOpen, useModal } from "./dialog.ts";
+import { drawOptions, selectionParts, copySelection, deleteSelection, editedTransition, getStateText, hasClipboard, pasteClipboard, selectAll, setEdgeText, typeStateText, useEditor } from "./store.ts";
 import type { Selection } from "./store.ts";
-import type { FsmDiagram, ImportResult, LayoutIssue } from "@fsm/core";
+import type { ImportResult, LayoutIssue } from "@fsm/core";
+import { drewText, statusText } from "./summary.ts";
 import type { LabelMode } from "./store.ts";
-import { tr, useLang } from "./i18n.ts";
+import { MOD, tr, useLang } from "./i18n.ts";
 import type { Lang } from "./i18n.ts";
 
 const LABEL_MODES = (): Array<[LabelMode, string, string]> => [
@@ -28,11 +33,13 @@ const issueText = (issues: LayoutIssue[]) => issues.map(({ kind, count: n }) => 
 })[kind]).join(tr(", ", "、", "、"));
 
 const LANGS: Array<[Lang, string]> = [["en", "English"], ["zh", "中文"], ["ja", "日本語"]];
+/** BCP 47 tag for the page and for each language's own name in the menu. */
+const langTag = (l: Lang) => (l === "zh" ? "zh-Hant" : l);
 
 export function App() {
   const lang = useLang((s) => s.lang);
   const setLang = useLang((s) => s.setLang);
-  useEffect(() => { document.documentElement.lang = lang === "zh" ? "zh-Hant" : lang; }, [lang]);
+  useEffect(() => { document.documentElement.lang = langTag(lang); }, [lang]);
   const [view, setView] = useState<View>({ x: 0, y: 0, k: 1 });
   const [grid, setGrid] = useState<GridOptions>(loadGridOptions);
   useEffect(() => { try { localStorage.setItem(GRID_KEY, JSON.stringify(grid)); } catch { /* storage off */ } }, [grid]);
@@ -42,14 +49,20 @@ export function App() {
   const selection = useEditor((s) => s.selection);
   const [latex, setLatex] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
+  const [layingOut, setLayingOut] = useState(false);
   const [report, setReport] = useState<{ result: ImportResult; seq: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // A notice stays while the pointer is on it, and longer messages stay longer.
+  const [holdNotice, setHoldNotice] = useState(false);
   useEffect(() => {
-    if (!notice) return;
-    const t = setTimeout(() => setNotice(null), 2500);
+    if (!notice) { setHoldNotice(false); return; }
+    if (holdNotice) return;
+    // Clear only this notice: after a long layout an expired timer can run
+    // after the next notice was set but before this effect is cleaned up.
+    const t = setTimeout(() => setNotice((n) => (n === notice ? null : n)), 2500 + 50 * notice.length);
     return () => clearTimeout(t);
-  }, [notice]);
+  }, [notice, holdNotice]);
   const filePath = useEditor((s) => s.filePath);
   const dirty = useEditor((s) => s.dirty);
   const canUndo = useEditor((s) => s.past.length > 0);
@@ -59,16 +72,19 @@ export function App() {
   const labels = useEditor((s) => s.labels);
   const setLabels = useEditor((s) => s.setLabels);
   const { undo, redo } = useEditor.getState();
+  // The browser build relies on its autosave; say so when that copy is not this tab's work.
+  const storageProblem = useAutosave((a) => (isDesktop ? null : a.failed ? "failed" : a.otherTab ? "otherTab" : null));
+  // The status bar can cut it short, so the title keeps it readable in full.
+  const storageWarn = storageProblem === "failed" ? tr("This browser is not keeping your changes; save the file to keep them", "瀏覽器沒有保存你的變更，請存檔以免遺失", "このブラウザーには変更が保存されていません。ファイルを保存してください")
+    : storageProblem === "otherTab" ? tr("Another tab has also autosaved here: a reload brings back the diagram edited last", "另一個分頁也在這裡自動保存過：重新整理後只會還原最後編輯的那張圖", "別のタブもここに自動保存しました。再読み込みすると最後に編集した図が戻ります")
+    : null;
 
   // Fit the drawing in the window (zooming in at most to 200%).
   const fit = () => {
     const el = document.querySelector<SVGSVGElement>("[data-testid=canvas]");
     const { doc } = useEditor.getState();
     if (!el || !doc.states.length) return setView({ x: 0, y: 0, k: 1 });
-    const { minX, minY, maxX, maxY } = planDiagram(doc, drawOptions()).bounds;
-    const pad = 40, w = el.clientWidth, h = el.clientHeight;
-    const k = Math.min(2, MAX_ZOOM, (w - 2 * pad) / (maxX - minX), (h - 2 * pad) / (maxY - minY));
-    setView({ k, x: (w - (maxX - minX) * k) / 2 - minX * k, y: (h - (maxY - minY) * k) / 2 - minY * k });
+    setView(fitView(planDiagram(doc, drawOptions()).bounds, el.clientWidth, el.clientHeight));
   };
   useEffect(() => { if (loadSeq) fit(); }, [loadSeq]);
   // The import report belongs to the diagram it describes.
@@ -79,14 +95,41 @@ export function App() {
     setView((v) => zoomAround(v, factor, (el?.clientWidth ?? 0) / 2, (el?.clientHeight ?? 0) / 2));
   };
 
+  const hintsToggle = useRef<HTMLButtonElement>(null);
+  /**
+   * A button pressed from the keyboard (a click with detail 0) that then goes
+   * away or turns disabled drops focus to <body>, and a screen reader loses
+   * its place: once React has updated, hand focus on to `next`, or else the
+   * canvas. A mouse click keeps the browser's behaviour, so Space typed after
+   * it still goes to the selection (see keyPressesButton).
+   */
+  const handFocus = (e: RMouseEvent<HTMLElement>, next: () => HTMLElement | null = () => null) => {
+    if (e.detail !== 0) return;
+    const from = e.currentTarget;
+    requestAnimationFrame(() => {
+      const gone = !from.isConnected || (from instanceof HTMLButtonElement && from.disabled);
+      const at = document.activeElement;
+      if (!gone || (at && at !== from && at !== document.body)) return;
+      (next() ?? document.querySelector<SVGSVGElement>("[data-testid=canvas]"))?.focus();
+    });
+  };
+  const undoButton = useRef<HTMLButtonElement>(null);
+  const redoButton = useRef<HTMLButtonElement>(null);
+  /** Undo or Redo, then (if that used it up) focus the other one while it can still be pressed. */
+  const undoRedo = (step: () => void, other: RefObject<HTMLButtonElement | null>) => (e: RMouseEvent<HTMLButtonElement>) => {
+    step();
+    handFocus(e, () => (other.current && !other.current.disabled ? other.current : null));
+  };
+
   const run = (fn: () => Promise<void> | void) => () => {
     Promise.resolve().then(fn).catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
   };
 
   useEffect(() => {
-    restoreSession().catch(() => {});
+    restoreSession().catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
     const stopAutosave = startAutosave();
-    const unguard = guardWindowClose(() => useEditor.getState().dirty, discardMessage);
+    // In a browser a reload or closed tab is safe while the autosave holds the work.
+    const unguard = guardWindowClose(() => useEditor.getState().dirty && (isDesktop || autosaveLost()), discardMessage, discardUnsaved);
     return () => { stopAutosave(); void unguard.then((f) => f()); };
   }, []);
 
@@ -94,19 +137,71 @@ export function App() {
     void setWindowTitle(`${dirty ? "● " : ""}${filePath ? baseName(filePath) : tr("Untitled", "未命名")} — FSM Designer`);
   }, [filePath, dirty, lang]);
 
+  // Selecting in the diagram drops any text selected on the page (the canvas
+  // is user-select: none, so clicking it does not), so Ctrl+C copies whichever
+  // of the two the user picked last.
+  useEffect(() => useEditor.subscribe((s, prev) => {
+    if (s.selection && s.selection !== prev.selection && pageText()) window.getSelection()?.removeAllRanges();
+  }), []);
+
   useEffect(() => {
+    // The last button or checkbox clicked with the mouse: Chromium leaves focus
+    // on it, and Space after that is typing, not pressing it again (see
+    // keyPressesButton). Forgotten once focus moves anywhere else, so a control
+    // reached again by Tab/Shift+Tab is pressed by Space like any
+    // keyboard-focused one. A click on a checkbox's label focuses the checkbox.
+    let clicked: Element | null = null;
+    const onPointer = (e: PointerEvent) => {
+      const t = e.target as Element;
+      const label = t.closest?.("label");
+      clicked = t.closest?.(PRESSABLE) ?? (label instanceof HTMLLabelElement ? label.control : null) ?? null;
+    };
+    const onFocus = (e: FocusEvent) => { if (e.target !== clicked) clicked = null; };
     const onKey = (e: KeyboardEvent) => {
+      // A menu that handled the key itself (arrow keys) already prevented it.
+      if (e.defaultPrevented) return;
       const mod = e.ctrlKey || e.metaKey;
-      const inField = (e.target as Element).closest("input, textarea, select");
+      const target = e.target instanceof Element ? e.target : document.body;
+      const inField = ownsKeys(target);
       const k = e.key.toLowerCase();
-      if (mod && k === "s") { e.preventDefault(); run(() => saveDoc(e.shiftKey))(); return; }
-      if (inField) return;
+      if (mod && k === "s") {
+        e.preventDefault();
+        // A field that keeps its value only on blur (the diagram's name) must
+        // be committed first, or the file gets the old value and the typed one
+        // is lost with no unsaved marker. Focus and caret then go back to the
+        // field; the name input is keyed by the name, so committing a new one
+        // remounts it once React updates, and the new input is found by its testid.
+        const el = document.activeElement;
+        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+          const { selectionStart: from, selectionEnd: to } = el;
+          const refocus = (f: HTMLInputElement | HTMLTextAreaElement) => {
+            f.focus();
+            try { f.setSelectionRange(from, to); } catch { /* number inputs have no caret */ }
+          };
+          el.blur();
+          if (el.isConnected) refocus(el);
+          const id = el.dataset.testid;
+          if (id) requestAnimationFrame(() => {
+            if (el.isConnected || document.activeElement !== document.body) return;
+            const again = document.querySelector(`[data-testid="${id}"]`);
+            if (again instanceof HTMLInputElement || again instanceof HTMLTextAreaElement) refocus(again);
+          });
+        }
+        run(() => saveDoc(e.shiftKey))();
+        return;
+      }
+      // An open dialog (LaTeX, Import, Discard changes?) owns the keyboard; it
+      // handles Escape and Tab itself, and nothing may change the diagram behind it.
+      if (inField || modalOpen()) return;
       if (mod && k === "o") { e.preventDefault(); run(openFile)(); return; }
       if (mod && k === "n") { e.preventDefault(); run(newFile)(); return; }
       if (mod && k === "i") { e.preventDefault(); setImporting(true); return; }
       if (mod && (k === "y" || (k === "z" && e.shiftKey))) { e.preventDefault(); redo(); return; }
       if (mod && k === "z") { e.preventDefault(); undo(); return; }
       if (mod && (k === "c" || k === "x")) {
+        // Text selected on the page (the import report, the status bar) is
+        // copied the normal way.
+        if (pageText()) return;
         e.preventDefault();
         const st = useEditor.getState();
         const n = copySelection(st.doc, st.selection);
@@ -115,8 +210,10 @@ export function App() {
           return;
         }
         if (k === "x") {
-          st.edit((d) => deleteSelection(d, st.selection));
-          st.select(null);
+          // Only what was copied is deleted; lone lines and the start arrow stay selected.
+          let kept: Selection = null;
+          st.edit((d) => { kept = deleteCopied(d, st.selection); });
+          st.select(kept);
         }
         setNotice(k === "x" ? tr(`Cut ${n} item${n === 1 ? "" : "s"}`, `已剪下 ${n} 個物件`, `${n} 個を切り取りました`) : tr(`Copied ${n} item${n === 1 ? "" : "s"}`, `已複製 ${n} 個物件`, `${n} 個をコピーしました`));
         return;
@@ -136,14 +233,16 @@ export function App() {
         st.select(selectAll(st.doc));
         return;
       }
-      if (mod || e.altKey) return;
+      const typed = typedText(e);
+      if ((mod || e.altKey) && typed === null) return;
+      if (keyPressesButton(e.key, target, clicked)) return;
 
       const { selection, doc, edit, select } = useEditor.getState();
       if (e.key === "Escape") { select(null); return; }
       // F fits the window, unless a state or line is selected (then it is typed).
       if (k === "f" && selection?.kind !== "state" && selection?.kind !== "edge") { e.preventDefault(); fit(); return; }
       if (!selection) return;
-      if (e.key === "Delete") {
+      if (deletesSelection(e.key, selection)) {
         e.preventDefault();
         edit((d) => deleteSelection(d, selection));
         select(null);
@@ -156,24 +255,25 @@ export function App() {
         const s = doc.states.find((v) => v.id === selection.id);
         if (!s) return;
         cur = getStateText(s);
-        apply = (text) => edit((d) => setStateText(d, s.id, text), `text:${s.id}`);
+        apply = (text) => typeStateText(s.id, text);
       } else {
-        const [t] = edgeTransitions(doc, selection.from, selection.to);
+        const t = editedTransition(doc, selection);
         if (!t) return;
         cur = t.condition;
-        apply = (text) => edit((d) => setEdgeText(d, selection.from, selection.to, text), `text:${t.id}`);
+        apply = (text) => edit((d) => setEdgeText(d, selection.from, selection.to, text, t.id), `text:${t.id}`);
       }
       const { caret: stored, setCaret } = useEditor.getState();
-      const caret = Math.min(stored ?? cur.length, cur.length);
+      // Whole characters only: an emoji is two code units and must not be split.
+      const caret = snapCaret(cur, Math.min(stored ?? cur.length, cur.length));
       const put = (text: string, at: number) => { apply(text); setCaret(at); };
       switch (e.key) {
-        case "ArrowLeft": e.preventDefault(); setCaret(Math.max(0, caret - 1)); return;
-        case "ArrowRight": e.preventDefault(); setCaret(Math.min(cur.length, caret + 1)); return;
+        case "ArrowLeft": e.preventDefault(); setCaret(stepCaret(cur, caret, -1)); return;
+        case "ArrowRight": e.preventDefault(); setCaret(stepCaret(cur, caret, 1)); return;
         case "ArrowUp": case "Home": e.preventDefault(); setCaret(0); return;
         case "ArrowDown": case "End": e.preventDefault(); setCaret(cur.length); return;
         case "Backspace":
           e.preventDefault();
-          if (caret > 0) put(cur.slice(0, caret - 1) + cur.slice(caret), caret - 1);
+          if (caret > 0) { const at = stepCaret(cur, caret, -1); put(cur.slice(0, at) + cur.slice(caret), at); }
           return;
         case " ": {
           e.preventDefault();
@@ -185,12 +285,18 @@ export function App() {
           return;
         }
       }
-      if (e.key.length !== 1) return;
+      if (typed === null) return;
       e.preventDefault();
-      put(cur.slice(0, caret) + e.key + cur.slice(caret), caret + 1);
+      put(cur.slice(0, caret) + typed + cur.slice(caret), caret + typed.length);
     };
+    window.addEventListener("pointerdown", onPointer, true);
+    window.addEventListener("focusin", onFocus, true);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onPointer, true);
+      window.removeEventListener("focusin", onFocus, true);
+      window.removeEventListener("keydown", onKey);
+    };
   }, [undo, redo]);
 
   return (
@@ -218,42 +324,68 @@ export function App() {
         <div className="menu">
           <button
             className="menu-trigger"
+            // Busy, not disabled, while the layout runs: disabling the button
+            // would drop keyboard focus to <body>.
             disabled={!hasStates}
+            aria-disabled={layingOut || undefined}
+            aria-busy={layingOut}
             data-testid="tidy"
-            onClick={run(async () => {
-              const { moved, issues } = await tidyUp();
+            onClick={layingOut ? undefined : run(async () => {
+              setLayingOut(true); // tidyUp lets this paint before the layout holds the page
+              const { moved, issues } = await tidyUp().finally(() => setLayingOut(false));
               if (issues.length) setNotice(tr(`Laid out; could not fix: ${issueText(issues)}`, `已排版，仍無法解決：${issueText(issues)}`, `レイアウト済み。解決できなかった問題：${issueText(issues)}`));
               else if (!moved) setNotice(tr("Already laid out", "目前已經是自動排版的結果"));
               fit();
             })}
           >
-            {tr("Auto Layout", "自動排版")}
+            {layingOut ? tr("Laying out…", "排版中…", "レイアウト中…") : tr("Auto Layout", "自動排版")}
           </button>
         </div>
         <span className="sep" />
         <nav className="group" aria-label={tr("Edit", "編輯")}>
-          <button className="ghost with-icon" onClick={undo} disabled={!canUndo} title="Ctrl+Z">{tr("Undo", "復原")}<Icon d={UNDO} /></button>
-          <button className="ghost with-icon" onClick={redo} disabled={!canRedo} title="Ctrl+Shift+Z">{tr("Redo", "重做")}<Icon d={REDO} /></button>
+          <button ref={undoButton} className="ghost with-icon" onClick={undoRedo(undo, redoButton)} disabled={!canUndo} title={`${MOD}+Z`}>{tr("Undo", "復原")}<Icon d={UNDO} /></button>
+          <button ref={redoButton} className="ghost with-icon" onClick={undoRedo(redo, undoButton)} disabled={!canRedo} title={`${MOD}+Shift+Z`}>{tr("Redo", "重做")}<Icon d={REDO} /></button>
         </nav>
         <span className="file" title={filePath ?? undefined}>{dirty && <span className="dot" title={tr("Unsaved changes", "尚未儲存")} />}{filePath ? baseName(filePath) : tr("Untitled", "未命名")}</span>
         <Menu
           icon
           label={<Globe />}
-          title="Language / 語言"
+          // Names itself in English and in the other UI languages, so it can be
+          // found by someone who cannot read the current one (English is the default).
+          title={tr("Language / 語言 / 言語", "Language / 語言", "Language / 言語")}
           testId="lang"
-          items={LANGS.map(([l, name]) => ({ label: name, checked: lang === l, onSelect: () => setLang(l) }))}
+          items={LANGS.map(([l, name]) => ({ label: name, lang: langTag(l), checked: lang === l, onSelect: () => setLang(l) }))}
         />
       </header>
       <main className="main">
         <div className="canvas-wrap">
           <Canvas view={view} setView={setView} grid={grid} />
-          {hints && <Hints onClose={() => setHints(false)} />}
-          {report && <ImportReport result={report.result} onClose={() => setReport(null)} />}
+          {hints && <Hints onClose={(e) => { setHints(false); handFocus(e, () => hintsToggle.current); }} />}
+          {report && <ImportReport result={report.result} onClose={(e) => { setReport(null); handFocus(e); }} />}
+          {/* Stacked over the bottom of the canvas, so an error and a notice
+              never hide each other or the status bar's controls. Always in
+              the page so screen readers announce what appears in them. */}
+          <div className="toasts">
+            <div role="alert">
+              {error && (
+                <div className="toast" onClick={() => setError(null)}>
+                  {error}
+                  <button className="toast-close" onClick={() => setError(null)} aria-label={tr("Close", "關閉")}>×</button>
+                </div>
+              )}
+            </div>
+            <div role="status">
+              {notice && (
+                <div className="toast ok" onClick={() => setNotice(null)} onPointerEnter={() => setHoldNotice(true)} onPointerLeave={() => setHoldNotice(false)}>{notice}</div>
+              )}
+            </div>
+          </div>
         </div>
         <Inspector snap={grid.snap} />
       </main>
       <footer className="statusbar">
         <p className="status" data-testid="status">{statusText(doc, selection)}{!isDesktop && <span className="muted"> · {tr("Saving and exporting download the file", "存檔與匯出會以下載方式儲存")}</span>}</p>
+        <p className="storage-warn" role="status" data-testid="storage-warn" title={storageWarn ?? undefined}>{storageWarn}</p>
         <div className="view-controls">
           <span className="seg" role="group" aria-label={tr("Grid style", "格線樣式")} title={tr("Grid style", "格線樣式")}>
             {GRID_STYLES().map(([style, name]) => (
@@ -266,75 +398,72 @@ export function App() {
             ))}
           </span>
           <button className="chip" aria-pressed={grid.snap} onClick={() => setGrid((g) => ({ ...g, snap: !g.snap }))} title={tr("Snap to the grid while dragging (hold Alt to turn off for a moment)", "拖曳時吸附到格線（按住 Alt 暫時不吸附）")}>{tr("Snap", "吸附")}</button>
-          <button className="chip" aria-pressed={hints} data-testid="hints-toggle" onClick={() => setHints((h) => !h)} title={hints ? tr("Hide shortcut hints", "隱藏快捷鍵提示") : tr("Show shortcut hints", "顯示快捷鍵提示")}>{tr("Hints", "提示")}</button>
+          <button ref={hintsToggle} className="chip" aria-pressed={hints} data-testid="hints-toggle" onClick={() => setHints((h) => !h)} title={hints ? tr("Hide shortcut hints", "隱藏快捷鍵提示") : tr("Show shortcut hints", "顯示快捷鍵提示")}>{tr("Hints", "提示")}</button>
           <span className="zoom-controls" role="group" aria-label={tr("Zoom", "縮放")}>
-            <button className="icon" onClick={() => zoomBy(1 / 1.1)} title={tr("Zoom out (Ctrl+wheel)", "縮小（Ctrl+滾輪）")} aria-label={tr("Zoom out", "縮小")}><Icon d={ZOOM_OUT} /></button>
+            <button className="icon" onClick={() => zoomBy(1 / 1.1)} title={tr(`Zoom out (${MOD}+wheel)`, `縮小（${MOD}+滾輪）`, `縮小（${MOD}+ホイール）`)} aria-label={tr("Zoom out", "縮小")}><Icon d={ZOOM_OUT} /></button>
             <button className="zoom" data-testid="zoom" onClick={() => zoomBy(1 / view.k)} title={tr("Zoom level; click for 100%", "縮放比例；點一下回到 100%")}>{Math.round(view.k * 100)}%</button>
-            <button className="icon" onClick={() => zoomBy(1.1)} title={tr("Zoom in (Ctrl+wheel)", "放大（Ctrl+滾輪）")} aria-label={tr("Zoom in", "放大")}><Icon d={ZOOM_IN} /></button>
+            <button className="icon" onClick={() => zoomBy(1.1)} title={tr(`Zoom in (${MOD}+wheel)`, `放大（${MOD}+滾輪）`, `拡大（${MOD}+ホイール）`)} aria-label={tr("Zoom in", "放大")}><Icon d={ZOOM_IN} /></button>
             <button className="icon" data-testid="fit" onClick={fit} title={tr("Fit to window (F)", "符合視窗（F）")} aria-label={tr("Fit to window", "符合視窗")}><Icon d={FIT} /></button>
           </span>
         </div>
       </footer>
-      {latex !== null && (
-        <div className="modal-backdrop" onClick={() => setLatex(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>LaTeX (TikZ)</h3>
-            <textarea readOnly value={latex} spellCheck={false} />
-            <div className="row">
-              <button
-                onClick={(e) => {
-                  const area = (e.currentTarget.closest(".modal") as HTMLElement).querySelector("textarea")!;
-                  copyText(latex).then(
-                    () => setNotice(tr("LaTeX copied", "已複製 LaTeX")),
-                    () => { area.focus(); area.select(); setNotice(tr("All text selected; press Ctrl+C to copy", "已選取全部文字，請按 Ctrl+C 複製")); },
-                  );
-                }}
-              >
-                {tr("Copy", "複製")}
-              </button>
-              <button onClick={run(exportLatex)}>{tr("Save as .tex", "存成 .tex")}</button>
-              <button onClick={() => setLatex(null)}>{tr("Close", "關閉")}</button>
-            </div>
-          </div>
-        </div>
-      )}
+      {latex !== null && <LatexDialog latex={latex} onClose={() => setLatex(null)} onSave={run(async () => {
+        const name = await exportLatex();
+        // A published page saves .tex only as text (see saveViaHost).
+        if (name && !isDesktop && name.endsWith(".tex.txt")) setNotice(tr(`Saved as ${name}: this page can't save .tex files, so rename it to .tex`, `已存成 ${name}：這個頁面無法儲存 .tex 檔，請把副檔名改回 .tex`, `${name} として保存しました。このページは .tex を保存できないため、拡張子を .tex に変更してください`));
+      })} setNotice={setNotice} />}
       {importing && (
         <VerilogImportDialog
           onClose={() => setImporting(false)}
           onImported={(result) => {
             setImporting(false);
             setReport({ result, seq: useEditor.getState().loadSeq });
-            const ns = result.diagram.states.length, nt = result.diagram.transitions.length;
-            setNotice(tr(`Drew ${ns} states and ${nt} transitions from Verilog`, `已從 Verilog 畫出 ${ns} 個狀態、${nt} 條轉移`, `Verilog から ${ns} 個の状態と ${nt} 本の遷移を描きました`));
+            setNotice(drewText(result.diagram));
           }}
         />
-      )}
-      {error && (
-        <div className="toast" onClick={() => setError(null)}>{error}</div>
-      )}
-      {notice && (
-        <div className="toast ok" onClick={() => setNotice(null)}>{notice}</div>
       )}
     </div>
   );
 }
 
-const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "Cmd" : "Ctrl";
+/** File > Export > LaTeX: the TikZ code, to copy or save. */
+function LatexDialog({ latex, onClose, onSave, setNotice }: { latex: string; onClose: () => void; onSave: () => void; setNotice: (s: string) => void }) {
+  const box = useModal<HTMLDivElement>(onClose);
+  const titleId = useId();
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" ref={box} role="dialog" aria-modal="true" aria-labelledby={titleId} onClick={(e) => e.stopPropagation()}>
+        <h3 id={titleId}>LaTeX (TikZ)</h3>
+        <textarea readOnly value={latex} spellCheck={false} aria-labelledby={titleId} />
+        <div className="row">
+          <button
+            onClick={() => {
+              const area = box.current!.querySelector("textarea")!;
+              copyText(latex).then(
+                () => setNotice(tr("LaTeX copied", "已複製 LaTeX")),
+                () => { area.focus(); area.select(); setNotice(tr(`All text selected; press ${MOD}+C to copy`, `已選取全部文字，請按 ${MOD}+C 複製`, `全テキストを選択しました。${MOD}+C でコピー`)); },
+              );
+            }}
+          >
+            {tr("Copy", "複製")}
+          </button>
+          <button onClick={onSave}>{tr("Save as .tex", "存成 .tex")}</button>
+          <button onClick={onClose}>{tr("Close", "關閉")}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Whether the user has selected text on the page (outside the text fields). */
+function pageText(): boolean {
+  if (document.activeElement?.closest("input, textarea")) return false;
+  const sel = window.getSelection();
+  return !!sel && !sel.isCollapsed && sel.toString().trim() !== "";
+}
 const GRID_KEY = "fsm-designer.grid.v2";
 const HINTS_KEY = "fsm-designer.hints.v1";
 
-/** Status bar text: what is selected, else the size of the diagram. */
-function statusText(d: FsmDiagram, sel: Selection): string {
-  const { states, edges, initial } = selectionParts(sel);
-  const kind = d.type === "mealy" ? "Mealy" : "Moore";
-  const ns = d.states.length, nt = d.transitions.length;
-  if (!sel) return tr(`${d.outputs.length ? `${kind} machine · ` : ""}${ns} state${ns === 1 ? "" : "s"} · ${nt} transition${nt === 1 ? "" : "s"}`, `${d.outputs.length ? `${kind} 機 · ` : ""}${ns} 個狀態 · ${nt} 條轉移`, `${d.outputs.length ? `${kind} マシン · ` : ""}状態 ${ns} 個 · 遷移 ${nt} 本`);
-  if (sel.kind === "state") return tr("1 state selected · type to edit its text", "已選取 1 個狀態 · 直接打字編輯文字");
-  if (sel.kind === "edge") return sel.from === sel.to ? tr("1 self loop selected · type to edit its text", "已選取 1 條自迴圈 · 直接打字編輯文字") : tr("1 transition selected · type to edit its text", "已選取 1 條轉移 · 直接打字編輯文字");
-  if (sel.kind === "initial") return tr("Start arrow selected", "已選取起始箭頭");
-  const nl = edges.length + (initial ? 1 : 0);
-  return tr(`${states.length} states and ${nl} lines selected`, `已選取 ${states.length} 個狀態、${nl} 條線`, `状態 ${states.length} 個、線 ${nl} 本を選択中`);
-}
 const GRID_STYLE_IDS: GridStyle[] = ["line", "dot", "none"];
 const GRID_STYLES = (): Array<[GridStyle, string]> => [["line", tr("Line", "線")], ["dot", tr("Dot", "點")], ["none", tr("None", "無")]];
 
@@ -342,7 +471,7 @@ function loadGridOptions(): GridOptions {
   try {
     const v = JSON.parse(localStorage.getItem(GRID_KEY) ?? "null") as Partial<GridOptions> | null;
     const style = GRID_STYLE_IDS.some((s) => s === v?.style) ? v!.style! : "line";
-    return { style, snap: v?.snap ?? true };
+    return { style, snap: typeof v?.snap === "boolean" ? v.snap : true };
   } catch {
     return { style: "line", snap: true };
   }

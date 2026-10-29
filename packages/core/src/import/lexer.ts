@@ -61,7 +61,12 @@ interface Macro {
   body: string;
 }
 
-export function preprocess(source: string): Preprocessed {
+/**
+ * `isConst` says whether a macro body (with the macros in it already
+ * expanded) parses as one expression; a body that does not is expanded as
+ * text instead of being kept as a named constant.
+ */
+export function preprocess(source: string, isConst: (body: string) => boolean = () => true): Preprocessed {
   const lines = stripComments(source.replace(/\r\n?/g, "\n")).split("\n");
   const macros = new Map<string, Macro>();
   const constants = new Map<string, string>();
@@ -117,9 +122,13 @@ export function preprocess(source: string): Preprocessed {
         if (dm) {
           const [, name, , params, b] = dm;
           const text = b.trim();
+          // A constant may be built from other macros (`define RUN (`IDLE + 1),
+          // `define IDLE `W'd0), so its body is expanded before it is judged,
+          // and before it is defined (a body that names itself stays as is).
+          constants.delete(name);
+          const value = !dm[2] && text.includes("`") ? expandMacros(text, macros, constants, n + 1).trim() : text;
           macros.set(name, { params: dm[2] ? params.split(",").map((p) => p.trim()).filter(Boolean) : null, body: text });
-          if (!dm[2] && text && CONST_BODY.test(text) && !/\b(begin|end|if|else|case|assign|always)\b/.test(text)) constants.set(name, text);
-          else constants.delete(name);
+          if (!dm[2] && value && CONST_BODY.test(value) && !/\b(begin|end|if|else|case|assign|always)\b/.test(value) && isConst(value)) constants.set(name, value);
         }
         out.push("", ...Array(extra).fill(""));
         continue;
@@ -163,7 +172,11 @@ function expandMacros(line: string, macros: Map<string, Macro>, constants: Map<s
       out += name;
       continue;
     }
-    if (constants.has(name)) { out += ` ${name} `; continue; }
+    if (constants.has(name)) {
+      // `W'd0 is a sized number: the width has to be spliced in as text.
+      out += line[i] === "'" ? constants.get(name) : ` ${name} `;
+      continue;
+    }
     let body = mac.body;
     if (mac.params) {
       // Read the argument list.

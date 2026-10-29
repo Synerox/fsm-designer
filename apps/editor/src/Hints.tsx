@@ -1,9 +1,8 @@
 // Keyboard and mouse reference, shown over the canvas by the status bar's
 // Hints button (laid out like Analog Canvas's shortcut sheet).
 
-import { tr } from "./i18n.ts";
-
-const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "Cmd" : "Ctrl";
+import { MOD, tr } from "./i18n.ts";
+import type { MouseEvent } from "react";
 
 /** Each hint: the keys pressed together, then what they do. */
 const hints = (): Array<[string[], string]> => [
@@ -18,9 +17,11 @@ const hints = (): Array<[string[], string]> => [
   [[tr("Type", "打字", "入力")], tr("Edit selected text", "編輯選取的文字", "選択中のテキストを編集")],
   [["←", "→"], tr("Move cursor", "移動游標", "カーソル移動")],
   [["Home", "End"], tr("Cursor to start or end", "游標到開頭或結尾", "カーソルを先頭・末尾へ")],
-  [["_0", "Space"], tr("Subscript ₀", "下標 ₀", "下付き文字 ₀")],
+  [["↑", "↓"], tr("Cursor to start or end", "游標到開頭或結尾", "カーソルを先頭・末尾へ")],
+  // Conditions keep "_0", since Verilog names such as data_0 use it.
+  [["_0", "Space"], tr("Subscript ₀ in state names", "狀態名稱的下標 ₀", "状態名の下付き文字 ₀")],
   [[tr("\\name", "\\字母名", "\\文字名"), "Space"], tr("Greek letter: \\alpha → α, \\Omega → Ω", "希臘字母：\\alpha → α、\\Omega → Ω", "ギリシャ文字：\\alpha → α、\\Omega → Ω")],
-  [[MOD, tr("Drag", "拖曳", "ドラッグ")], tr("Box select", "框選", "範囲選択")],
+  [[MOD, tr("Drag", "拖曳", "ドラッグ")], tr("Box select (to the right: inside only; to the left: touching)", "框選（往右：完整框住；往左：碰到就選）", "範囲選択（右へ：囲んだもの、左へ：触れたもの）")],
   [[MOD, tr("Click", "點一下", "クリック")], tr("Add or remove from selection", "加選或取消選取", "選択に追加・解除")],
   [[MOD, "A"], tr("Select all", "全選", "すべて選択")],
   [[MOD, "C"], tr("Copy", "複製", "コピー")],
@@ -36,18 +37,20 @@ const hints = (): Array<[string[], string]> => [
   [[MOD, "O"], tr("Open", "開啟", "開く")],
   [[MOD, "N"], tr("New diagram", "新增圖", "新しい図")],
   [[MOD, "I"], tr("Import Verilog", "匯入 Verilog", "Verilog を読み込む")],
+  [[MOD, "Enter"], tr("Import (in the Import Verilog dialog)", "匯入（在匯入 Verilog 視窗中）", "読み込む（Verilog 読み込み画面で）")],
   [[tr("Drag", "拖曳", "ドラッグ"), tr("Empty space", "空白處", "空白部分")], tr("Pan", "平移畫面", "画面を移動")],
+  [[tr("Middle-drag", "中鍵拖曳", "中ボタンでドラッグ")], tr("Pan", "平移畫面", "画面を移動")],
   [[tr("Wheel", "滾輪", "ホイール")], tr("Pan", "平移畫面", "画面を移動")],
   [[MOD, tr("Wheel", "滾輪", "ホイール")], tr("Zoom", "縮放", "ズーム")],
   [["F"], tr("Fit to window", "符合視窗", "ウィンドウに合わせる")],
 ];
 
-export function Hints({ onClose }: { onClose: () => void }) {
+export function Hints({ onClose }: { onClose: (e: MouseEvent<HTMLButtonElement>) => void }) {
   return (
     <section className="hints" data-testid="hints" aria-label={tr("Shortcuts", "快捷鍵", "ショートカット")}>
       <header>
         <h4>{tr("Shortcuts", "快捷鍵與操作", "ショートカット")}</h4>
-        <button className="ghost small" onClick={onClose} title={tr("Close", "關閉")}>{tr("Hints", "提示")} ✕</button>
+        <button className="ghost small" onClick={onClose} title={tr("Close", "關閉")} aria-label={tr("Close hints", "關閉提示", "ヒントを閉じる")}>{tr("Hints", "提示")} <span aria-hidden="true">✕</span></button>
       </header>
       <ul>
         {hints().map(([keys, what], i) => (

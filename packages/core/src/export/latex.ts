@@ -13,7 +13,53 @@ export interface LatexOptions extends PlanOptions {
   pxPerCm?: number; // default 40
 }
 
-const ID = (id: string) => id.replace(/[^A-Za-z0-9]/g, "");
+/**
+ * TikZ node names for the states. Ids that are already plain alphanumerics
+ * (the editor's "s0", "s1", ...) are kept; any other id is stripped to
+ * alphanumerics and, if that leaves nothing or clashes with another name,
+ * numbered. Without this, ids "a-1" and "a1" (or "空闲" and "忙", both empty)
+ * named the same node and edges attached to the wrong circle.
+ */
+function nodeNames(d: FsmDiagram): Map<string, string> {
+  const safe = (id: string) => /^[A-Za-z0-9]+$/.test(id);
+  const names = new Map<string, string>();
+  const used = new Set<string>();
+  for (const s of d.states) if (safe(s.id)) { names.set(s.id, s.id); used.add(s.id); }
+  d.states.forEach((s, i) => {
+    if (names.has(s.id)) return;
+    const base = s.id.replace(/[^A-Za-z0-9]/g, "") || `state${i}`;
+    let name = base;
+    for (let k = 2; used.has(name); k++) name = `${base}x${k}`;
+    names.set(s.id, name);
+    used.add(name);
+  });
+  return names;
+}
+
+/**
+ * The numbers of an SVG path from the plan ("M x y Q cx cy x y"). A curve,
+ * gap or position that is not a number (hand-edited JSON is not
+ * type-checked) gives NaN geometry; say which edge rather than writing NaN
+ * into the TeX or failing on it later.
+ */
+function pathNumbers(d: FsmDiagram, path: string, from: string, to: string): number[] {
+  const v = path.split(/\s+/).filter((t) => !/^[A-Za-z]$/.test(t)).map(Number);
+  if (v.length && v.every(Number.isFinite)) return v;
+  const name = (id: string) => d.states.find((s) => s.id === id)?.name ?? id;
+  throw new Error(`Transition ${name(from)} -> ${name(to)} has no valid geometry: check that its curve, gap and loop angle, and the states' x, y and radius, are numbers.`);
+}
+
+// pdflatex's UTF-8 input covers Latin letters and common punctuation (latexText
+// already turns Greek and math symbols into TeX). Other scripts (CJK, Hangul,
+// emoji, Cyrillic, ...) stop it with "Unicode character not set up", so such
+// pictures ask for xelatex or lualatex, and CJK text also needs CJK fonts,
+// which ctex chooses for the system it runs on (on its own, xelatex silently
+// drops those characters). The second class lists the characters of those
+// ranges that the standalone class's OT1 encoding still cannot set (each
+// compiled with pdflatex): guillemets, eth/thorn, ogonek and stroke letters,
+// low quotes, primes and the odd space.
+const NEEDS_UNICODE_ENGINE = /[^\u0000-\u017f\u2010-\u203a\u20ac]|[«»ÐÞðþĄąĘęĐđĮįŲųĦħŊŋŦŧĸĿŀŉſ‗‚‛„‟‣․‥‧\u2028\u2029\u202f′″‴‵‶‷‸‹›]/u;
+const CJK = /[\u1100-\u11ff\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef\u{20000}-\u{3ffff}]/u;
 
 /** TikZ automata only draws the start arrow on four sides; pick the nearest. */
 function texFont(pt: number): string {
@@ -30,6 +76,7 @@ export function renderLatex(d: FsmDiagram, opts: LatexOptions = {}): string {
   const missing = d.states.filter((s) => s.x === undefined || s.y === undefined);
   if (missing.length) throw new Error(`States without positions: ${missing.map((s) => s.name).join(", ")}. Run auto layout first.`);
   const k = opts.pxPerCm ?? 40;
+  const ID = nodeNames(d);
   const lines: string[] = [];
   lines.push(`\\begin{tikzpicture}[>=Stealth, shorten >=1pt, auto, node distance=2.5cm, semithick,`);
   lines.push(`  every state/.style={draw, inner sep=0pt, font=\\footnotesize}, initial text=,`);
@@ -44,7 +91,7 @@ export function renderLatex(d: FsmDiagram, opts: LatexOptions = {}): string {
     const size = `minimum size=${((2 * stateRadius(d, s)) / k).toFixed(2)}cm`;
     // Only sizes set by hand get an explicit font; 15 px (the default) ~ \footnotesize (8 pt).
     const font = s.fontSize !== undefined ? `, font=${texFont((s.fontSize * 8) / 15)}` : "";
-    lines.push(`  \\node[${flags}, ${size}${font}] (${ID(s.id)}) at (${(s.x! / k).toFixed(2)}, ${(-s.y! / k).toFixed(2)}) {${body}};`);
+    lines.push(`  \\node[${flags}, ${size}${font}] (${ID.get(s.id)}) at (${(s.x! / k).toFixed(2)}, ${(-s.y! / k).toFixed(2)}) {${body}};`);
   }
   // Reuse the SVG renderer's routing so both exports bend and loop the same way.
   const plan = planDiagram(d, opts);
@@ -54,36 +101,69 @@ export function renderLatex(d: FsmDiagram, opts: LatexOptions = {}): string {
   for (const e of plan.edges) {
     const { from, to } = e.transitions[0];
     // Labels go where the SVG renderer placed them (it avoids states and other
-    // edges), as separate nodes rather than TikZ's midway edge labels.
+    // edges), as separate nodes rather than TikZ's midway edge labels. Like
+    // states, only sizes set by hand get an explicit font; 13 px (the default)
+    // ~ \scriptsize (7 pt), so a size raised in the editor never prints smaller.
     if (e.label && e.lines.length)
-      labelLines.push(`  \\node[font=${e.transitions[0].fontSize !== undefined ? texFont((e.fontSize * 6) / 13) : "\\scriptsize"}\\ttfamily, align=center, fill=white, inner sep=1pt] at (${(e.label.x / k).toFixed(2)}, ${(-e.label.y / k).toFixed(2)}) {${e.lines.map(latexText).join("\\\\")}};`);
+      labelLines.push(`  \\node[font=${e.transitions[0].fontSize !== undefined ? texFont((e.fontSize * 7) / 13) : "\\scriptsize"}\\ttfamily, align=center, fill=white, inner sep=1pt] at (${(e.label.x / k).toFixed(2)}, ${(-e.label.y / k).toFixed(2)}) {${e.lines.map(latexText).join("\\\\")}};`);
+    const v = pathNumbers(d, e.path, from, to);
+    const pt = (x: number, y: number) => `(${(x / k).toFixed(2)}, ${(-y / k).toFixed(2)})`;
     let shape = "";
     if (e.loopAngle !== undefined) {
-      const deg = Math.round((-e.loopAngle * 180) / Math.PI); // TikZ y axis points up
+      // TikZ y axis points up. Kept within ±180 so out/in stay small angles
+      // whatever the stored loopAngle (pgfmath overflows near ±16384).
+      const deg = ((Math.round((-e.loopAngle * 180) / Math.PI) % 360) + 540) % 360 - 180;
       shape = `loop, out=${deg + 30}, in=${deg - 30}, looseness=6`;
     } else if (e.offset) {
-      shape = `transform canvas={shift={(${(e.offset.x / k).toFixed(3)}cm, ${(-e.offset.y / k).toFixed(3)}cm)}}`;
+      // Straight lines both ways, side by side: the plan's segment, from the
+      // border point of one circle to that of the other. (An edge shifted with
+      // transform canvas leaves its ends off the circles once the gap is large.)
+      const a = d.states.find((st) => st.id === from)!, b = d.states.find((st) => st.id === to)!;
+      const len = Math.hypot(b.x! - a.x!, b.y! - a.y!) || 1e-9; // as svg.ts: states on top of each other
+      const at = (s: typeof a, sign: number) => {
+        const r = stateRadius(d, s), o = e.offset!;
+        const along = (sign * Math.sqrt(Math.max(r * r - o.x * o.x - o.y * o.y, 0))) / len;
+        const x = (b.x! - a.x!) * along + o.x, y = (b.y! - a.y!) * along + o.y; // from the centre, screen axes
+        return `(${ID.get(s.id)}.${((Math.atan2(-y, x) * 180) / Math.PI).toFixed(1)})`;
+      };
+      curveLines.push(`  \\draw[->] ${at(a, 1)} -- ${at(b, -1)};`);
+      continue;
     } else if (e.curve !== 0) {
       // The SVG route as an explicit Bézier: TikZ's `bend` overflows ("Dimension
       // too large") on long edges, and this way both exports match exactly.
-      const [x0, y0, cx, cy, x1, y1] = e.path.match(/-?[\d.]+/g)!.map((v) => Number(v) / k);
-      const pt = (x: number, y: number) => `(${x.toFixed(2)}, ${(-y).toFixed(2)})`;
+      const [x0, y0, cx, cy, x1, y1] = v;
       curveLines.push(`  \\draw[->] ${pt(x0, y0)} .. controls ${pt(x0 + ((cx - x0) * 2) / 3, y0 + ((cy - y0) * 2) / 3)} and ${pt(x1 + ((cx - x1) * 2) / 3, y1 + ((cy - y1) * 2) / 3)} .. ${pt(x1, y1)};`);
       continue;
     }
-    edgeLines.push(`    (${ID(from)}) edge[${shape}] (${ID(to)})`);
+    edgeLines.push(`    (${ID.get(from)}) edge[${shape}] (${ID.get(to)})`);
   }
   if (edgeLines.length) lines.push(`  \\path[->]`, ...edgeLines, `  ;`);
   lines.push(...curveLines);
   lines.push(...labelLines);
   lines.push(`\\end{tikzpicture}`);
-  if (opts.standalone === false) return lines.join("\n") + "\n";
+  const picture = lines.join("\n");
+  // Characters missing from the font print blank under xelatex and lualatex
+  // (only a log warning), so the file says which font to set, and the
+  // standalone preamble carries that line commented out, ready to use.
+  const cjk = CJK.test(picture);
+  const unicode = NEEDS_UNICODE_ENGINE.test(picture);
+  const other = NEEDS_UNICODE_ENGINE.test(picture.replace(new RegExp(CJK.source, "gu"), ""));
+  const note = !unicode ? [] : [
+    cjk
+      ? `% Some labels are Chinese, Japanese or Korean: compile with xelatex or lualatex, loading ctex with a CJK font that has every character. Characters the font lacks print blank: ctex's default Linux font (Fandol, also on Overleaf) has no Korean and misses some Traditional Chinese.`
+      : `% Some labels use characters pdflatex cannot typeset: compile with xelatex or lualatex, with a font that has them. Characters the font lacks print blank: the default, Latin Modern, has no Cyrillic, emoji or most other scripts.`,
+  ];
+  if (opts.standalone === false) return [...note, picture, ``].join("\n");
   return [
     `% Generated by FSM Designer: ${d.name}`,
+    ...note,
     `\\documentclass[tikz, border=8pt]{standalone}`,
+    ...(unicode ? [`\\usepackage{iftex}`, `\\RequireTUTeX`] : []),
+    ...(cjk ? [`\\usepackage[UTF8, scheme=plain]{ctex}`, `% \\setCJKmainfont{Noto Serif CJK TC}\\setCJKsansfont{Noto Sans CJK TC}\\setCJKmonofont{Noto Sans CJK TC} % if characters are missing: uncomment, or name another CJK font you have`] : []),
+    ...(other ? [`% \\usepackage{fontspec}\\setmainfont{DejaVu Serif}\\setmonofont{DejaVu Sans Mono} % if characters are missing: uncomment, or name another font you have that covers them`] : []),
     `\\usetikzlibrary{automata, positioning, arrows.meta, quotes}`,
     `\\begin{document}`,
-    ...lines,
+    picture,
     `\\end{document}`,
     ``,
   ].join("\n");

@@ -9,7 +9,7 @@ import type { PlanOptions } from "./export/svg.ts";
 export interface LayoutOptions {
   draw?: PlanOptions; // how the diagram is drawn (e.g. labels hidden), so spacing matches
   spacing?: number; // px between state edges, default 90
-  margin?: number; // px around the drawing, default 60
+  margin?: number; // default 60: the drawing's bounds start at margin - 20 (at least 20), on the grid
 }
 
 /** Lay out every state (see tidy.ts); the result says which arrangement won and what it could not fix. */
@@ -44,7 +44,7 @@ function roundPositions(states: State[]) {
  * so the agent's (or user's) manual placement is kept.
  */
 export async function ensureLayout(d: FsmDiagram): Promise<void> {
-  const missing = d.states.filter((s) => s.x === undefined || s.y === undefined);
+  const missing = d.states.filter((s) => !Number.isFinite(s.x) || !Number.isFinite(s.y)); // null/NaN too: planDiagram rejects them
   if (missing.length === 0) return;
   if (missing.length === d.states.length) { await autoLayout(d); return; }
   const placed = d.states.filter((s) => !missing.includes(s));

@@ -75,6 +75,17 @@ test("elseLabels: false draws transitions exactly as typed", () => {
   assert.ok(!renderLatex(d, { elseLabels: false }).includes("else"));
 });
 
+test("stacked labels on one edge follow the order the transitions are checked in", () => {
+  const d = createDiagram({ name: "m", type: "mealy", inputs: [{ name: "a", width: 1 }, { name: "b", width: 1 }], outputs: [{ name: "z", width: 1 }] });
+  const a = addState(d, { name: "A", x: 0, y: 0 }), b = addState(d, { name: "B", x: 200, y: 0 });
+  addTransition(d, { from: a.id, to: b.id, condition: "a", outputs: { z: 1 }, priority: 2 });
+  addTransition(d, { from: a.id, to: b.id, condition: "b", priority: 1 });
+  addTransition(d, { from: a.id, to: b.id, outputs: { z: 0 }, priority: 3 });
+  const lines = planDiagram(d, { elseLabels: false }).edges.find((e) => e.transitions[0].to === b.id)!.lines;
+  assert.deepEqual(lines, ["b", "a / z=1", "/ z=0"]);
+  assert.match(renderLatex(d), /\{b\\\\a \/ z=1\\\\else \/ z=0\}/);
+});
+
 test("straight lines both ways run side by side instead of overlapping", () => {
   const d = createDiagram({ name: "m" });
   const a = addState(d, { name: "A", x: 0, y: 0 }), b = addState(d, { name: "B", x: 200, y: 0 });
@@ -83,7 +94,7 @@ test("straight lines both ways run side by side instead of overlapping", () => {
   const [ab, ba] = planDiagram(d).edges;
   assert.ok(ab.path.includes(" L ") && ba.path.includes(" L "), "both stay straight");
   assert.deepEqual([ab.offset!.y, ba.offset!.y], [-8, 8], "one above, one below");
-  assert.match(renderLatex(d), /transform canvas=\{shift=/);
+  assert.equal((renderLatex(d).match(/\\draw\[->\] \(\w+\.-?[\d.]+\) -- /g) ?? []).length, 2, "latex draws the two shifted segments");
   addTransition(d, { from: a.id, to: a.id });
   d.transitions[1].curve = 20;
   assert.equal(planDiagram(d).edges[0].offset, undefined, "only when both are straight");

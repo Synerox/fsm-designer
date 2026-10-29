@@ -53,11 +53,16 @@ test("a parity of 16 inputs stays one condition instead of 65536 cases", () => {
 
 test("32 states: import and layout stay quick and clean", async () => {
   for (const f of ["chain_32.v", "random_32.v"]) {
-    const t0 = performance.now();
+    // CPU time, not wall time: node --test runs the test files side by side, and
+    // `pnpm test` builds and tests the other packages too, so on a 4-core machine
+    // random_32.v (about 6 s of CPU) took anything from 6 to 30 s of wall time.
+    // The limit leaves room for a slow CI runner and still catches a blow-up.
+    const c0 = process.cpuUsage();
     const r = await importVerilogLaidOut(fixture(f));
-    const ms = performance.now() - t0;
+    const c = process.cpuUsage(c0);
+    const ms = (c.user + c.system) / 1000;
     assert.equal(r.diagram.states.length, 32, f);
-    assert.ok(ms < 8000, `${f}: took ${Math.round(ms)} ms`);
+    assert.ok(ms < 20000, `${f}: took ${Math.round(ms)} ms of CPU time`);
     const sc = layoutScore(r.diagram);
     assert.equal(sc.tooClose, 0, f);
     if (f === "chain_32.v") assert.equal(sc.crossings, 0);

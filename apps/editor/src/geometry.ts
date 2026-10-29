@@ -8,13 +8,37 @@ export interface Pt {
   y: number;
 }
 
+export const MIN_ZOOM = 0.1;
+export const MAX_ZOOM = 8;
 export const GRID = 20; // grid spacing in diagram units (a major line every 5)
 export const SNAP_PX = 8; // screen pixels within which a dragged state lines up with another
 const ANGLE_SNAP = 0.12; // radians
 
+/**
+ * The numbers in SVG path data, in order. Numbers print with an exponent
+ * past 1e21 ("2e+300"), and a broken plan prints NaN or Infinity: those come
+ * back as such for the caller to check (see checkDrawable), not as a throw.
+ */
+export function pathNumbers(path: string): number[] {
+  return (path.match(/[-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?|[-+]?(?:NaN|Infinity)/gi) ?? []).map(Number);
+}
+
+/**
+ * The view (pan x, y and zoom k) that centres `b` in a w x h canvas with
+ * `pad` pixels around it, zooming in at most to 200%. A canvas smaller than
+ * the padding (a very short window, or 0 x 0 before it is laid out) gets the
+ * smallest zoom rather than a zero or negative one, which would mirror the
+ * drawing.
+ */
+export function fitView(b: { minX: number; minY: number; maxX: number; maxY: number }, w: number, h: number, pad = 40): { x: number; y: number; k: number } {
+  const fitted = Math.min(2, MAX_ZOOM, (w - 2 * pad) / (b.maxX - b.minX), (h - 2 * pad) / (b.maxY - b.minY));
+  const k = Math.max(MIN_ZOOM, fitted);
+  return { k, x: (w - (b.maxX - b.minX) * k) / 2 - b.minX * k, y: (h - (b.maxY - b.minY) * k) / 2 - b.minY * k };
+}
+
 /** Point at the middle of a path from planDiagram ("M .. L ..", "M .. Q ..", "M .. C .."). */
 export function pathMidpoint(path: string): Pt {
-  const n = path.match(/-?\d+(\.\d+)?/g)!.map(Number);
+  const n = pathNumbers(path);
   const P = (i: number) => ({ x: n[i], y: n[i + 1] });
   if (path.includes("C")) {
     const [p0, c1, c2, p1] = [P(0), P(2), P(4), P(6)];
@@ -120,7 +144,7 @@ export function edgePoints(plan: DiagramPlan, e: EdgePlan, n = 40): Pt[] {
     const s = plan.states.find((p) => p.state.id === e.transitions[0].from)!;
     return loopGeometry({ x: s.state.x!, y: s.state.y! }, s.r, e.loopAngle).samples;
   }
-  const v = e.path.match(/-?\d+(\.\d+)?/g)!.map(Number);
+  const v = pathNumbers(e.path);
   const p0 = { x: v[0], y: v[1] };
   const [c, p1] = e.path.includes("Q") ? [{ x: v[2], y: v[3] }, { x: v[4], y: v[5] }] : [null, { x: v[2], y: v[3] }];
   return Array.from({ length: n + 1 }, (_, i) => {

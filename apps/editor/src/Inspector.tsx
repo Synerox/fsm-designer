@@ -2,14 +2,15 @@
 // (useful for IME input such as Chinese, which canvas typing can't take).
 
 import { LABEL_SIZE, NAME_SIZE, STATE_RADIUS, expandShortcut } from "@fsm/core";
-import { PARALLEL_GAP, planDiagram } from "@fsm/core";
+import { PARALLEL_GAP, transitionLabel } from "@fsm/core";
 import type { FsmDiagram } from "@fsm/core";
-import { useState } from "react";
+import { useId, useLayoutEffect, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
-import { DRAW, alignStates, deleteSelection, edgeTransitions, setEdgeShape, getStateText, setEdgeText, setStateText, useEditor } from "./store.ts";
+import { DRAW, alignStates, canvasOptions, deleteSelection, editedTransition, edgeTransitions, setEdgeShape, getStateText, setEdgeText, typeStateText, useEditor, viewPlan } from "./store.ts";
 
 import { snapToGrid } from "./geometry.ts";
-import { tr } from "./i18n.ts";
+import { MOD, tr } from "./i18n.ts";
+import { diagramSizeText, selectionSizeText } from "./summary.ts";
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -34,6 +35,8 @@ function SizeField({ label, value, fallback, min, max, onChange }: {
 }) {
   // Keep what is typed while it is incomplete (e.g. "1" on the way to "12").
   const [draft, setDraft] = useState<string | null>(null);
+  // Named by the label text alone; the wrapping <label> would add the arrow buttons' names.
+  const labelId = useId();
   // Arrows and the up/down keys step from the shown value, or from the default when empty.
   const step = (dir: 1 | -1) => {
     setDraft(null);
@@ -41,10 +44,11 @@ function SizeField({ label, value, fallback, min, max, onChange }: {
   };
   return (
     <label>
-      {label}
+      <span id={labelId}>{label}</span>
       <span className="stepper">
         <input
           type="number"
+          aria-labelledby={labelId}
           min={min}
           max={max}
           value={draft ?? value ?? ""}
@@ -58,11 +62,17 @@ function SizeField({ label, value, fallback, min, max, onChange }: {
           onChange={(e) => {
             const raw = e.target.value;
             setDraft(raw);
-            if (raw === "") return onChange(undefined);
+            // A number box reports "" for unfinished input such as "-" or "1e"
+            // too; only a really empty box means "back to the default".
+            if (raw === "") { if (!e.target.validity.badInput) onChange(undefined); return; }
             const v = Number(raw);
             if (Number.isFinite(v) && v >= min && v <= max) onChange(v);
           }}
-          onBlur={() => setDraft(null)}
+          onBlur={(e) => {
+            // Unfinished input erased again ("-", then Backspace) fires no change: "" to "".
+            if (draft === "" && e.target.value === "" && !e.target.validity.badInput) onChange(undefined);
+            setDraft(null);
+          }}
         />
         <span className="arrows">
           <button type="button" tabIndex={-1} aria-label={tr("Increase", "加 1")} onClick={(e) => { e.preventDefault(); step(1); }}>
@@ -121,9 +131,12 @@ function SizeControls({ doc, states, edges, edit, keyPrefix }: {
 function ShapeControls({ doc, edges, edit }: {
   doc: FsmDiagram; edges: Array<{ from: string; to: string }>; edit: (fn: (d: FsmDiagram) => void, key?: string) => void;
 }) {
+  const labels = useEditor((s) => s.labels);
+  const selection = useEditor((s) => s.selection);
   const lines = edges.filter((e) => e.from !== e.to);
   if (!lines.length) return null;
-  const plan = planDiagram(doc, DRAW);
+  // The canvas's plan (one per edit); only the lines' bends and the radii are read here.
+  const plan = viewPlan(doc, canvasOptions(labels, selection));
   const curvedOf = (e: { from: string; to: string }) => plan.edges.find((p) => p.transitions[0].from === e.from && p.transitions[0].to === e.to)?.curve !== 0;
   const curved = lines.filter(curvedOf);
   const allCurved = curved.length === lines.length, allStraight = curved.length === 0;
@@ -155,6 +168,40 @@ function ShapeControls({ doc, edges, edit }: {
   );
 }
 
+/** Rename to a typed identifier, or put the current name back. */
+function commitName(el: HTMLInputElement) {
+  const { doc, edit } = useEditor.getState();
+  const v = el.value.trim();
+  if (!IDENT.test(v)) { el.value = doc.name; return; }
+  if (v !== doc.name) edit((d) => { d.name = v; });
+}
+
+/**
+ * The diagram's name, kept on blur or Enter. Clicking a state swaps this
+ * panel out in the pointerdown, before the browser blurs the field, so a name
+ * still being typed is also kept when the field goes away (unless the
+ * diagram itself was renamed or replaced meanwhile).
+ */
+function DiagramName({ name }: { name: string }) {
+  const ref = useRef<HTMLInputElement>(null);
+  useLayoutEffect(() => {
+    const el = ref.current!;
+    return () => { if (el.value !== name && useEditor.getState().doc.name === name) commitName(el); };
+  }, [name]);
+  return (
+    <label>
+      {tr("Name", "名稱")}
+      <input
+        ref={ref}
+        data-testid="diagram-name"
+        defaultValue={name}
+        onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+        onBlur={(e) => commitName(e.currentTarget)}
+      />
+    </label>
+  );
+}
+
 export function Inspector({ snap }: { snap: boolean }) {
   const doc = useEditor((s) => s.doc);
   const selection = useEditor((s) => s.selection);
@@ -175,8 +222,8 @@ export function Inspector({ snap }: { snap: boolean }) {
           <input
             value={text}
             placeholder={tr("Enter label", "輸入標籤")}
-            onKeyDown={(e) => expandOnSpace(e, true, (v) => edit((d) => setStateText(d, s.id, v), `text:${s.id}`))}
-            onChange={(e) => edit((d) => setStateText(d, s.id, e.target.value), `text:${s.id}`)}
+            onKeyDown={(e) => expandOnSpace(e, true, (v) => typeStateText(s.id, v))}
+            onChange={(e) => typeStateText(s.id, e.target.value)}
           />
         </label>
         <SizeControls doc={doc} states={[s.id]} edges={[]} edit={edit} keyPrefix={s.id} />
@@ -199,7 +246,9 @@ export function Inspector({ snap }: { snap: boolean }) {
 
   if (selection?.kind === "edge") {
     const ts = edgeTransitions(doc, selection.from, selection.to);
-    if (!ts.length) return <aside className="inspector" />;
+    const t = editedTransition(doc, selection);
+    if (!t) return <aside className="inspector" />;
+    const others = ts.filter((x) => x !== t);
     const name = (id: string) => { const s = doc.states.find((x) => x.id === id)!; return getStateText(s) || s.name; };
     return (
       <aside className="inspector">
@@ -208,26 +257,30 @@ export function Inspector({ snap }: { snap: boolean }) {
         <label>
           {tr("Label / condition", "標籤 / 條件")}
           <input
-            value={ts[0].condition}
+            value={t.condition}
             placeholder={tr("Enter label", "輸入標籤")}
-            onKeyDown={(e) => expandOnSpace(e, false, (v) => edit((d) => setEdgeText(d, selection.from, selection.to, v), `text:${ts[0].id}`))}
-            onChange={(e) => edit((d) => setEdgeText(d, selection.from, selection.to, e.target.value), `text:${ts[0].id}`)} />
+            onKeyDown={(e) => expandOnSpace(e, false, (v) => edit((d) => setEdgeText(d, selection.from, selection.to, v, t.id), `text:${t.id}`))}
+            onChange={(e) => edit((d) => setEdgeText(d, selection.from, selection.to, e.target.value, t.id), `text:${t.id}`)} />
         </label>
-        {ts.length > 1 && <p className="hint">{tr(`${ts.length - 1} more in the same direction: `, `另有 ${ts.length - 1} 條同方向轉移：`, `同じ向きの遷移がほかに ${ts.length - 1} 本：`)}{ts.slice(1).map((t) => t.condition || tr("(no condition)", "（無條件）")).join(tr(", ", "、"))}</p>}
+        {others.length > 0 && (
+          <p className="hint">
+            {tr(`${others.length} more in the same direction (click a line of text on the canvas to edit it): `, `另有 ${others.length} 條同方向轉移（在畫布上點它的文字即可編輯）：`, `同じ向きの遷移がほかに ${others.length} 本（キャンバス上でその文字をクリックすると編集できます）：`)}
+            {others.map((x) => transitionLabel(doc, x, DRAW) || tr("(no condition)", "（無條件）")).join(tr(", ", "、"))}
+          </p>
+        )}
         <SizeControls doc={doc} states={[]} edges={[selection]} edit={edit} keyPrefix={ts[0].id} />
         <ShapeControls doc={doc} edges={[selection]} edit={edit} />
-        <button className="danger" onClick={del}>{tr("Delete transition", "刪除轉移")}</button>
+        <button className="danger" onClick={del}>{ts.length > 1 ? tr(`Delete ${ts.length} transitions`, `刪除 ${ts.length} 條轉移`, `遷移 ${ts.length} 本を削除`) : tr("Delete transition", "刪除轉移")}</button>
       </aside>
     );
   }
 
   if (selection?.kind === "multi") {
-    const n = selection.edges.length + (selection.initial ? 1 : 0);
     return (
       <aside className="inspector">
         <h3>{tr("Multiple items selected", "已選取多個物件")}</h3>
         <p className="hint">
-          {tr(`${selection.states.length} states, ${n} lines`, `${selection.states.length} 個狀態、${n} 條線`, `状態 ${selection.states.length} 個、線 ${n} 本`)}{selection.initial ? tr(" (including the start arrow)", "（含起始箭頭）") : ""}
+          {selectionSizeText(selection)}{selection.initial ? tr(" (including the start arrow)", "（含起始箭頭）") : ""}
         </p>
         <SizeControls doc={doc} states={selection.states} edges={selection.edges} edit={edit} keyPrefix="multi" />
         <ShapeControls doc={doc} edges={selection.edges} edit={edit} />
@@ -246,7 +299,7 @@ export function Inspector({ snap }: { snap: boolean }) {
             )}
           </div>
         )}
-        <p className="hint">{tr("Drag any of the states to move them together; Delete removes them all; Ctrl+click adds to or removes from the selection.", "拖曳其中一個狀態可以一起移動；按 Delete 全部刪除；Ctrl+點一下可以加入或移出選取。")}</p>
+        <p className="hint">{tr(`Drag any of the states to move them together; Delete removes them all; ${MOD}+click adds to or removes from the selection.`, `拖曳其中一個狀態可以一起移動；按 Delete 全部刪除；${MOD}+點一下可以加入或移出選取。`, `どれか 1 つの状態をドラッグするとまとめて移動します。Delete ですべて削除、${MOD}+クリックで選択に追加／選択から外せます。`)}</p>
         <button className="danger" onClick={del}>{tr("Delete selected", "刪除選取的物件")}</button>
       </aside>
     );
@@ -265,19 +318,8 @@ export function Inspector({ snap }: { snap: boolean }) {
   return (
     <aside className="inspector">
       <h3>{tr("State diagram", "狀態轉移圖")}</h3>
-      <label>
-        {tr("Name", "名稱")}
-        <input
-          defaultValue={doc.name}
-          key={doc.name}
-          onBlur={(e) => {
-            const v = e.target.value.trim();
-            if (!IDENT.test(v)) { e.target.value = doc.name; return; }
-            if (v !== doc.name) edit((d) => { d.name = v; });
-          }}
-        />
-      </label>
-      <p className="hint">{tr(`${doc.states.length} states, ${doc.transitions.length} transitions`, `${doc.states.length} 個狀態，${doc.transitions.length} 條轉移`, `状態 ${doc.states.length} 個、遷移 ${doc.transitions.length} 本`)}</p>
+      <DiagramName key={doc.name} name={doc.name} />
+      <p className="hint">{diagramSizeText(doc)}</p>
     </aside>
   );
 }
