@@ -107,6 +107,10 @@ let lastSent: FsmDiagram | null = null;
 let refused: FsmDiagram | null = null;
 /** The next save only stores where new states were placed: the user did not edit anything. */
 let autoNext = false;
+/** The doc with the agent's new states placed here, before it was saved back. */
+let placedDoc: FsmDiagram | null = null;
+/** The server has this tab's diagram open (after a (re)connect, from its reply to open): saves may go out. */
+let ready = false;
 let seq = 0;
 let sendTimer: ReturnType<typeof setTimeout> | undefined;
 let selTimer: ReturnType<typeof setTimeout> | undefined;
@@ -165,6 +169,7 @@ function connect(): void {
   sock.onclose = (e) => {
     if (sock !== ws) return;
     ws = null;
+    ready = false;
     inflight.clear();
     lastSent = null;
     if (e.code === 4403) {
@@ -200,8 +205,7 @@ export function disconnect(): void {
 
 /** Whether everything on screen is in the workspace file (so leaving the page loses nothing). */
 export function liveLinked(): boolean {
-  const { doc } = useEditor.getState();
-  return bound && useLive.getState().status === "connected" && !inflight.size && sendTimer === undefined && (doc === synced || doc === refused);
+  return bound && useLive.getState().status === "connected" && !inflight.size && sendTimer === undefined && useEditor.getState().doc === synced;
 }
 
 /** Show workspace diagram `name` here (from the status bar's list, or asked by the agent). */
@@ -261,9 +265,14 @@ async function onMessage(m: Record<string, unknown>): Promise<void> {
     }
     case "rejected": {
       const mine = inflight.get(Number(m.seq));
-      if (mine) refused = mine.doc;
       inflight.clear();
       lastSent = null;
+      if (m.stale) {
+        // Sent before the server had the diagram open again (a reconnect): it goes out again once it has.
+        if (mine && ready) schedule(SEND_MS);
+        return;
+      }
+      if (mine) refused = mine.doc;
       note(tr(`Not saved to the workspace: ${m.message}`, `沒有存到工作資料夾：${m.message}`, `ワークスペースに保存されませんでした：${m.message}`), 15000);
       return;
     }
@@ -300,6 +309,7 @@ function same(name: string): boolean {
 
 function unbind(): void {
   bound = false;
+  placedDoc = null;
   inflight.clear();
   lastSent = null;
   clearTimeout(sendTimer);
@@ -312,6 +322,7 @@ async function onDoc(name: string, hash: string, raw: unknown, opened: boolean, 
   if (!session) return;
   // Already this version (a reconnect, or an echo): just send what changed here meanwhile.
   if (same(name) && hash === base) {
+    ready = true;
     if (useEditor.getState().doc !== synced) schedule(0);
     return;
   }
@@ -328,7 +339,8 @@ async function onDoc(name: string, hash: string, raw: unknown, opened: boolean, 
   const placed = JSON.stringify(doc) !== JSON.stringify(raw);
   const ed = useEditor.getState();
   if (same(name)) {
-    const unsent = !conflict && ed.doc !== synced && ed.doc !== refused;
+    ready = true;
+    const unsent = !conflict && ed.doc !== synced && ed.doc !== refused && ed.doc !== placedDoc;
     clearTimeout(sendTimer);
     sendTimer = undefined;
     base = hash;
@@ -345,13 +357,15 @@ async function onDoc(name: string, hash: string, raw: unknown, opened: boolean, 
       });
       boundSeq = useEditor.getState().loadSeq;
     });
+    placedDoc = placed ? doc : null;
     if (placed) { autoNext = true; schedule(SEND_MS); }
     if (unsent)
       note(tr("The AI changed this diagram; your last change was replaced (Ctrl+Z brings it back).", "AI 修改了這張圖，你剛才的變更被取代了（按 Ctrl+Z 可以找回）。", "AI がこの図を変更し、直前の変更は置き換えられました（Ctrl+Z で戻せます）。"));
     return;
   }
   // Another diagram (or the first): it replaces what is on screen. Work not in the workspace is asked about.
-  if (!bound && ed.dirty && !(await confirmDialog(tr(
+  const unsaved = bound ? ed.doc !== synced && ed.doc !== placedDoc : ed.dirty;
+  if (unsaved && !(await confirmDialog(tr(
     `Show ${name} from the AI's workspace? The diagram on screen has unsaved changes, which will be discarded.`,
     `要顯示 AI 工作資料夾中的 ${name} 嗎？目前畫面上的圖有尚未儲存的變更，將會被捨棄。`,
     `AI のワークスペースの ${name} を表示しますか？画面の図の未保存の変更は破棄されます。`)))) {
@@ -363,9 +377,11 @@ async function onDoc(name: string, hash: string, raw: unknown, opened: boolean, 
     if (placed) useEditor.setState({ dirty: true, savedDoc: null });
   });
   bound = true;
+  ready = true;
   boundSeq = useEditor.getState().loadSeq;
   base = hash;
   synced = placed ? null : doc;
+  placedDoc = placed ? doc : null;
   refused = null;
   inflight.clear();
   lastSent = null;
@@ -420,7 +436,8 @@ function schedule(ms: number): void {
 /** Send the editor's doc if the server does not have it yet. */
 function flush(): void {
   sendTimer = undefined;
-  if (!bound || !session?.name) return;
+  // Not yet reopened after a reconnect: the reply to open sends it (onDoc).
+  if (!bound || !session?.name || !ready) return;
   const { doc } = useEditor.getState();
   if (doc === synced || doc === refused || doc === lastSent) return;
   const s = ++seq;

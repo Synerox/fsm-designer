@@ -92,6 +92,8 @@ interface Client extends EditorInfo {
   hash?: string;
   /** Hash the file got from this page's last save, while its next save may build on it ("@chain"). */
   chain?: string;
+  /** The name that last save renamed away from: a save that builds on it may still use it. */
+  renamedFrom?: string;
   /** Messages from (and actions on) this page run one at a time, in order. */
   queue: Promise<void>;
 }
@@ -367,7 +369,7 @@ export class LiveBridge {
       case "open":
         return this.open(c, String(m.name));
       case "close":
-        c.name = c.hash = c.chain = c.selection = undefined;
+        c.name = c.hash = c.chain = c.renamedFrom = c.selection = undefined;
         return;
       case "select":
         if (m.name === c.name) c.selection = { states: strings(m.states), transitions: strings(m.transitions) };
@@ -385,7 +387,7 @@ export class LiveBridge {
       const d = await this.store.load(name);
       c.name = name;
       c.hash = hashOf(d);
-      c.chain = c.selection = undefined;
+      c.chain = c.renamedFrom = c.selection = undefined;
       this.send(c, { t: "doc", name, hash: c.hash, doc: d, why: "open" });
       for (const w of this.switching) if (w.c === c && w.name === name) w.done();
     } catch (e) {
@@ -394,11 +396,15 @@ export class LiveBridge {
   }
 
   private async save(c: Client, m: Extract<Incoming, { t: "save" }>): Promise<void> {
-    const name = String(m.name);
-    const seq = typeof m.seq === "number" ? m.seq : undefined;
-    if (name !== c.name) return this.send(c, { t: "rejected", name, seq, message: `this page does not have ${name} open` });
     // "@chain": on top of this page's previous save, which it has not heard back about yet.
     const chained = m.base === "@chain";
+    let name = String(m.name);
+    const seq = typeof m.seq === "number" ? m.seq : undefined;
+    // That previous save renamed the diagram; the page learns the new name from its reply.
+    if (chained && c.name && name === c.renamedFrom && c.chain) name = c.name;
+    // stale: not a verdict on the content; the page sends it again once it has the diagram open.
+    if (name !== c.name) return this.send(c, { t: "rejected", name, seq, stale: true, message: `this page does not have ${name} open` });
+    if (!chained) c.renamedFrom = undefined;
     const base = chained ? c.chain : String(m.base);
     let d: FsmDiagram;
     try {
@@ -447,8 +453,8 @@ export class LiveBridge {
       return { t: "saved", name: to, from: name, seq, hash: hashOf(await this.store.load(to)) };
     };
     // Two locks for a rename, always taken in the same order, so two renames the other way round cannot wait on each other.
-    const result: Out = await (to === name
-      ? this.store.lock(name, attempt)
+    const result: Out = await (to === name ? this.store.lock(name, attempt)
+      : this.store.lockAll ? this.store.lockAll([name, to], attempt)
       : this.store.lock([name, to].sort()[0], () => this.store.lock([name, to].sort()[1], attempt))
     ).catch((e) => ({ t: "rejected", name, seq, message: (e as Error).message }));
     // The page may have been switched to another diagram meanwhile; then only the reply goes out.
@@ -458,6 +464,7 @@ export class LiveBridge {
       if (still) {
         c.name = now;
         c.hash = c.chain = String(result.hash);
+        if (result.from) c.renamedFrom = name;
         if (!m.auto && !result.same) c.lastEditAt = Date.now();
       }
       this.send(c, result);
@@ -501,6 +508,8 @@ export class LiveBridge {
   private async push(name: string): Promise<void> {
     const watching = [...this.clients].filter((c) => c.authed && c.name === name);
     if (!watching.length) return;
+    // A page whose version moved on while this one was read (its own save came back) gets nothing older.
+    const before = new Map(watching.map((c) => [c, c.hash]));
     let d: FsmDiagram;
     try {
       d = await this.store.load(name);
@@ -509,7 +518,7 @@ export class LiveBridge {
     }
     const hash = hashOf(d);
     for (const c of watching) {
-      if (c.name !== name || c.hash === hash) continue;
+      if (c.name !== name || c.hash === hash || c.hash !== before.get(c)) continue;
       c.hash = hash;
       this.send(c, { t: "doc", name, hash, doc: d, why: "changed" });
     }
@@ -519,7 +528,7 @@ export class LiveBridge {
   removed(name: string): void {
     for (const c of this.clients) {
       if (!c.authed || c.name !== name) continue;
-      c.name = c.hash = c.chain = c.selection = undefined;
+      c.name = c.hash = c.chain = c.renamedFrom = c.selection = undefined;
       this.send(c, { t: "deleted", name });
     }
   }

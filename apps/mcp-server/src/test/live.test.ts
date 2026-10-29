@@ -330,3 +330,38 @@ test("a port the user asked for is that port or an error", async () => {
   assert.match(b2.error ?? "", /EADDRINUSE/);
   await b2.close();
 });
+
+test("a save that builds on a rename still reaches the renamed file", async () => {
+  await store.save(diagram("before_rename"));
+  const p = await page();
+  p.send({ t: "open", name: "before_rename" });
+  const got = await p.next("doc");
+  const doc = structuredClone(got.doc) as ReturnType<typeof diagram>;
+  doc.name = "after_rename";
+  p.send({ t: "save", name: "before_rename", base: got.hash, doc, seq: 1 });
+  const doc2 = structuredClone(doc);
+  doc2.states[0].x = 4242;
+  p.send({ t: "save", name: "before_rename", base: "@chain", doc: doc2, seq: 2 });
+  assert.equal((await p.next("saved")).name, "after_rename");
+  const s2 = await p.next("saved");
+  assert.deepEqual([s2.seq, s2.name], [2, "after_rename"]);
+  assert.equal((await store.load("after_rename")).states[0].x, 4242);
+  p.ws.close();
+});
+
+test("renames of a linked diagram and its target onto one name never wait on each other", { skip: process.platform === "win32" }, async () => {
+  const { symlink } = await import("node:fs/promises");
+  await store.save(diagram("zz_target"));
+  await symlink(join(store.dir, "zz_target.fsm.json"), join(store.dir, "aa_link.fsm.json"));
+  const p1 = await page(), p2 = await page();
+  p1.send({ t: "open", name: "aa_link" });
+  p2.send({ t: "open", name: "zz_target" });
+  const d1 = await p1.next("doc"), d2 = await p2.next("doc");
+  p1.send({ t: "save", name: "aa_link", base: d1.hash, doc: { ...(d1.doc as object), name: "mm_new" } });
+  p2.send({ t: "save", name: "zz_target", base: d2.hash, doc: { ...(d2.doc as object), name: "mm_new" } });
+  const a = await Promise.race([p1.next("saved", 5000).catch(() => null), p1.next("rejected", 5000).catch(() => null), p1.next("conflict", 5000).catch(() => null)]);
+  const b = await Promise.race([p2.next("saved", 5000).catch(() => null), p2.next("rejected", 5000).catch(() => null), p2.next("conflict", 5000).catch(() => null)]);
+  assert.ok(a && b, "both renames answered");
+  await store.lock("zz_target", async () => {});
+  p1.ws.close(); p2.ws.close();
+});
