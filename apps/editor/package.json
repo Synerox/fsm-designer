@@ -12,8 +12,6 @@
   },
   "dependencies": {
     "@fsm/core": "workspace:*",
-    "@tauri-apps/api": "^2.12.4",
-    "@tauri-apps/plugin-dialog": "^2.8.3",
     "immer": "^11.2.7",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",

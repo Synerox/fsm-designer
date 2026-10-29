@@ -10,7 +10,6 @@ export default defineConfig(({ mode }) => ({
   resolve: { alias: { "@fsm/core": fileURLToPath(new URL("../../packages/core/src/browser.ts", import.meta.url)) } },
   clearScreen: false,
   server: { port: 5173, strictPort: true },
-  envPrefix: ["VITE_", "TAURI_ENV_"],
   build:
     mode === "single"
       ? { target: "es2022", outDir: "dist-single", cssCodeSplit: false, assetsInlineLimit: Infinity, rolldownOptions: { output: { codeSplitting: false } } }

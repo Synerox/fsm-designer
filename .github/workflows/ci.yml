@@ -1,12 +1,10 @@
 # Build and run every test on pull requests. Icarus Verilog is installed so
 # the cycle-by-cycle checks of the Verilog importer run instead of skipping.
-# release.yml calls this too, so no installer is built from a failing commit.
 name: CI
 
 on:
   pull_request:
   workflow_dispatch:
-  workflow_call:
 
 permissions:
   contents: read

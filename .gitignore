@@ -4,4 +4,3 @@ fsm-workspace/
 *.tmp-*
 dist-single/
 tools/layout-taste-test/out/
-installer/

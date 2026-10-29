@@ -2,7 +2,7 @@
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import { autoLayout, renderSvg } from "@fsm/core";
-import { MAX_DRAFT, autosaveLost, discardUnsaved, importVerilogText, loadText, loadVerilogDraft, restoreSession, saveVerilogDraft, serialize, startAutosave, tidyUp, useAutosave } from "../src/actions.ts";
+import { MAX_DRAFT, autosaveLost, importVerilogText, loadText, loadVerilogDraft, restoreSession, saveVerilogDraft, serialize, startAutosave, tidyUp, useAutosave } from "../src/actions.ts";
 import { createState, createTransition, drawOptions, newDiagram, setInitial, useEditor } from "../src/store.ts";
 import { useLang } from "../src/i18n.ts";
 
@@ -271,21 +271,6 @@ test("a reload brings labels back exactly as typed, shortcut syntax and all", as
   assert.equal(useEditor.getState().dirty, false);
 });
 
-test("discarding on close leaves the last saved diagram in the autosave, not the discarded changes", () => {
-  const d = newDiagram();
-  createState(d, 100, 100);
-  useEditor.getState().load(d, "m.fsm.json");
-  useEditor.getState().edit((d) => { createState(d, 300, 100); });
-  storage.set("fsm-designer:autosave", JSON.stringify({ doc: useEditor.getState().doc, filePath: "m.fsm.json", dirty: true }));
-  discardUnsaved();
-  const kept = JSON.parse(storage.get("fsm-designer:autosave")!);
-  assert.deepEqual([kept.doc.states.length, kept.filePath, kept.dirty], [1, "m.fsm.json", false]);
-  // An import was never saved anywhere: nothing to go back to.
-  useEditor.setState({ savedDoc: null });
-  discardUnsaved();
-  assert.equal(storage.has("fsm-designer:autosave"), false);
-});
-
 test("a reload, closed tab or hidden page writes a pending autosave at once", () => {
   mock.timers.enable({ apis: ["setTimeout"] });
   // Node has no document either: a stand-in that can hide.
@@ -313,13 +298,6 @@ test("a reload, closed tab or hidden page writes a pending autosave at once", ()
     storage.set("fsm-designer:autosave", "other tab");
     events.dispatchEvent(new Event("pagehide"));
     assert.equal(storage.get("fsm-designer:autosave"), "other tab");
-    // Discarded on close: the pending write held the discarded changes, so it stays cancelled.
-    useEditor.getState().load(newDiagram(), "m.fsm.json");
-    useEditor.getState().edit((d) => { createState(d, 0, 0); });
-    discardUnsaved();
-    events.dispatchEvent(new Event("pagehide"));
-    mock.timers.tick(300);
-    assert.equal(autosaved()?.doc.states.length, 0, "the discarded state does not come back");
   } finally {
     stop();
     delete (globalThis as { document?: unknown }).document;
