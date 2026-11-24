@@ -67,7 +67,7 @@
 改排版規則之前和之後，用同一把尺量 84 台形狀各異的狀態機（Verilog 測試檔、手畫的例子、常見的控制器如 CPU、UART、I2C、SPI、AXI、電梯、紅綠燈、每一步都能中止的流程、錯誤匯集、分派器、序列偵測器，還有環、鏈、樹、星形、網格和亂數產生的圖），在 `tools/layout-bench/`：
 
 ```sh
-node tools/layout-bench/run.ts --out tools/layout-bench/out-new --svg          # 排版並量測，約 30 秒；--filter '<regex>' 只跑幾台
+pnpm layout-bench --out tools/layout-bench/out-new --svg                     # 排版並量測，約 30 秒；--filter '<regex>' 只跑幾台（等同 node tools/layout-bench/run.ts）
 node tools/layout-bench/run.ts --out tools/layout-bench/out-old --core ../另一份原始碼/packages/core   # 用另一份程式碼（例如 main）排版，同一把尺量
 node tools/layout-bench/compare.ts tools/layout-bench/out-old tools/layout-bench/out-new --html compare.html   # 逐台比較，並產生前後對照頁
 ```
