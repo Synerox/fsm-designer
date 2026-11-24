@@ -4,3 +4,4 @@ fsm-workspace/
 *.tmp-*
 dist-single/
 tools/layout-taste-test/out/
+tools/layout-bench/out*/
