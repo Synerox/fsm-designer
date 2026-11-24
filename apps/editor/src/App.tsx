@@ -434,7 +434,7 @@ export function App() {
           onImported={(result) => {
             setImporting(false);
             setReport({ result, seq: useEditor.getState().loadSeq });
-            setNotice(drewText(result.diagram));
+            setNotice(drewText(result.diagram, useEditor.getState().labels === "none"));
           }}
         />
       )}

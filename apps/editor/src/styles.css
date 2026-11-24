@@ -206,6 +206,7 @@ button.primary:disabled { background: var(--surface-muted); border-color: var(--
 .modal .row .spacer { flex: 1; }
 .check-inline { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
 .check-inline input { accent-color: var(--accent); }
+.check-inline + .check-inline { margin-left: 10px; }
 .import-error { margin: 0; padding: 8px 10px; border-radius: var(--radius); background: #fdecec; color: #8a1f1f; font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
 .import-report { position: absolute; left: 12px; bottom: 12px; z-index: 5; width: min(360px, calc(100% - 24px)); max-height: 60%; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-md); padding: 10px 12px; font-size: 12px; }
 .import-report .head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }

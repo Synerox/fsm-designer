@@ -6,6 +6,7 @@ import type { FsmDiagram, ImportOptions, ImportResult, LayoutIssue } from "@fsm/
 import { FSM_FILTER, baseName, confirmDialog, fileError, openTextFile, saveFile } from "./platform.ts";
 import { pathNumbers } from "./geometry.ts";
 import { DEFAULT_NAME, drawOptions, newDiagram, useEditor } from "./store.ts";
+import type { LabelMode } from "./store.ts";
 
 import { tr } from "./i18n.ts";
 import { liveSave } from "./live.ts";
@@ -165,12 +166,18 @@ export function afterPaint(): Promise<void> {
 
 /**
  * Draw the FSM found in Verilog source as a new, unsaved diagram.
- * Returns null if the user kept the current unsaved diagram.
+ * `labels` is the "Text on lines" setting the drawing is laid out for and
+ * shown with: Hidden unless asked otherwise, since a real machine's
+ * conditions are long and bury the drawing (All brings them back, one click).
+ * Returns null if the user kept the current unsaved diagram; the setting is
+ * then left as it was.
  */
-export async function importVerilogText(source: string, opts: ImportOptions = {}): Promise<ImportResult | null> {
+export async function importVerilogText(source: string, opts: ImportOptions = {}, labels: LabelMode = "none"): Promise<ImportResult | null> {
   await afterPaint();
-  const r = await importVerilogLaidOut(source, { ...opts, layout: { draw: drawOptions() } }); // throws before anything is replaced
+  const r = await importVerilogLaidOut(source, { ...opts, layout: { draw: drawOptions(labels) } }); // throws before anything is replaced
   if (!(await confirmDiscard())) return null;
+  // Before the diagram: the view fits itself to the new drawing as it will be shown.
+  if (useEditor.getState().labels !== labels) useEditor.getState().setLabels(labels);
   useEditor.getState().load(r.diagram, null);
   useEditor.setState({ dirty: true, savedDoc: null }); // never saved: undoing back to it is not clean either
   return r;

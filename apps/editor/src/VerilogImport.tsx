@@ -11,6 +11,7 @@ import { useModal } from "./dialog.ts";
 import { VERILOG_FILTER, openTextFile } from "./platform.ts";
 import { MOD, tr, useLang } from "./i18n.ts";
 import { importErrorText, warningText } from "./importText.ts";
+import type { LabelMode } from "./store.ts";
 
 const SAMPLE = `// Example: Mealy machine detecting the sequence 1011 (two always blocks)
 module seq_detector_1011 (
@@ -43,6 +44,9 @@ endmodule
 export function VerilogImportDialog({ onClose, onImported }: { onClose: () => void; onImported: (r: ImportResult) => void }) {
   const [code, setCode] = useState(loadVerilogDraft);
   const [selfLoops, setSelfLoops] = useState(true);
+  // The "Text on lines" setting the import is drawn with. Hidden each time the
+  // dialog opens: imported conditions are long, and the bare drawing reads first.
+  const [labels, setLabels] = useState<LabelMode>("none");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [picked, setPicked] = useState(0);
@@ -80,7 +84,7 @@ export function VerilogImportDialog({ onClose, onImported }: { onClose: () => vo
       // The machine list may still be catching up with the last keystroke.
       const list = parsed === code ? machines : listStateMachines(code);
       const pick = list[Math.min(picked, list.length - 1)];
-      const r = await importVerilogText(code, { selfLoops, ...(list.length > 1 && pick ? pick : {}) });
+      const r = await importVerilogText(code, { selfLoops, ...(list.length > 1 && pick ? pick : {}) }, labels);
       if (r) onImported(r);
     } catch (e) {
       setError(importErrorText(e instanceof Error ? e.message : String(e)));
@@ -119,6 +123,13 @@ export function VerilogImportDialog({ onClose, onImported }: { onClose: () => vo
             <input type="checkbox" checked={selfLoops} onChange={(e) => setSelfLoops(e.target.checked)} />
             {tr("Draw self loops for staying in a state", "畫出停在原狀態的自迴圈")}
           </label>
+          <span className="check-inline">
+            {tr("Text on lines", "線上文字")}
+            <span className="seg" role="group" aria-label={tr("Text on lines", "線上文字")} title={tr("Show or hide conditions and outputs in the imported drawing; switch any time at the bottom right", "匯入後的圖要顯示或隱藏條件與輸出；之後可隨時在右下角切換")}>
+              <button type="button" className={labels === "all" ? "on" : ""} aria-pressed={labels === "all"} onClick={() => setLabels("all")} data-testid="verilog-labels-all">{tr("All", "全部")}</button>
+              <button type="button" className={labels === "none" ? "on" : ""} aria-pressed={labels === "none"} onClick={() => setLabels("none")} data-testid="verilog-labels-none">{tr("Hidden", "隱藏")}</button>
+            </span>
+          </span>
           <span className="spacer" />
           <button onClick={() => { setCode(SAMPLE); setError(null); }}>{tr("Example", "範例")}</button>
           <button onClick={() => void openFile()}>{tr("Open file…", "開啟檔案…")}</button>
