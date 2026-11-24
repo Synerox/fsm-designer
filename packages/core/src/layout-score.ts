@@ -9,7 +9,7 @@
 // with any of those picks.
 
 import type { FsmDiagram } from "./model.ts";
-import { planDiagram } from "./export/svg.ts";
+import { PARALLEL_GAP, planDiagram } from "./export/svg.ts";
 import type { DiagramPlan } from "./export/svg.ts";
 import { stateRadius } from "./metrics.ts";
 
@@ -20,7 +20,7 @@ export interface Pt { x: number; y: number }
 
 export interface LayoutScore {
   total: number;
-  /** Lines crossing each other, or cutting across the start arrow. */
+  /** Lines crossing each other, or cutting across the start arrow or running along it. */
   crossings: number;
   throughStates: number;
   labelOverlaps: number;
@@ -30,19 +30,26 @@ export interface LayoutScore {
   backward: number;
   /** Lines neither level nor upright. */
   slanted: number;
-  /** States to the left of the reset state (it should start the reading, at the left). */
+  /** States to the left of the reset state (it should start the reading, at the left); none for a reset state that is a hub in the middle of the drawing. */
   leftOfStart: number;
-  /** States lined up with no other state, in a row or a column. */
+  /** States lined up with no other state, in a row or a column (not a hub, linked to more than five states and to half of the others or more, half way between two of them). */
   floating: number;
   /** Triangles of linked states, two of them linked both ways, that are not about equilateral (not counting the slices round a state centred in an equilateral triangle of the three states it links to, and to nothing else). */
   uneven: number;
-  /** How far lines between states run past one and a half times the shortest line (or the grid step, if shorter), summed (in those units). */
+  /** How far lines between states run past one and a half times the shortest line (or the grid step, if shorter), summed (in those units); the lines of a state with nine or more neighbours, past the ring that holds them. One more for each line of a hub that is bowed round another state. */
   long: number;
   asymmetry: number;
   length: number;
   aspect: number;
   area: number;
 }
+
+/**
+ * How near a line may come to the start arrow before it runs along it (px):
+ * a little more than half the gap between the two lines of a pair, so the
+ * arrow does not count as clear when it comes in between them.
+ */
+export const ARROW_ROOM = PARALLEL_GAP / 2 + 2;
 
 /** Width over height the drawing aims for: a little wider than tall, like a screen. */
 export const SCREEN = 1.6;
@@ -81,9 +88,18 @@ export function score(d: FsmDiagram, plan: DiagramPlan = planDiagram(d), step = 
   const s = emptyScore();
   for (let i = 0; i < edges.length; i++)
     for (let j = i + 1; j < edges.length; j++) s.crossings += crossCount(edges[i].points, edges[j].points, st);
-  // The start arrow counts as a line: nothing should cut across it.
+  // The start arrow counts as a line: nothing should cut across it, or run
+  // along it. (An arrow drawn on top of a line, or between the two lines of a
+  // pair, reads as part of them: a state with lines on all eight sides, the
+  // middle of abort_chain9's grid, used to get its arrow on one of them.)
   const arrow = plan.initialArrow;
-  if (arrow) for (const e of edges) s.crossings += crossCount([arrow.from, arrow.to], e.points, st);
+  if (arrow) {
+    const o = arrow.state, edge = (stateRadius(d, o) + 4) ** 2;
+    for (const e of edges) {
+      const along = e.transitions[0].from !== e.transitions[0].to && e.points.some((p) => (p.x - o.x!) ** 2 + (p.y - o.y!) ** 2 > edge && segDist(p, arrow.from, arrow.to) < ARROW_ROOM);
+      s.crossings += crossCount([arrow.from, arrow.to], e.points, st) || (along ? 1 : 0);
+    }
+  }
   for (const e of edges) {
     const ends = new Set([e.transitions[0].from, e.transitions[0].to]);
     const b = box(e.points); // a state outside the line's box (by its radius) is not on it
@@ -121,21 +137,34 @@ export function score(d: FsmDiagram, plan: DiagramPlan = planDiagram(d), step = 
     if (Math.abs(dx) > GRID && Math.abs(dy) > GRID) s.slanted++;
   }
   s.backward = Math.min(left, up);
-  const start = at.get((d.states.find((x) => x.isInitial) ?? d.states[0]).id)!;
-  s.leftOfStart = st.filter((p) => p.x < start.x - GRID).length;
   const linked = new Map(d.states.map((x) => [x.id, new Set<string>()]));
   const both = new Set<string>();
   for (const t of d.transitions) if (t.from !== t.to) {
     linked.get(t.from)!.add(t.to); linked.get(t.to)!.add(t.from);
     if (d.transitions.some((u) => u.from === t.to && u.to === t.from)) both.add(`${t.from}\u0000${t.to}`);
   }
+  // States left of the reset state. A reset state with more than five
+  // neighbours cannot have them all beside it on the right (five cells:
+  // above, below and the three to the right). With states above, below and
+  // to the right of it, it is the hub of the drawing, read from the middle
+  // (the user's pick p19: a hub in the middle of its four), and nothing counts.
+  const startId = (d.states.find((x) => x.isInitial) ?? d.states[0]).id;
+  const start = at.get(startId)!;
+  const hub = linked.get(startId)!.size > 5 && st.some((p) => p.x > start.x + GRID) && st.some((p) => p.y < start.y - GRID) && st.some((p) => p.y > start.y + GRID);
+  s.leftOfStart = hub ? 0 : st.filter((p) => p.x < start.x - GRID).length;
   // Long lines: measured against the shortest line in the drawing, or the
   // grid step if that is shorter (at least one grid cell, so two linked
   // states on the same spot do not make every line infinitely long).
   const span = (a: string, b: string) => Math.hypot(at.get(a)!.x - at.get(b)!.x, at.get(a)!.y - at.get(b)!.y);
   const unitLen = Math.max(GRID, Math.min(step, ...[...linked].flatMap(([a, na]) => [...na].map((b) => span(a, b)))));
+  // A state with many neighbours cannot have them all near: on a grid, k of
+  // them fit no nearer than the edge of a square of k cells round it, whose
+  // corners are k√2/8 steps away (more than a step and a half from nine
+  // neighbours on). Its lines are long only past that, or every drawing of a
+  // hub pays for its spokes and the one that hides some behind others wins.
+  const reach = (id: string) => Math.max(1.5, (linked.get(id)!.size * Math.SQRT2) / 8);
   for (const [a, na] of linked) for (const b of na) if (a < b) {
-    s.long += Math.max(0, span(a, b) / unitLen - 1.5);
+    s.long += Math.max(0, span(a, b) / unitLen - Math.max(reach(a), reach(b)));
     // Three states linked to each other, two of them both ways: should be
     // equilateral. Three in a row may stay (the outer line is an arc), unless
     // all three are linked both ways.
@@ -155,7 +184,25 @@ export function score(d: FsmDiagram, plan: DiagramPlan = planDiagram(d), step = 
       if (Math.max(...sides) > 1.15 * Math.min(...sides)) s.uneven++;
     }
   }
-  if (st.length > 2) s.floating = st.filter((p) => !st.some((q) => q !== p && (Math.abs(q.x - p.x) < 1 || Math.abs(q.y - p.y) < 1))).length;
+  // The hub of a drawing: a state linked to more than five others, and to
+  // half of all the others or more (not any busy state of a big machine).
+  const isHub = (id: string) => linked.get(id)!.size > 5 && linked.get(id)!.size >= (d.states.length - 1) / 2;
+  // It must not be free to hide one neighbour of a hub behind another: the
+  // line bowed round the one in front counts as a step too long. (star8:
+  // seven round the middle and the eighth behind one of them, on two arcs,
+  // scored better than all eight round it.)
+  for (const e of edges) {
+    const t = e.transitions[0];
+    if (t.from !== t.to && e.curve !== 0 && (isHub(t.from) || isHub(t.to))) s.long++;
+  }
+  // A state level with no other. Not a hub that stands half way between two
+  // of its neighbours, one straight above the other or side by side: it is
+  // the middle of the states round it, which is a place.
+  const between = (id: string) => {
+    const p = at.get(id)!, ns = [...linked.get(id)!].map((v) => at.get(v)!);
+    return isHub(id) && ns.some((q) => ns.some((r) => r !== q && ((Math.abs(q.x - r.x) < 1 && Math.abs(q.y + r.y - 2 * p.y) < 1) || (Math.abs(q.y - r.y) < 1 && Math.abs(q.x + r.x - 2 * p.x) < 1))));
+  };
+  if (st.length > 2) s.floating = [...at].filter(([id, p]) => !st.some((q) => q !== p && (Math.abs(q.x - p.x) < 1 || Math.abs(q.y - p.y) < 1)) && !between(id)).length;
   // Mirror symmetry about the vertical or horizontal centre line, whichever fits better.
   const xs = st.map((p) => p.x), ys = st.map((p) => p.y);
   const mx = (Math.min(...xs) + Math.max(...xs)) / 2, my = (Math.min(...ys) + Math.max(...ys)) / 2;

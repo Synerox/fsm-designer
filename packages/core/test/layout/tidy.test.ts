@@ -244,6 +244,20 @@ test("four states all linked, labels shown: the reset state still at the top lef
   assert.ok(level[0].x! > s0.x!, "its first line runs right");
 });
 
+test("a reset state linked both ways to eight or twelve others sits in the middle of them: no crossings, no arcs, the start arrow from the left clear of the lines", () => {
+  for (const n of [8, 12]) {
+    const d = machine(n + 1, Array.from({ length: n }, (_, i): Array<[number, number]> => [[0, i + 1], [i + 1, 0]]).flat());
+    const r = tidyLayout(d, { plan: { labels: "none" } });
+    checkTidy(d, `star${n}`);
+    // The score counts a line running along the start arrow (between the two lines of a spoke) as a crossing.
+    assert.equal(r.score.crossings, 0, `star${n} as ${r.arrangement}`);
+    assert.ok(d.transitions.every((t) => !t.curve), `star${n}: straight lines only`);
+    const s0 = d.states[0];
+    assert.equal(s0.initialAngle ?? Math.PI, Math.PI, `star${n}: the start arrow comes from the left`);
+    assert.ok(d.states.some((s) => s.x! < s0.x!) && d.states.some((s) => s.x! > s0.x!) && d.states.some((s) => s.y! < s0.y!) && d.states.some((s) => s.y! > s0.y!), `star${n}: states on every side of the hub`);
+  }
+});
+
 // The e2e check's machines: n states, each going to the next on a and to one
 // other state (from a fixed random sequence) on b, reset ST_0.
 function generated(n: number, seed: number) {
