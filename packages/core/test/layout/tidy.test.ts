@@ -295,11 +295,17 @@ test("the reset state goes on top only where that costs no crossing (gen17_7, ge
   // when it is not clearly worse. gen15_11 and gen15_4: grids turned before
   // finishing; gen17_7: a turned grid spread upside down; gen14_1: polish
   // moves made on a drawing turned between moves.
-  for (const [n, seed, labels, crossings] of [[17, 7, "all", 14], [18, 2, "all", 11], [15, 11, "all", 10], [15, 4, "all", 8], [14, 1, "none", 4]] as const) {
+  for (const [n, seed, labels, crossings] of [[17, 7, "all", 14], [18, 2, "all", 11], [15, 11, "all", 10], [15, 4, "all", 8], [14, 1, "none", 5]] as const) {
     const d = generated(n, seed);
     const r = (await autoLayout(d, { draw: { labels } }))!;
     assert.ok(r.score.crossings <= crossings, `gen${n}_${seed}: ${r.score.crossings} crossings, ${crossings} when drawn as made`);
   }
+  // gen14_1's polished drawing (4 crossings) is a grid spread out for one
+  // crossing in five, 1008 x 1046 px. It pays for that size now, and the grid
+  // as made wins: 966 x 566 px, 5 crossings whichever way round it is
+  // finished. The polished one is still made, and must still have its 4.
+  const polished = layoutCandidates(generated(14, 1), { plan: { labels: "none" } }).filter((c) => c.arrangement.endsWith("(polished)"));
+  assert.ok(polished.some((c) => c.score.crossings <= 4), `gen14_1 polished: ${polished.map((c) => c.score.crossings).join(", ")} crossings, 4 when moved as made`);
 });
 
 test("four states all linked: each hub shape is made once, not once per hub with the states only named differently", () => {

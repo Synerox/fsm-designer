@@ -93,7 +93,14 @@
 //    bowed round another state counts as a step too long.
 // 6. Repair. Candidates that still have crossings, overlaps or lines
 //    through states, and would lead with those gone (at most five, two when
-//    dense), are tried spread out a little and scored in their spread step;
+//    dense), are tried spread out a little (x1.25, x1.5). Room a drawing
+//    needed is free: a copy with fewer lines through states, overlapping
+//    labels or states too close than any smaller one is scored in its own,
+//    spread step. Room it did not need is paid for: a copy spread further
+//    only to untangle crossings is scored in the step of the smallest that
+//    had the room, as the bigger drawing with the longer lines it is. A
+//    spread copy is kept if it has fewer problems and a better score than
+//    the drawing it was made from (of the two, the better scoring);
 //    whatever cannot be fixed is reported in TidyResult.issues.
 // 7. Polish. In the two best that repair would take, then the best two if
 //    within half again of the best score, a state with a long line tries the
@@ -101,8 +108,10 @@
 //    improves the score most (the reset state never moves right of another).
 //    A wheel is left as shaped: a rim state moved in nearer the hub stands
 //    in the way of the spokes behind it.
-//    One budget of tries for all, min(48, 40000 / lines²). Repair and polish
-//    add a drawing only if no candidate has its positions.
+//    One budget of tries for all, min(48, 40000 / lines²); last, six of
+//    those at most go to the best spread copy that paid for its size and is
+//    not among them. Repair and polish add a drawing only if no candidate
+//    has its positions.
 
 import { FsmError } from "./model.ts";
 import type { FsmDiagram } from "./model.ts";
@@ -150,8 +159,8 @@ export interface TidyResult {
   issues: LayoutIssue[];
 }
 
-/** One finished arrangement: the laid-out copy, its score, and the grid step its distances are measured in. */
-interface Tried { score: LayoutScore; arrangement: string; d: FsmDiagram; sx: number; sy: number }
+/** One finished arrangement: the laid-out copy, its score, its grid step, and the step its score's distances are measured in when that is not its own (`unit`: a copy spread out in repair further than it needed room for, see there). */
+interface Tried { score: LayoutScore; arrangement: string; d: FsmDiagram; sx: number; sy: number; unit?: number }
 interface Laid { score: LayoutScore; arrangement: string; triangles: string[][]; candidates: LayoutScore[]; d: FsmDiagram; tried: Tried[] }
 
 /** A ranked candidate layout, as returned by layoutCandidates(). */
@@ -199,7 +208,7 @@ export function layoutCandidates(d: FsmDiagram, opts: TidyOptions = {}): LayoutC
   if (c.states.length === 0) return [];
   const islands = islandsOf(c);
   const laid = islands.length > 1 ? packIslands(c, islands, opts) : layoutIsland(c, opts);
-  return laid.tried.map((t) => ({ arrangement: t.arrangement, score: t.score, diagram: t.d, step: t.sx }));
+  return laid.tried.map((t) => ({ arrangement: t.arrangement, score: t.score, diagram: t.d, step: t.unit ?? t.sx }));
 }
 
 /**
@@ -293,21 +302,22 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
   // round and kept upright unless that is clearly worse (`turn` false: as it
   // is, for polish moves). Hub shapes are drawn as made: each already puts
   // the reset state where it wants it, and turned over one would only repeat
-  // another hub's shape.
-  const finishAs = (c: FsmDiagram, sx: number) => {
+  // another hub's shape. `unit` is the step the score measures in: the
+  // drawing's own, but for a copy spread out in repair (see there).
+  const finishAs = (c: FsmDiagram, sx: number, unit = sx) => {
     clearStartArrow(c, sx);
     clearStartArrow(c, sx, routeEdges(c));
     placeLoops(c);
-    return score(c, planDiagram(c, popts), sx);
+    return score(c, planDiagram(c, popts), unit);
   };
   // Candidates that finished turned over (the repair spreads them as made).
   const turned = new WeakSet<FsmDiagram>();
-  const finish = (c: FsmDiagram, sx: number, arrangement: string, turn = true) => {
+  const finish = (c: FsmDiagram, sx: number, arrangement: string, turn = true, unit = sx) => {
     forget(c);
-    if (!turn || arrangement.startsWith("hub-") || !startLow(c, g.init)) return finishAs(c, sx);
+    if (!turn || arrangement.startsWith("hub-") || !startLow(c, g.init)) return finishAs(c, sx, unit);
     const up = structuredClone(c);
     turnOver(up);
-    const su = finishAs(up, sx), sl = finishAs(c, sx);
+    const su = finishAs(up, sx, unit), sl = finishAs(c, sx, unit);
     if (mustFix(su) > mustFix(sl) || su.total > sl.total + UPRIGHT_MARGIN) return sl;
     c.states = up.states; c.transitions = up.transitions;
     turned.add(c);
@@ -404,9 +414,12 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
   const bad = (sc: LayoutScore) => sc.crossings + sc.throughStates + sc.labelOverlaps + sc.tooClose;
   // Only candidates that would lead with their problems gone are worth it (at most five, two for a dense drawing).
   const must = (sc: LayoutScore) => WEIGHTS.crossings * sc.crossings + WEIGHTS.throughStates * sc.throughStates + WEIGHTS.labelOverlaps * sc.labelOverlaps + WEIGHTS.tooClose * sc.tooClose;
+  // What room cures: a line through a state, a label on a label or on a state, two states too close.
+  const cramped = (sc: LayoutScore) => sc.throughStates + sc.labelOverlaps + sc.tooClose;
   const lead = tried[0].score.total;
   for (const cand of tried.filter((t) => bad(t.score) && t.score.total - must(t.score) < lead + 10).slice(0, dense ? 2 : 5)) {
     let cur = cand;
+    let room = cramped(cand.score), unit = cand.sx; // the least cramped so far, and the step of the smallest drawing that is so
     for (const k of [1.25, 1.5]) {
       if (!bad(cur.score)) break;
       const c = structuredClone(cand.d);
@@ -416,8 +429,23 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
       // either way, but 14 crossings spread as made and 17 turned over).
       if (turned.has(cand.d)) turnOver(c);
       for (const s of c.states) { s.x = Math.round((s.x! * k) / GRID) * GRID; s.y = Math.round((s.y! * k) / GRID) * GRID; }
-      const sc = finish(c, cand.sx * k, cand.arrangement); // measured in its own (spread) step, like every other candidate
-      if (bad(sc) < bad(cur.score)) cur = { score: sc, arrangement: `${cand.arrangement} (spread)`, d: c, sx: cand.sx * k, sy: cand.sy * k };
+      // A copy that got room it lacked (fewer lines through states,
+      // overlapping labels, states too close than any smaller one) is
+      // measured in its own, spread step, like every other candidate: the
+      // room was needed. One spread further only to untangle crossings is
+      // measured in the step of the smallest that has that room, so it pays
+      // for what it is: a bigger drawing (x1.5 is 2.25 times the area, the
+      // states two thirds the size on screen) with longer lines. In its own
+      // step it was free, cheaper even (loops and margins do not grow with
+      // it), and won for one crossing in ten: gen12_5, 12 states, came out
+      // 1359 x 1446 px with the two crossings its 759 x 1026 px drawing has,
+      // rand24_12_8 1137 x 1062 px for none fewer. (With nothing cramped
+      // there is no room to gain: finished once, in the step it pays in.)
+      let sc = finish(c, cand.sx * k, cand.arrangement, true, room ? cand.sx * k : unit);
+      if (room && cramped(sc) < room) { room = cramped(sc); unit = cand.sx * k; }
+      else if (room) sc = score(c, planDiagram(c, popts), unit);
+      // Fewer problems than as made, and the better scoring: of the two spreads, and than the drawing they were made from.
+      if (bad(sc) < bad(cand.score) && sc.total < cur.score.total) cur = { score: sc, arrangement: `${cand.arrangement} (spread)`, d: c, sx: cand.sx * k, sy: cand.sy * k, unit };
     }
     if (cur !== cand) add(cur);
   }
@@ -441,8 +469,18 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
   // (abort_chain12 and error_sink14 polished: two lines bowed round it).
   let budget = Math.min(48, Math.round(4e4 / Math.max(1, lines.length) ** 2));
   const fixable = tried.filter((t) => bad(t.score) && t.score.total - must(t.score) < tried[0].score.total + 10).slice(0, 2);
-  const polish = [...new Set([...fixable, ...tried.slice(0, 2).filter((c) => c.score.total <= 1.5 * tried[0].score.total)])].filter((c) => !/^hub-(box|oval|ring)/.test(c.arrangement));
+  const shaped = (t: Tried) => /^hub-(box|oval|ring)/.test(t.arrangement);
+  const polish = [...new Set([...fixable, ...tried.slice(0, 2).filter((c) => c.score.total <= 1.5 * tried[0].score.total)])].filter((c) => !shaped(c));
+  // A copy that pays for being spread (see repair) ranks by its long lines
+  // until a move pulls them in, and so misses the best two it used to be
+  // among. The best such is polished too: last, and with six tries at most
+  // (three spots each for two states), to stay quick. (gen18_2: the x1.5
+  // copy of a grid ranks fourth; one move takes two of its 13 crossings and
+  // it wins, as it did when the spread was free.)
+  const paid = tried.find((t) => t.unit !== undefined && t.unit !== t.sx && t.score.total <= 1.5 * tried[0].score.total && !shaped(t) && !polish.includes(t));
+  if (paid) polish.push(paid);
   for (const cand of polish) {
+    if (cand === paid) budget = Math.min(budget, 6);
     let cur = cand;
     const gap = 2 * R + 40;
     for (let round = 0; round < 3 && budget > 0; round++) {
@@ -472,7 +510,7 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
           const c = structuredClone(cur.d);
           const s = c.states.find((x) => x.id === id)!;
           s.x = Math.round(p.x / GRID) * GRID; s.y = Math.round(p.y / GRID) * GRID;
-          const sc = finish(c, cur.sx, cand.arrangement, false);
+          const sc = finish(c, cur.sx, cand.arrangement, false, cur.unit);
           if (sc.total < (next ?? cur).score.total - 1e-6) next = { ...cur, score: sc, d: c, arrangement: cand.arrangement.endsWith("(polished)") ? cand.arrangement : `${cand.arrangement} (polished)` };
         }
         if (next) break;
@@ -486,7 +524,7 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
     // crossing more).
     if (cur !== cand && startLow(cur.d, g.init)) {
       const c = structuredClone(cur.d);
-      cur = { ...cur, score: finish(c, cur.sx, cand.arrangement), d: c };
+      cur = { ...cur, score: finish(c, cur.sx, cand.arrangement, true, cur.unit), d: c };
     }
     if (cur !== cand) add(cur);
   }
