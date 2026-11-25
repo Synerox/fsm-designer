@@ -5,7 +5,7 @@
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { addState, addTransition, autoLayout, createDiagram, GRID, layoutCandidates, layoutScore, planDiagram, renderLatex, renderSvg, tidyLayout } from "../../src/index.ts";
+import { addState, addTransition, autoLayout, createDiagram, fitStateSizes, GRID, layoutCandidates, layoutScore, planDiagram, renderLatex, renderSvg, tidyLayout } from "../../src/index.ts";
 import type { FsmDiagram } from "../../src/index.ts";
 import { importVerilog } from "../../src/import/index.ts";
 import { fixture } from "../import/helpers.ts";
@@ -244,6 +244,20 @@ test("four states all linked, labels shown: the reset state still at the top lef
   assert.ok(level[0].x! > s0.x!, "its first line runs right");
 });
 
+test("a reset state linked both ways to eight or twelve others sits in the middle of them: no crossings, no arcs, the start arrow from the left clear of the lines", () => {
+  for (const n of [8, 12]) {
+    const d = machine(n + 1, Array.from({ length: n }, (_, i): Array<[number, number]> => [[0, i + 1], [i + 1, 0]]).flat());
+    const r = tidyLayout(d, { plan: { labels: "none" } });
+    checkTidy(d, `star${n}`);
+    // The score counts a line running along the start arrow (between the two lines of a spoke) as a crossing.
+    assert.equal(r.score.crossings, 0, `star${n} as ${r.arrangement}`);
+    assert.ok(d.transitions.every((t) => !t.curve), `star${n}: straight lines only`);
+    const s0 = d.states[0];
+    assert.equal(s0.initialAngle ?? Math.PI, Math.PI, `star${n}: the start arrow comes from the left`);
+    assert.ok(d.states.some((s) => s.x! < s0.x!) && d.states.some((s) => s.x! > s0.x!) && d.states.some((s) => s.y! < s0.y!) && d.states.some((s) => s.y! > s0.y!), `star${n}: states on every side of the hub`);
+  }
+});
+
 // The e2e check's machines: n states, each going to the next on a and to one
 // other state (from a fixed random sequence) on b, reset ST_0.
 function generated(n: number, seed: number) {
@@ -281,11 +295,17 @@ test("the reset state goes on top only where that costs no crossing (gen17_7, ge
   // when it is not clearly worse. gen15_11 and gen15_4: grids turned before
   // finishing; gen17_7: a turned grid spread upside down; gen14_1: polish
   // moves made on a drawing turned between moves.
-  for (const [n, seed, labels, crossings] of [[17, 7, "all", 14], [18, 2, "all", 11], [15, 11, "all", 10], [15, 4, "all", 8], [14, 1, "none", 4]] as const) {
+  for (const [n, seed, labels, crossings] of [[17, 7, "all", 14], [18, 2, "all", 11], [15, 11, "all", 10], [15, 4, "all", 8], [14, 1, "none", 5]] as const) {
     const d = generated(n, seed);
     const r = (await autoLayout(d, { draw: { labels } }))!;
     assert.ok(r.score.crossings <= crossings, `gen${n}_${seed}: ${r.score.crossings} crossings, ${crossings} when drawn as made`);
   }
+  // gen14_1's polished drawing (4 crossings) is a grid spread out for one
+  // crossing in five, 1008 x 1046 px. It pays for that size now, and the grid
+  // as made wins: 966 x 566 px, 5 crossings whichever way round it is
+  // finished. The polished one is still made, and must still have its 4.
+  const polished = layoutCandidates(generated(14, 1), { plan: { labels: "none" } }).filter((c) => c.arrangement.endsWith("(polished)"));
+  assert.ok(polished.some((c) => c.score.crossings <= 4), `gen14_1 polished: ${polished.map((c) => c.score.crossings).join(", ")} crossings, 4 when moved as made`);
 });
 
 test("four states all linked: each hub shape is made once, not once per hub with the states only named differently", () => {
@@ -310,6 +330,31 @@ test("a wheel round the reset state: no crossings, the start arrow clear, nothin
   assert.ok(d.states.every((s) => s.x! >= d.states[0].x!), "nothing left of the reset state");
   const step = Math.min(...d.states.slice(1).map((_, i) => dist(d, 0, i + 1)));
   assert.ok(d.states.slice(1).every((_, i) => dist(d, 0, i + 1) <= step * Math.SQRT2 + 1), "spokes one step, straight or diagonal");
+});
+
+test("repair: a copy spread out to clear a line through a state does not pay for room a smaller, rejected copy had", () => {
+  // IDLE -> T1 .. T13 -> IDLE, every step can fall into ERROR and most abort
+  // to IDLE. Its best drawing as made (a snake) has a line through a state.
+  // Spread x1.25 that line is clear for a crossing more: not fewer problems,
+  // not kept. Spread x1.5 it is clear for nothing. Charged for the room the
+  // rejected x1.25 copy had, that copy lost to the drawing with the line
+  // through a state; it is the first to clear it among those kept, so its
+  // room was needed.
+  const d = createDiagram({ name: "two_hubs" });
+  const names = ["IDLE", ...Array.from({ length: 13 }, (_, i) => `T${i + 1}`), "ERROR"];
+  const id = new Map(names.map((name) => [name, addState(d, { name, isInitial: name === "IDLE" }).id]));
+  const line = (a: string, b: string, condition: string) => addTransition(d, { from: id.get(a)!, to: id.get(b)!, condition });
+  line("IDLE", "T1", "go");
+  for (let i = 1; i < 13; i++) line(`T${i}`, `T${i + 1}`, "ok");
+  line("T13", "IDLE", "ok");
+  for (let i = 1; i <= 13; i++) line(`T${i}`, "ERROR", "err");
+  for (let i = 2; i < 13; i++) line(`T${i}`, "IDLE", "abort");
+  line("ERROR", "IDLE", "clr");
+  fitStateSizes(d);
+  const cs = layoutCandidates(d, { plan: { labels: "none" } });
+  assert.ok(cs.some((c) => c.score.throughStates > 0 && !c.arrangement.includes("(spread)")), "the machine still has a candidate with a line through a state as made");
+  const r = tidyLayout(d, { plan: { labels: "none" } });
+  assert.equal(r.score.throughStates, 0, `${r.arrangement}: a line through a state`);
 });
 
 // Pairs of layouts of the same machine, and which one the user preferred

@@ -23,6 +23,7 @@ test("multiple selections and diagram sizes say '1 state', not '1 states'", () =
   assert.equal(diagramSizeText(d), "2 states, 1 transition");
   assert.equal(statusText(d, null), "2 states · 1 transition");
   assert.equal(drewText(d), "Drew 2 states and 1 transition from Verilog");
+  assert.equal(drewText(d, true), "Drew 2 states and 1 transition from Verilog · text on lines is hidden (All, bottom right, shows it)");
   d.states.pop();
   assert.equal(diagramSizeText(d), "1 state, 1 transition", "the inspector agrees with the status bar");
 });

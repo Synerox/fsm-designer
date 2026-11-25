@@ -84,6 +84,8 @@ pnpm dev          # 在瀏覽器開啟 http://localhost:5173
 <img src="docs/images/verilog-import-zh.png" alt="匯入紅綠燈控制器的 Verilog 後畫出的狀態圖與匯入報告" width="760">
 </div>
 
+匯入後的圖預設先隱藏線上的文字（條件與輸出），只看狀態和箭頭，圖比較清楚；在匯入視窗的「線上文字」選「全部」，或匯入後在右下角切換，就會顯示。
+
 支援常見的寫法：一段、兩段、三段式 `always`，`case`／`casez`／`if-else`，`parameter`／`localparam`／`` `define ``／`typedef enum` 定義的狀態，以及 one-hot 編碼。同一個檔案有多個狀態機時可以選擇要畫哪一個。詳細說明見 [packages/core/src/import/README.md](packages/core/src/import/README.md)。
 
 ### Moore 與 Mealy

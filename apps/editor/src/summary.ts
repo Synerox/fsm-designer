@@ -34,8 +34,9 @@ export function diagramSizeText(d: FsmDiagram): string {
   return tr(`${count(ns, "state")}, ${count(nt, "transition")}`, `${ns} 個狀態，${nt} 條轉移`, `状態 ${ns} 個、遷移 ${nt} 本`);
 }
 
-/** Notice after a Verilog import. */
-export function drewText(d: FsmDiagram): string {
+/** Notice after a Verilog import; with the text on lines hidden, it says so and where to bring it back. */
+export function drewText(d: FsmDiagram, hidden = false): string {
   const ns = d.states.length, nt = d.transitions.length;
-  return tr(`Drew ${count(ns, "state")} and ${count(nt, "transition")} from Verilog`, `已從 Verilog 畫出 ${ns} 個狀態、${nt} 條轉移`, `Verilog から ${ns} 個の状態と ${nt} 本の遷移を描きました`);
+  const drew = tr(`Drew ${count(ns, "state")} and ${count(nt, "transition")} from Verilog`, `已從 Verilog 畫出 ${ns} 個狀態、${nt} 條轉移`, `Verilog から ${ns} 個の状態と ${nt} 本の遷移を描きました`);
+  return hidden ? drew + tr(" · text on lines is hidden (All, bottom right, shows it)", " · 線上文字已隱藏（右下角選「全部」可顯示）") : drew;
 }

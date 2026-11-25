@@ -1,7 +1,7 @@
 // File commands: autosave, opening files, auto layout.
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
-import { autoLayout, renderSvg } from "@fsm/core";
+import { autoLayout, importVerilogLaidOut, renderSvg } from "@fsm/core";
 import { MAX_DRAFT, autosaveLost, importVerilogText, loadText, loadVerilogDraft, restoreSession, saveVerilogDraft, serialize, startAutosave, tidyUp, useAutosave } from "../src/actions.ts";
 import { createState, createTransition, drawOptions, newDiagram, setInitial, useEditor } from "../src/store.ts";
 import { useLang } from "../src/i18n.ts";
@@ -68,6 +68,27 @@ test("autosave keeps the unsaved flag of an import, and clears it after a save t
     stop();
     mock.timers.reset();
   }
+});
+
+test("an import hides the text on lines unless asked to show it, and is laid out for the setting it is shown with", async () => {
+  const positions = () => useEditor.getState().doc.states.map((s) => [s.x, s.y]);
+  useEditor.getState().load(newDiagram(), null);
+  useEditor.getState().setLabels("all");
+  assert.ok(await importVerilogText(SEQ));
+  assert.equal(useEditor.getState().labels, "none", "Hidden is the default");
+  assert.equal(storage.get("fsm-designer.labels"), "none", "and stays after a reload, like a click on Hidden");
+  const hidden = (await importVerilogLaidOut(SEQ, { layout: { draw: drawOptions("none") } })).diagram;
+  assert.deepEqual(positions(), hidden.states.map((s) => [s.x, s.y]), "laid out for hidden text");
+
+  useEditor.getState().load(newDiagram(), null);
+  assert.ok(await importVerilogText(SEQ, {}, "all"));
+  assert.equal(useEditor.getState().labels, "all", "the dialog's choice is the view's setting");
+  const shown = (await importVerilogLaidOut(SEQ, { layout: { draw: drawOptions("all") } })).diagram;
+  assert.deepEqual(positions(), shown.states.map((s) => [s.x, s.y]), "laid out for shown text");
+
+  // Code that cannot be imported changes nothing, the setting included.
+  await assert.rejects(importVerilogText("module m; endmodule"));
+  assert.equal(useEditor.getState().labels, "all");
 });
 
 test("opening a file the editor saved gives back the same diagram", async () => {

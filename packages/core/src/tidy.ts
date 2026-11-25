@@ -37,6 +37,16 @@
 //      Drawn as shaped (no local shapes); a shape that is the same drawing
 //      as one already made from another hub, the states only named
 //      differently, is made once.
+//    - wheel (hub-box, hub-oval, hub-ring): a state linked to five or more
+//      others and to half of the others or more (up to 40 states), in the
+//      middle, the states it links to round it in the order of their own
+//      chain: on the edge of a rectangle of grid cells (the three best sizes
+//      whose spokes all stay clear) and on an oval a little wider than tall
+//      (a circle, the spokes at even angles, when lines run both ways between
+//      the hub and a neighbour: two lines a spoke need more room between
+//      spokes). States not linked to the hub go outside the rim next to
+//      their neighbours. A hub that is the reset state gets no state where
+//      its spoke would run along the start arrow, which comes from the left.
 //    Each at two line lengths: room for the spacing, and room for the
 //    widest label (at most 320 px; the same length when labels are short;
 //    only the second above 16 states).
@@ -61,9 +71,11 @@
 //    to its state's emptiest side, kept clear of lines (a pair drawn as two
 //    parallel lines is wider than its centre line) and of the start arrow;
 //    the start arrow comes in from a side free of states and lines (lines
-//    first bow round it, and only if one still cuts it does it move).
+//    first bow round it, and only if one still cuts it, or runs along it
+//    nearer than ARROW_ROOM, does it move).
 // 5. Scoring (see layout-score.ts): crossings (the start arrow counts as a
-//    line) weigh most, then lines through states
+//    line, cut by a line or with one running along it) weigh most, then
+//    lines through states
 //    and overlapping labels, then triangles that are not equilateral,
 //    states lined up with nothing, lines much longer than the shortest,
 //    states left of the reset state, lines against the main flow, symmetry,
@@ -72,17 +84,34 @@
 //    user's own picks between pairs of layouts (test/layout/fixtures/
 //    preferences.json). Between equal scores, the drawing whose flow leaves
 //    the reset state further to the right wins (a loop clockwise from the
-//    top left).
+//    top left). A hub is scored as a hub: a reset state with more than five
+//    neighbours and states above, below and right of it has nothing "left
+//    of the reset state"; the lines of a state with nine or more neighbours
+//    are long only past the ring that holds them; a state linked to more
+//    than five others and to half of the others or more is not "lined up
+//    with nothing" half way between two of them, and each of its lines
+//    bowed round another state counts as a step too long.
 // 6. Repair. Candidates that still have crossings, overlaps or lines
 //    through states, and would lead with those gone (at most five, two when
-//    dense), are tried spread out a little and scored in their spread step;
+//    dense), are tried spread out a little (x1.25, x1.5). Room a drawing
+//    needed is free: a copy with fewer lines through states, overlapping
+//    labels or states too close than the drawing kept so far is scored in
+//    its own, spread step. Room it did not need is paid for: a copy spread
+//    further only to untangle crossings is scored in the step of the
+//    drawing kept, as the bigger drawing with the longer lines it is. A
+//    spread copy is kept if it has fewer problems and a better score than
+//    the drawing it was made from (of the two, the better scoring);
 //    whatever cannot be fixed is reported in TidyResult.issues.
 // 7. Polish. In the two best that repair would take, then the best two if
 //    within half again of the best score, a state with a long line tries the
 //    three free grid spots nearest its neighbours and moves to the one that
 //    improves the score most (the reset state never moves right of another).
-//    One budget of tries for all, min(48, 40000 / lines²). Repair and polish
-//    add a drawing only if no candidate has its positions.
+//    A wheel is left as shaped: a rim state moved in nearer the hub stands
+//    in the way of the spokes behind it.
+//    One budget of tries for all, min(48, 40000 / lines²); last, six of
+//    those at most go to the best spread copy that paid for its size and is
+//    not among them. Repair and polish add a drawing only if no candidate
+//    has its positions.
 
 import { FsmError } from "./model.ts";
 import type { FsmDiagram } from "./model.ts";
@@ -90,7 +119,7 @@ import { PARALLEL_GAP, labelLines, planDiagram, transitionLabel } from "./export
 import type { PlanOptions } from "./export/svg.ts";
 import { LABEL_SIZE, stateRadius, textWidth } from "./metrics.ts";
 
-import { GRID, WEIGHTS, crossCount, emptyScore, intersect, score, segDist } from "./layout-score.ts";
+import { ARROW_ROOM, GRID, SCREEN, WEIGHTS, crossCount, emptyScore, intersect, score, segDist } from "./layout-score.ts";
 import type { LayoutScore, Pt } from "./layout-score.ts";
 
 export { GRID, score };
@@ -120,7 +149,7 @@ export interface LayoutIssue {
 
 export interface TidyResult {
   score: LayoutScore;
-  /** The winning arrangement: grid, layers-right, layers-down, snake-k, ring-cxr, hub-triangle, hub-square, hub-wheel, hub-fan, or islands (several packed side by side). */
+  /** The winning arrangement: grid, layers-right, layers-down, snake-k, ring-cxr, hub-triangle, hub-square, hub-wheel, hub-fan, hub-box-cxr, hub-oval, hub-ring, or islands (several packed side by side). */
   arrangement: string;
   /** Triangles made equilateral, as their state ids. */
   triangles: string[][];
@@ -130,8 +159,8 @@ export interface TidyResult {
   issues: LayoutIssue[];
 }
 
-/** One finished arrangement: the laid-out copy, its score, and the grid step its distances are measured in. */
-interface Tried { score: LayoutScore; arrangement: string; d: FsmDiagram; sx: number; sy: number }
+/** One finished arrangement: the laid-out copy, its score, its grid step, and the step its score's distances are measured in when that is not its own (`unit`: a copy spread out in repair further than it needed room for, see there). */
+interface Tried { score: LayoutScore; arrangement: string; d: FsmDiagram; sx: number; sy: number; unit?: number }
 interface Laid { score: LayoutScore; arrangement: string; triangles: string[][]; candidates: LayoutScore[]; d: FsmDiagram; tried: Tried[] }
 
 /** A ranked candidate layout, as returned by layoutCandidates(). */
@@ -179,7 +208,7 @@ export function layoutCandidates(d: FsmDiagram, opts: TidyOptions = {}): LayoutC
   if (c.states.length === 0) return [];
   const islands = islandsOf(c);
   const laid = islands.length > 1 ? packIslands(c, islands, opts) : layoutIsland(c, opts);
-  return laid.tried.map((t) => ({ arrangement: t.arrangement, score: t.score, diagram: t.d, step: t.sx }));
+  return laid.tried.map((t) => ({ arrangement: t.arrangement, score: t.score, diagram: t.d, step: t.unit ?? t.sx }));
 }
 
 /**
@@ -273,21 +302,22 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
   // round and kept upright unless that is clearly worse (`turn` false: as it
   // is, for polish moves). Hub shapes are drawn as made: each already puts
   // the reset state where it wants it, and turned over one would only repeat
-  // another hub's shape.
-  const finishAs = (c: FsmDiagram, sx: number) => {
+  // another hub's shape. `unit` is the step the score measures in: the
+  // drawing's own, but for a copy spread out in repair (see there).
+  const finishAs = (c: FsmDiagram, sx: number, unit = sx) => {
     clearStartArrow(c, sx);
     clearStartArrow(c, sx, routeEdges(c));
     placeLoops(c);
-    return score(c, planDiagram(c, popts), sx);
+    return score(c, planDiagram(c, popts), unit);
   };
   // Candidates that finished turned over (the repair spreads them as made).
   const turned = new WeakSet<FsmDiagram>();
-  const finish = (c: FsmDiagram, sx: number, arrangement: string, turn = true) => {
+  const finish = (c: FsmDiagram, sx: number, arrangement: string, turn = true, unit = sx) => {
     forget(c);
-    if (!turn || arrangement.startsWith("hub-") || !startLow(c, g.init)) return finishAs(c, sx);
+    if (!turn || arrangement.startsWith("hub-") || !startLow(c, g.init)) return finishAs(c, sx, unit);
     const up = structuredClone(c);
     turnOver(up);
-    const su = finishAs(up, sx), sl = finishAs(c, sx);
+    const su = finishAs(up, sx, unit), sl = finishAs(c, sx, unit);
     if (mustFix(su) > mustFix(sl) || su.total > sl.total + UPRIGHT_MARGIN) return sl;
     c.states = up.states; c.transitions = up.transitions;
     turned.add(c);
@@ -354,6 +384,8 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
       for (const [name, pos] of rings(g, sx, sy)) consider(name, pos, sx, sy, true);
       // A state linked to all the others in their middle (or, being the reset state, on their left), drawn as shaped.
       for (const [name, pos] of hubs(g, sx, sy, R, drawn)) consider(name, pos, sx, sy, false, true);
+      // A state linked to many of the others in the middle, those round it in the order of their chain.
+      for (const [name, pos] of wheels(g, sx, sy, R)) consider(name, pos, sx, sy, false, true);
     }
   }
   // Finishing (routing, loops, labels, the score) costs about lines² per
@@ -382,11 +414,15 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
   const bad = (sc: LayoutScore) => sc.crossings + sc.throughStates + sc.labelOverlaps + sc.tooClose;
   // Only candidates that would lead with their problems gone are worth it (at most five, two for a dense drawing).
   const must = (sc: LayoutScore) => WEIGHTS.crossings * sc.crossings + WEIGHTS.throughStates * sc.throughStates + WEIGHTS.labelOverlaps * sc.labelOverlaps + WEIGHTS.tooClose * sc.tooClose;
+  // What room cures: a line through a state, a label on a label or on a state, two states too close.
+  const cramped = (sc: LayoutScore) => sc.throughStates + sc.labelOverlaps + sc.tooClose;
   const lead = tried[0].score.total;
   for (const cand of tried.filter((t) => bad(t.score) && t.score.total - must(t.score) < lead + 10).slice(0, dense ? 2 : 5)) {
     let cur = cand;
     for (const k of [1.25, 1.5]) {
       if (!bad(cur.score)) break;
+      // What the drawing kept so far still lacks room for, and the step it is scored in.
+      const room = cramped(cur.score), unit = cur.unit ?? cur.sx, own = cand.sx * k;
       const c = structuredClone(cand.d);
       // A turned candidate spreads as it was made, and finishing turns it
       // over again only if that is not clearly worse: spread, the two ways
@@ -394,8 +430,26 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
       // either way, but 14 crossings spread as made and 17 turned over).
       if (turned.has(cand.d)) turnOver(c);
       for (const s of c.states) { s.x = Math.round((s.x! * k) / GRID) * GRID; s.y = Math.round((s.y! * k) / GRID) * GRID; }
-      const sc = finish(c, cand.sx * k, cand.arrangement); // measured in its own (spread) step, like every other candidate
-      if (bad(sc) < bad(cur.score)) cur = { score: sc, arrangement: `${cand.arrangement} (spread)`, d: c, sx: cand.sx * k, sy: cand.sy * k };
+      // A copy that got room it lacked (fewer lines through states,
+      // overlapping labels, states too close than the drawing kept so far)
+      // is measured in its own, spread step, like every other candidate:
+      // the room was needed. (Than the drawing kept, not than any smaller
+      // copy: two_hubs15's x1.25 copy clears its line through a state for a
+      // crossing more and is not kept; the x1.5 copy clears it for nothing
+      // and must not pay for room that x1.25 copy had.) One spread further
+      // only to untangle crossings is measured in the step the kept drawing
+      // is, so it pays for what it is: a bigger drawing (x1.5 is 2.25 times the area, the
+      // states two thirds the size on screen) with longer lines. In its own
+      // step it was free, cheaper even (loops and margins do not grow with
+      // it), and won for one crossing in ten: gen12_5, 12 states, came out
+      // 1359 x 1446 px with the two crossings its 759 x 1026 px drawing has,
+      // rand24_12_8 1137 x 1062 px for none fewer. (With nothing cramped
+      // there is no room to gain: finished once, in the step it pays in.)
+      let sc = finish(c, own, cand.arrangement, true, room ? own : unit);
+      const free = room > 0 && cramped(sc) < room;
+      if (room && !free) sc = score(c, planDiagram(c, popts), unit);
+      // Fewer problems than as made, and the better scoring: of the two spreads, and than the drawing they were made from.
+      if (bad(sc) < bad(cand.score) && sc.total < cur.score.total) cur = { score: sc, arrangement: `${cand.arrangement} (spread)`, d: c, sx: own, sy: cand.sy * k, unit: free ? own : unit };
     }
     if (cur !== cand) add(cur);
   }
@@ -413,11 +467,24 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
   // and would lead with it gone (as in repair) are polished, and first: a
   // move can clear what spreading out could not. (cle_locked with labels
   // shown: the snake spread from the narrow spacing keeps one crossing and
-  // ranks fourth; polished, it is the clean winner.)
+  // ranks fourth; polished, it is the clean winner.) A hub in its rim is
+  // left as shaped: there every spoke is a long line, and a rim state moved
+  // in nearer the hub stands in the way of the spokes behind it
+  // (abort_chain12 and error_sink14 polished: two lines bowed round it).
   let budget = Math.min(48, Math.round(4e4 / Math.max(1, lines.length) ** 2));
   const fixable = tried.filter((t) => bad(t.score) && t.score.total - must(t.score) < tried[0].score.total + 10).slice(0, 2);
-  const polish = [...new Set([...fixable, ...tried.slice(0, 2).filter((c) => c.score.total <= 1.5 * tried[0].score.total)])];
+  const shaped = (t: Tried) => /^hub-(box|oval|ring)/.test(t.arrangement);
+  const polish = [...new Set([...fixable, ...tried.slice(0, 2).filter((c) => c.score.total <= 1.5 * tried[0].score.total)])].filter((c) => !shaped(c));
+  // A copy that pays for being spread (see repair) ranks by its long lines
+  // until a move pulls them in, and so misses the best two it used to be
+  // among. The best such is polished too: last, and with six tries at most
+  // (three spots each for two states), to stay quick. (gen18_2: the x1.5
+  // copy of a grid ranks fourth; one move takes two of its 13 crossings and
+  // it wins, as it did when the spread was free.)
+  const paid = tried.find((t) => t.unit !== undefined && t.unit !== t.sx && t.score.total <= 1.5 * tried[0].score.total && !shaped(t) && !polish.includes(t));
+  if (paid) polish.push(paid);
   for (const cand of polish) {
+    if (cand === paid) budget = Math.min(budget, 6);
     let cur = cand;
     const gap = 2 * R + 40;
     for (let round = 0; round < 3 && budget > 0; round++) {
@@ -447,7 +514,7 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
           const c = structuredClone(cur.d);
           const s = c.states.find((x) => x.id === id)!;
           s.x = Math.round(p.x / GRID) * GRID; s.y = Math.round(p.y / GRID) * GRID;
-          const sc = finish(c, cur.sx, cand.arrangement, false);
+          const sc = finish(c, cur.sx, cand.arrangement, false, cur.unit);
           if (sc.total < (next ?? cur).score.total - 1e-6) next = { ...cur, score: sc, d: c, arrangement: cand.arrangement.endsWith("(polished)") ? cand.arrangement : `${cand.arrangement} (polished)` };
         }
         if (next) break;
@@ -461,7 +528,7 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
     // crossing more).
     if (cur !== cand && startLow(cur.d, g.init)) {
       const c = structuredClone(cur.d);
-      cur = { ...cur, score: finish(c, cur.sx, cand.arrangement), d: c };
+      cur = { ...cur, score: finish(c, cur.sx, cand.arrangement, true, cur.unit), d: c };
     }
     if (cur !== cand) add(cur);
   }
@@ -987,6 +1054,217 @@ function hubs(g: Graph, sx: number, sy: number, R: number, drawn: (a: string, b:
   return out;
 }
 
+/**
+ * A state linked to many of the others (the IDLE every step aborts to, an
+ * error state every step can fall into, a dispatcher's IDLE: at least five
+ * lines, to half the other states or more) drawn in the middle with the
+ * states it links to round it, in the order of their own chain or loop, so
+ * its lines spread out instead of bunching and the chain reads round it like
+ * a clock. The rim is tried on the edge of a rectangle of grid cells (sizes
+ * whose spokes all stay clear of the states; cells left over are left out
+ * longest spoke first, both sides alike) and on an oval a little wider than
+ * tall, its states one step apart (a circle when lines run both ways between
+ * the hub and a neighbour: two lines a spoke need the spokes at even
+ * angles). States not linked to the hub (the middle of a dispatcher's
+ * chains) go outside the rim, next to their neighbours, so each chain is a
+ * petal. A hub that is the reset state keeps its left free for the start
+ * arrow. The score decides between these and everything else.
+ */
+function wheels(g: Graph, sx: number, sy: number, R: number): Array<[string, Pos]> {
+  const n = g.ids.length;
+  if (n < 6 || n > 40) return [];
+  const edges = edgePairs(g);
+  const gap = 2 * R + 60;
+  const out: Array<[string, Pos]> = [];
+  // The cost of the lines between the states placed so far, as for the grid:
+  // length, slants, long lines, lines through states, crossings, states left of the reset state.
+  const quick = (pos: Pos) => {
+    let c = 0;
+    const segs = edges.filter(([a, b]) => pos.has(a) && pos.has(b)).map(([a, b]) => [pos.get(a)!, pos.get(b)!, a, b] as const);
+    for (let i = 0; i < segs.length; i++) {
+      const [p, q, a, b] = segs[i];
+      const dx = Math.abs(p.x - q.x) / sx, dy = Math.abs(p.y - q.y) / sy, len = Math.hypot(dx, dy);
+      c += len + (dx > 0.1 && dy > 0.1 ? 0.4 : 0) + 4 * Math.max(0, len - 1.5);
+      for (const [id, s] of pos) if (id !== a && id !== b && segDist(s, p, q) < R + 10) c += 15;
+      for (let j = i + 1; j < segs.length; j++) {
+        const [r, s2, e, f] = segs[j];
+        if (e !== a && e !== b && f !== a && f !== b && intersect(p, q, r, s2)) c += 10;
+      }
+    }
+    const o = pos.get(g.init);
+    if (o) for (const p of pos.values()) if (p.x < o.x - GRID) c += 15;
+    return c;
+  };
+  const byDegree = g.ids.filter((id) => g.nb.get(id)!.size >= Math.max(5, (n - 1) / 2)).sort((a, b) => g.nb.get(b)!.size - g.nb.get(a)!.size);
+  for (const hub of byDegree.slice(0, 2)) {
+    const spokes = g.nb.get(hub)!;
+    // The others in the order of their chains: each piece left when the hub
+    // is taken away is walked from an end (the one the hub leads to, if any;
+    // a loop from the reset state), along the lines' directions first.
+    const seen = new Set([hub]);
+    const order: string[] = [];
+    const walk = (u: string) => { seen.add(u); order.push(u); for (const v of [...g.out.get(u)!, ...g.nb.get(u)!]) if (!seen.has(v)) walk(v); };
+    for (const first of g.ids) {
+      if (seen.has(first)) continue;
+      const piece = [first], inPiece = new Set(piece);
+      for (let i = 0; i < piece.length; i++) for (const v of g.nb.get(piece[i])!) if (v !== hub && !inPiece.has(v)) { inPiece.add(v); piece.push(v); }
+      const rank = (id: string) => ([...g.nb.get(id)!].filter((v) => v !== hub).length <= 1 ? 0 : 4) + (id === g.init ? 0 : 2) + (g.out.get(hub)!.includes(id) ? 0 : 1);
+      walk(g.ids.filter((id) => inPiece.has(id)).reduce((best, id) => (rank(id) < rank(best) ? id : best)));
+    }
+    const rim = order.filter((id) => spokes.has(id)), outer = order.filter((id) => !spokes.has(id));
+    const m = rim.length;
+    const home = hub === g.init;
+    // Lines both ways between the hub and a neighbour are drawn as two, side by side: such a spoke is wider.
+    const half = rim.some((id) => g.out.get(hub)!.includes(id) && g.out.get(id)!.includes(hub)) ? PARALLEL_GAP / 2 : 0;
+    // The start arrow comes in from the left of a reset hub: the spoke to p
+    // must leave it room, as the score counts it (ARROW_ROOM, past the state's edge).
+    const tail = { x: -(R + 38), y: 0 }, head = { x: -(R + 1), y: 0 };
+    const crowds = (p: Pt) => {
+      if (!home || p.x >= 0) return false;
+      const l = Math.hypot(p.x, p.y);
+      for (let t = R + 4; t <= R + 44; t += 4) if (segDist({ x: (p.x / l) * t, y: (p.y / l) * t }, tail, head) < ARROW_ROOM + half) return true;
+      return false;
+    };
+    // Spokes at less than this angle bunch up (two wide ones cross each other outside the hub).
+    const narrow = half ? 2 * Math.asin(Math.min(1, half / (R + 6))) : Math.PI / 12;
+    const bunched = (cells: Pt[]) => cells.filter((p, i) => {
+      const q = cells[(i + 1) % cells.length], d = Math.atan2(q.y, q.x) - Math.atan2(p.y, p.x);
+      return cells.length > 1 && Math.abs(Math.atan2(Math.sin(d), Math.cos(d))) < narrow;
+    }).length;
+
+    // Rim shapes: places round the hub (px from it), clockwise from the left, and what counts as inside the rim.
+    const shapes: Array<{ name: string; cells: Pt[]; inside: (p: Pt) => boolean; rank: number }> = [];
+    for (let r = 3; r <= 7; r++) for (let c = r; c <= Math.min(9, r + 3); c++) {
+      let cells: Pt[] = [];
+      for (let i = 0; i < c; i++) for (let j = 0; j < r; j++) if (i === 0 || j === 0 || i === c - 1 || j === r - 1) cells.push({ x: (i - (c - 1) / 2) * sx, y: (j - (r - 1) / 2) * sy });
+      cells = cells.filter((p) => !crowds(p));
+      let spare = cells.length - m;
+      if (spare < 0 || spare > 4) continue;
+      // Cells left over: leave out the ones furthest from the hub, all that mirror each other together.
+      const far = (p: Pt) => Math.hypot(p.x, p.y);
+      const alike = new Map<string, Pt[]>();
+      for (const p of cells) { const k = `${Math.abs(p.x)},${Math.abs(p.y)}`; if (!alike.has(k)) alike.set(k, []); alike.get(k)!.push(p); }
+      const groups = [...alike.values()].sort((p, q) => far(q[0]) - far(p[0]));
+      const drop = new Set<Pt>();
+      for (const ps of groups) if (ps.length <= spare) { ps.forEach((p) => drop.add(p)); spare -= ps.length; }
+      // None that fit: opposite corners.
+      for (const ps of groups) for (const p of [...ps].sort((p, q) => p.x * p.y - q.x * q.y || p.x - q.x)) if (spare > 0 && !drop.has(p)) { drop.add(p); spare--; }
+      cells = cells.filter((p) => !drop.has(p)).sort((p, q) => Math.atan2(p.y, p.x) - Math.atan2(q.y, q.x));
+      // Every spoke clear of the other states on the rim.
+      if (cells.some((p) => cells.some((q) => q !== p && segDist(q, { x: 0, y: 0 }, p) < R + 16))) continue;
+      const w = (c - 1) * sx + gap, h = (r - 1) * sy + gap;
+      shapes.push({ name: `hub-box-${c}x${r}`, cells, inside: (p) => Math.abs(p.x) < ((c - 1) / 2) * sx - 1 && Math.abs(p.y) < ((r - 1) / 2) * sy - 1, rank: bunched(cells) * 1e7 + w * h * (1 + Math.abs(Math.log(w / h / SCREEN))) });
+    }
+    // The three smallest with the fewest spokes bunched, nearest a screen's shape.
+    shapes.sort((a, b) => a.rank - b.rank).splice(3);
+    const round = roundRim(m, home, half > 0, sx, sy, R, (cells) => !cells.some(crowds), (cells) => !half || !bunched(cells));
+    if (round) shapes.push({ name: half ? "hub-ring" : "hub-oval", cells: round.cells, inside: (p) => (p.x / round.a) ** 2 + (p.y / round.b) ** 2 < 0.98, rank: 0 });
+
+    for (const { name, cells, inside } of shapes) {
+      // Turn the rim so its lines and the reset state's place cost least; equal, the first state at the top left and the rest clockwise.
+      let best: Pos | undefined, bestCost = Infinity;
+      for (const dir of [1, -1]) for (let k = 0; k < m; k++) {
+        const pos: Pos = new Map([[hub, { x: 0, y: 0 }]]);
+        rim.forEach((id, i) => pos.set(id, cells[(((k + dir * i) % m) + m) % m]));
+        // The start arrow comes in through the gap in the chain, not under one of its lines.
+        const c = quick(pos) + (home && g.nb.get(rim[(((-k * dir) % m) + m) % m])!.has(rim[(((-k * dir - dir) % m) + m) % m]) ? 1 : 0);
+        if (c < bestCost - 1e-9) { bestCost = c; best = pos; }
+      }
+      if (!best) continue;
+      // The others, those with most neighbours placed first: outside the rim, where their lines are shortest and clear.
+      const todo = new Set(outer);
+      let ok = true;
+      while (todo.size && ok) {
+        const placed = (id: string) => [...g.nb.get(id)!].filter((v) => best!.has(v));
+        const id = [...todo].reduce((a, b) => (placed(b).length > placed(a).length ? b : a));
+        const ns = placed(id).map((v) => best!.get(v)!);
+        const spots: Pt[] = [];
+        // Straight out from the middle of its neighbours, and the eight cells round each of them.
+        const mid = { x: ns.reduce((s, p) => s + p.x, 0) / ns.length, y: ns.reduce((s, p) => s + p.y, 0) / ns.length };
+        const far = Math.hypot(mid.x / sx, mid.y / sy) || 1;
+        spots.push({ x: Math.round((mid.x + mid.x / far) / GRID) * GRID, y: Math.round((mid.y + mid.y / far) / GRID) * GRID });
+        for (const p of ns) for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) if (i || j) spots.push({ x: p.x + i * sx, y: p.y + j * sy });
+        let spot: Pt | undefined, spotCost = Infinity;
+        const before = quick(best);
+        for (const p of spots) {
+          if (inside(p) || (home && p.y === 0 && p.x < 0) || [...best.values()].some((q) => Math.hypot(p.x - q.x, p.y - q.y) < gap)) continue;
+          best.set(id, p);
+          // Lined up with another state, and no further out than need be.
+          const c = quick(best) - before + ([...best].some(([v, q]) => v !== id && (Math.abs(q.x - p.x) < 1 || Math.abs(q.y - p.y) < 1)) ? 0 : 0.5) + 0.05 * Math.hypot(p.x / sx, p.y / sy);
+          if (c < spotCost - 1e-9) { spotCost = c; spot = p; }
+        }
+        best.delete(id);
+        if (spot) best.set(id, spot); else ok = false;
+        todo.delete(id);
+      }
+      if (ok) out.push([name, best]);
+    }
+  }
+  return out;
+}
+
+/**
+ * Places for m states on an oval round a hub (px from it, clockwise from the
+ * left, on the grid): a little wider than tall, like a screen (or a circle,
+ * for even angles), neighbours one step apart along it, the top and bottom
+ * halves mirrored so every state lines up with another. For a hub that is
+ * the reset state the left end falls between two states, with as many places
+ * (or half places) left empty there as the start arrow needs: `free` says
+ * whether a set of places leaves it room. A set that is not `even` enough is
+ * tried a little larger, where the grid rounds the places differently.
+ */
+function roundRim(m: number, home: boolean, circle: boolean, sx: number, sy: number, R: number, free: (cells: Pt[]) => boolean, even: (cells: Pt[]) => boolean): { cells: Pt[]; a: number; b: number } | undefined {
+  if (m < 5) return undefined;
+  const step = (sx + sy) / 2;
+  // Ramanujan's perimeter of an ellipse with half axes a and b.
+  const around = (a: number, b: number) => Math.PI * (3 * (a + b) - Math.sqrt((3 * a + b) * (a + 3 * b)));
+  // As wide as a screen with the states' own size counted in.
+  const wide = (b: number) => (circle ? b : SCREEN * (b + R) - R);
+  const snap = (v: number) => Math.sign(v) * Math.round(Math.abs(v) / GRID) * GRID;
+  for (let empty = 0; empty <= (home ? 4 : 0); empty += 0.5) {
+    const slots = m + empty;
+    // At least a step from the hub.
+    let lo = sy, hi = 40 * sy;
+    if (around(wide(lo), lo) < slots * step) {
+      for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; if (around(wide(mid), mid) < slots * step) lo = mid; else hi = mid; }
+    }
+    let fallback: { cells: Pt[]; a: number; b: number } | undefined;
+    for (let grow = 0; grow < 6; grow++) {
+      const b = lo + grow * GRID, a = circle ? b : Math.max(wide(b), sx);
+      // Points along the ellipse from the left end, clockwise (up first), with the length walked so far.
+      const N = 2000, pts: Array<{ p: Pt; at: number }> = [];
+      let walked = 0, prev = { x: -a, y: 0 };
+      for (let i = 0; i <= N; i++) {
+        const t = Math.PI + (2 * Math.PI * i) / N, p = { x: a * Math.cos(t), y: b * Math.sin(t) };
+        walked += Math.hypot(p.x - prev.x, p.y - prev.y);
+        pts.push({ p, at: walked });
+        prev = p;
+      }
+      // A reset hub: the empty places centred on the left end; another hub: a state there.
+      const first = home ? (empty + 1) / 2 : 0;
+      const cells: Pt[] = [];
+      let k = 0;
+      for (let i = 0; i < m; i++) {
+        const want = ((i + first) / slots) * walked;
+        while (pts[k].at < want) k++;
+        cells.push({ x: snap(pts[k].p.x), y: snap(pts[k].p.y) });
+      }
+      // The bottom half mirrors the top (rounding must not break it).
+      for (let i = 0; i < m; i++) {
+        const j = home ? m - 1 - i : (m - i) % m;
+        if (j === i) cells[i].y = 0; else if (j > i) cells[j] = { x: cells[i].x, y: -cells[i].y };
+      }
+      const close = Math.min(...cells.map((p, i) => Math.hypot(p.x - cells[(i + 1) % m].x, p.y - cells[(i + 1) % m].y)));
+      if (close < 2 * R + 60) continue;
+      if (!free(cells)) break; // more room at the left end is needed, not a bigger oval
+      if (even(cells)) return { cells, a, b };
+      fallback ??= { cells, a, b };
+    }
+    if (fallback) return fallback;
+  }
+  return undefined;
+}
+
 /** The states in `ids` in the order of a walk along their lines, jumping to the next unvisited one when stuck. */
 function walkOrder(g: Graph, ids: string[]): string[] {
   const inside = new Set(ids), seen = new Set<string>(), out: string[] = [];
@@ -1484,7 +1762,7 @@ function clearStartArrow(d: FsmDiagram, L: number, lines: Pt[][] = []) {
       if (along > 0 && across < r + stateRadius(d, s) + 10) near = Math.min(near, along);
     }
     const p = { x: init.x! + ux * (r + 1), y: init.y! + uy * (r + 1) }, q = { x: init.x! + ux * (r + 40), y: init.y! + uy * (r + 40) };
-    const cut = lines.some((pts) => crossCount([p, q], pts, circles) > 0 || pts.some((o) => (o.x - init.x!) ** 2 + (o.y - init.y!) ** 2 > (r + 4) ** 2 && segDist(o, p, q) < 8));
+    const cut = lines.some((pts) => crossCount([p, q], pts, circles) > 0 || pts.some((o) => (o.x - init.x!) ** 2 + (o.y - init.y!) ** 2 > (r + 4) ** 2 && segDist(o, p, q) < ARROW_ROOM));
     return cut ? 0 : near;
   };
   const current = init.initialAngle ?? Math.PI;

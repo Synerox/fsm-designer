@@ -84,6 +84,8 @@ Choose **File ▸ Import Verilog…** (Ctrl + I) and paste or open code that con
 <img src="docs/images/verilog-import-en.png" alt="A traffic-light controller imported from Verilog, with the import report" width="760">
 </div>
 
+An imported diagram starts with the text on its lines (conditions and outputs) hidden, so the states and arrows read first. Pick **All** under "Text on lines" in the import dialog, or switch at the bottom right afterwards, to show it.
+
 Supported styles include one-, two- and three-block `always` FSMs, `case`/`casez`/`if-else`, states defined with `parameter`/`localparam`/`` `define ``/`typedef enum`, and one-hot encodings. When a file holds several state machines, you choose which one to draw. Details are in [packages/core/src/import/README.md](packages/core/src/import/README.md).
 
 ### Moore and Mealy
