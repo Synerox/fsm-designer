@@ -95,10 +95,10 @@
 //    through states, and would lead with those gone (at most five, two when
 //    dense), are tried spread out a little (x1.25, x1.5). Room a drawing
 //    needed is free: a copy with fewer lines through states, overlapping
-//    labels or states too close than any smaller one is scored in its own,
-//    spread step. Room it did not need is paid for: a copy spread further
-//    only to untangle crossings is scored in the step of the smallest that
-//    had the room, as the bigger drawing with the longer lines it is. A
+//    labels or states too close than the drawing kept so far is scored in
+//    its own, spread step. Room it did not need is paid for: a copy spread
+//    further only to untangle crossings is scored in the step of the
+//    drawing kept, as the bigger drawing with the longer lines it is. A
 //    spread copy is kept if it has fewer problems and a better score than
 //    the drawing it was made from (of the two, the better scoring);
 //    whatever cannot be fixed is reported in TidyResult.issues.
@@ -419,9 +419,10 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
   const lead = tried[0].score.total;
   for (const cand of tried.filter((t) => bad(t.score) && t.score.total - must(t.score) < lead + 10).slice(0, dense ? 2 : 5)) {
     let cur = cand;
-    let room = cramped(cand.score), unit = cand.sx; // the least cramped so far, and the step of the smallest drawing that is so
     for (const k of [1.25, 1.5]) {
       if (!bad(cur.score)) break;
+      // What the drawing kept so far still lacks room for, and the step it is scored in.
+      const room = cramped(cur.score), unit = cur.unit ?? cur.sx, own = cand.sx * k;
       const c = structuredClone(cand.d);
       // A turned candidate spreads as it was made, and finishing turns it
       // over again only if that is not clearly worse: spread, the two ways
@@ -430,22 +431,25 @@ function layoutIsland(d: FsmDiagram, opts: TidyOptions): Laid {
       if (turned.has(cand.d)) turnOver(c);
       for (const s of c.states) { s.x = Math.round((s.x! * k) / GRID) * GRID; s.y = Math.round((s.y! * k) / GRID) * GRID; }
       // A copy that got room it lacked (fewer lines through states,
-      // overlapping labels, states too close than any smaller one) is
-      // measured in its own, spread step, like every other candidate: the
-      // room was needed. One spread further only to untangle crossings is
-      // measured in the step of the smallest that has that room, so it pays
-      // for what it is: a bigger drawing (x1.5 is 2.25 times the area, the
+      // overlapping labels, states too close than the drawing kept so far)
+      // is measured in its own, spread step, like every other candidate:
+      // the room was needed. (Than the drawing kept, not than any smaller
+      // copy: two_hubs15's x1.25 copy clears its line through a state for a
+      // crossing more and is not kept; the x1.5 copy clears it for nothing
+      // and must not pay for room that x1.25 copy had.) One spread further
+      // only to untangle crossings is measured in the step the kept drawing
+      // is, so it pays for what it is: a bigger drawing (x1.5 is 2.25 times the area, the
       // states two thirds the size on screen) with longer lines. In its own
       // step it was free, cheaper even (loops and margins do not grow with
       // it), and won for one crossing in ten: gen12_5, 12 states, came out
       // 1359 x 1446 px with the two crossings its 759 x 1026 px drawing has,
       // rand24_12_8 1137 x 1062 px for none fewer. (With nothing cramped
       // there is no room to gain: finished once, in the step it pays in.)
-      let sc = finish(c, cand.sx * k, cand.arrangement, true, room ? cand.sx * k : unit);
-      if (room && cramped(sc) < room) { room = cramped(sc); unit = cand.sx * k; }
-      else if (room) sc = score(c, planDiagram(c, popts), unit);
+      let sc = finish(c, own, cand.arrangement, true, room ? own : unit);
+      const free = room > 0 && cramped(sc) < room;
+      if (room && !free) sc = score(c, planDiagram(c, popts), unit);
       // Fewer problems than as made, and the better scoring: of the two spreads, and than the drawing they were made from.
-      if (bad(sc) < bad(cand.score) && sc.total < cur.score.total) cur = { score: sc, arrangement: `${cand.arrangement} (spread)`, d: c, sx: cand.sx * k, sy: cand.sy * k, unit };
+      if (bad(sc) < bad(cand.score) && sc.total < cur.score.total) cur = { score: sc, arrangement: `${cand.arrangement} (spread)`, d: c, sx: own, sy: cand.sy * k, unit: free ? own : unit };
     }
     if (cur !== cand) add(cur);
   }
